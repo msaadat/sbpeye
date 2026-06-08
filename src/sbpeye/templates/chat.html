@@ -1,0 +1,371 @@
+{% extends "_base.html" %}
+
+{% block title %}Chat - SBPEye{% endblock %}
+
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/marked@14.1.3/marked.min.js"></script>
+<style>
+.chat-bubble h1, .chat-bubble h2, .chat-bubble h3 { font-weight: 600; margin: 0.75rem 0 0.5rem; }
+.chat-bubble h1 { font-size: 1.1rem; }
+.chat-bubble h2 { font-size: 1rem; }
+.chat-bubble h3 { font-size: 0.9rem; }
+.chat-bubble p { margin: 0.4rem 0; }
+.chat-bubble ul, .chat-bubble ol { margin: 0.4rem 0; padding-left: 1.2rem; }
+.chat-bubble li { margin: 0.15rem 0; }
+.chat-bubble code { background: rgba(0,0,0,0.07); padding: 0.1rem 0.3rem; border-radius: 4px; font-size: 0.85em; font-family: ui-monospace, monospace; }
+.dark .chat-bubble code { background: rgba(255,255,255,0.12); }
+.chat-bubble pre { background: rgba(0,0,0,0.07); padding: 0.6rem; border-radius: 6px; overflow-x: auto; margin: 0.5rem 0; }
+.dark .chat-bubble pre { background: rgba(255,255,255,0.08); }
+.chat-bubble pre code { background: none; padding: 0; }
+.chat-bubble blockquote { border-left: 3px solid #cbd5e1; padding-left: 0.75rem; margin: 0.5rem 0; color: #64748b; }
+.dark .chat-bubble blockquote { border-left-color: #475569; color: #94a3b8; }
+.chat-bubble table { border-collapse: collapse; margin: 0.5rem 0; font-size: 0.85em; }
+.chat-bubble th, .chat-bubble td { border: 1px solid #e2e8f0; padding: 0.3rem 0.5rem; }
+.dark .chat-bubble th, .dark .chat-bubble td { border-color: #334155; }
+.chat-bubble th { background: rgba(0,0,0,0.04); font-weight: 600; }
+.dark .chat-bubble th { background: rgba(255,255,255,0.06); }
+.chat-bubble strong { font-weight: 600; }
+.chat-bubble a { color: #0d9a4b; text-decoration: underline; }
+.dark .chat-bubble a { color: #3dd87e; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div x-data="chatApp()" class="flex h-[calc(100vh-5rem)] gap-4">
+    <!-- Sidebar -->
+    <div class="w-80 flex-shrink-0 bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 flex flex-col overflow-hidden">
+        <!-- Header -->
+        <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-800">
+            <h2 class="font-semibold text-gray-900 dark:text-gray-100 text-sm">Chat Context</h2>
+            <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Selected circulars for this conversation</p>
+        </div>
+
+        <!-- Selected circulars -->
+        <div class="px-4 py-3 border-b border-gray-100 dark:border-gray-800">
+            <div class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2 uppercase tracking-wider">Selected</div>
+            <div x-show="selectedCirculars.length === 0" class="text-xs text-gray-400 dark:text-gray-500 py-2">
+                No circulars selected. Search below or come from a search result.
+            </div>
+            <div class="space-y-1.5 max-h-48 overflow-y-auto">
+                <template x-for="c in selectedCirculars" :key="c.id">
+                    <div class="flex items-center gap-1.5 bg-sbp-50 dark:bg-sbp-900/30 border border-sbp-200 dark:border-sbp-800 rounded-md px-2 py-1.5 group">
+                        <div class="flex-1 min-w-0">
+                            <p class="text-xs font-medium text-gray-900 dark:text-gray-100 truncate" x-text="c.title"></p>
+                            <p class="text-[10px] text-gray-500 dark:text-gray-400" x-text="c.department + ' · ' + (c.reference || c.date || 'N/A')"></p>
+                        </div>
+                        <button @click="removeSelected(c.id)" class="p-0.5 rounded hover:bg-red-100 dark:hover:bg-red-900/30 text-gray-400 hover:text-red-600 dark:hover:text-red-400 flex-shrink-0 transition-colors">
+                            <i data-lucide="x" class="w-3 h-3"></i>
+                        </button>
+                    </div>
+                </template>
+            </div>
+            <div class="flex items-center justify-between mt-2 pt-2 border-t border-gray-100 dark:border-gray-800">
+                <span class="text-xs text-gray-500 dark:text-gray-400"><span x-text="selectedCirculars.length"></span> selected</span>
+                <button x-show="selectedCirculars.length > 0" @click="selectedCirculars = []" class="text-xs text-red-500 hover:text-red-600 dark:hover:text-red-400 transition-colors">Clear all</button>
+            </div>
+        </div>
+
+        <!-- Search -->
+        <div class="px-3 py-2 border-b border-gray-100 dark:border-gray-800">
+            <div class="relative">
+                <i data-lucide="search" class="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400"></i>
+                <input type="search" x-model="searchQuery" placeholder="Search circulars..."
+                       class="w-full pl-8 pr-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-sbp-500/50">
+            </div>
+        </div>
+
+        <!-- Results list -->
+        <div class="flex-1 overflow-y-auto px-3 py-2 space-y-1">
+            <div class="text-xs text-gray-500 dark:text-gray-400 mb-1 px-1">Search results</div>
+            <template x-for="c in filteredCirculars" :key="c.id">
+                <div class="w-full text-left px-2.5 py-2 rounded-lg border border-transparent hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors group">
+                    <div class="flex items-center gap-2">
+                        <div class="flex-1 min-w-0">
+                            <p class="text-xs font-medium text-gray-900 dark:text-gray-100 truncate" x-text="c.title"></p>
+                            <p class="text-[10px] text-gray-500 dark:text-gray-400" x-text="c.department + ' · ' + (c.date || 'N/A')"></p>
+                        </div>
+                        <button x-show="!isSelected(c)" @click="addSelected(c)"
+                                class="p-1 rounded-md text-gray-400 hover:text-sbp-600 hover:bg-sbp-50 dark:hover:bg-sbp-900/30 flex-shrink-0 transition-colors"
+                                title="Add to chat">
+                            <i data-lucide="plus" class="w-3.5 h-3.5"></i>
+                        </button>
+                        <span x-show="isSelected(c)"
+                              class="text-xs text-sbp-600 dark:text-sbp-400 font-medium flex-shrink-0 flex items-center gap-0.5">
+                            <i data-lucide="check" class="w-3.5 h-3.5"></i> Added
+                        </span>
+                    </div>
+                </div>
+            </template>
+            <div x-show="searchLoading" class="text-xs text-gray-400 dark:text-gray-500 text-center py-4">
+                Searching...
+            </div>
+            <div x-show="!searchLoading && filteredCirculars.length === 0 && searchQuery" class="text-xs text-gray-400 dark:text-gray-500 text-center py-4">
+                No circulars found.
+            </div>
+        </div>
+    </div>
+
+    <!-- Chat Area -->
+    <div class="flex-1 flex flex-col bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden">
+        <!-- Session tabs -->
+        <div class="px-4 py-2 border-b border-gray-200 dark:border-gray-800 flex items-center gap-2 overflow-x-auto">
+            <template x-for="session in sessions" :key="session.id">
+                <div class="flex items-center gap-0.5 rounded-md border transition-colors whitespace-nowrap"
+                     :class="currentSessionId === session.id ? 'bg-sbp-50 dark:bg-sbp-900/30 text-sbp-700 dark:text-sbp-300 border-sbp-500 dark:border-sbp-400' : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 border-transparent'">
+                    <button @click="loadSession(session.id)"
+                            class="px-3 py-1 text-xs font-medium rounded-l-md flex-shrink-0">
+                        <span x-text="session.title || 'New Chat'"></span>
+                    </button>
+                    <button @click="deleteSession(session.id)"
+                            class="px-1 py-1 text-gray-400 hover:text-red-500 dark:hover:text-red-400 rounded-r-md flex-shrink-0 transition-colors"
+                            title="Delete chat">
+                        <i data-lucide="x" class="w-3 h-3"></i>
+                    </button>
+                </div>
+            </template>
+            <button @click="newSession()" class="px-2 py-1 text-xs text-gray-500 dark:text-gray-400 hover:text-sbp-600 dark:hover:text-sbp-400 transition-colors flex-shrink-0">
+                <i data-lucide="plus" class="w-4 h-4"></i>
+            </button>
+        </div>
+
+        <!-- Messages -->
+        <div class="flex-1 overflow-y-auto p-4 space-y-4" id="chat-messages">
+            <template x-if="messages.length === 0">
+                <div class="flex flex-col items-center justify-center h-full text-center">
+                    <i data-lucide="message-square" class="w-12 h-12 text-gray-300 dark:text-gray-600 mb-3"></i>
+                    <h3 class="text-lg font-medium text-gray-400 dark:text-gray-500">Chat with Circulars</h3>
+                    <p class="text-sm text-gray-400 dark:text-gray-500 mt-1 max-w-md">Select circulars from the sidebar and ask questions. The AI will analyze the selected circulars and provide answers based on their content.</p>
+                </div>
+            </template>
+            <template x-for="msg in messages" :key="msg.id">
+                <div :class="msg.role === 'user' ? 'flex justify-end' : 'flex justify-start'">
+                    <div :class="msg.role === 'user' ? 'bg-sbp-600 text-white' : 'bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100'"
+                         class="chat-bubble max-w-[80%] px-4 py-2.5 rounded-2xl text-sm leading-relaxed"
+                         x-html="renderMarkdown(msg.content)">
+                    </div>
+                </div>
+            </template>
+        </div>
+
+        <!-- Input -->
+        <div class="px-4 py-3 border-t border-gray-200 dark:border-gray-800">
+            <div class="flex items-center gap-2">
+                <input type="text" x-model="inputMessage" @keydown.enter="sendMessage()" placeholder="Ask about the selected circulars..."
+                       :disabled="sending"
+                       class="flex-1 px-4 py-2.5 text-sm rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-sbp-500/50 focus:border-sbp-500 transition-colors disabled:opacity-50">
+                <button @click="sendMessage()" :disabled="sending || !inputMessage.trim()"
+                        class="px-4 py-2.5 text-sm font-medium rounded-xl bg-sbp-600 hover:bg-sbp-700 text-white transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed">
+                    <span x-show="!sending">Send</span>
+                    <span x-show="sending">...</span>
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+function chatApp() {
+    return {
+        searchQuery: '',
+        allCirculars: [],
+        selectedCirculars: [],
+        sessions: [],
+        currentSessionId: null,
+        messages: [],
+        inputMessage: '',
+        sending: false,
+        searchResults: [],
+        searchLoading: false,
+        searchDebounce: null,
+
+        renderMarkdown(content) {
+            if (!content) return '';
+            try {
+                if (typeof marked !== 'undefined') {
+                    return marked.parse(content, { breaks: true, gfm: true });
+                }
+            } catch (e) {
+                console.error('Markdown parse error:', e);
+            }
+            return content.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
+        },
+
+        get filteredCirculars() {
+            if (this.searchQuery && this.searchQuery.length >= 2) {
+                return this.searchResults;
+            }
+            return [];
+        },
+
+        async init() {
+            await this.loadSessions();
+
+            this.$watch('searchQuery', (q) => {
+                if (this.searchDebounce) clearTimeout(this.searchDebounce);
+                if (!q || q.length < 2) {
+                    this.searchResults = [];
+                    return;
+                }
+                this.searchDebounce = setTimeout(async () => {
+                    this.searchLoading = true;
+                    try {
+                        const resp = await fetch('/api/circulars/search?q=' + encodeURIComponent(q));
+                        this.searchResults = await resp.json();
+                    } catch (e) {
+                        this.searchResults = [];
+                    }
+                    this.searchLoading = false;
+                    this.$nextTick(() => lucide.createIcons());
+                }, 300);
+            });
+
+            // Pre-select circulars from URL query param
+            const params = new URLSearchParams(window.location.search);
+            const preselectIds = params.get('circular_ids');
+            if (preselectIds) {
+                const ids = preselectIds.split(',');
+                // Fetch any circulars that are not in the recent list
+                const missingIds = ids.filter(function(id) {
+                    return !this.allCirculars.some(function(c) { return c.id === id; });
+                }.bind(this));
+                for (let i = 0; i < missingIds.length; i++) {
+                    try {
+                        const resp = await fetch('/api/circulars/' + missingIds[i]);
+                        if (resp.ok) {
+                            const c = await resp.json();
+                            this.allCirculars.push({
+                                id: c.id,
+                                title: c.title,
+                                department: c.department,
+                                reference: c.reference,
+                                date: c.date,
+                                url: c.url,
+                                summary: c.summary,
+                                tags: c.tags,
+                                status: c.status,
+                            });
+                        }
+                    } catch (e) {
+                        console.error('Failed to fetch circular', missingIds[i], e);
+                    }
+                }
+                // Now select them
+                ids.forEach(function(id) {
+                    const c = this.allCirculars.find(function(x) { return x.id === id; });
+                    if (c && !this.selectedCirculars.some(function(s) { return s.id === c.id; })) {
+                        this.selectedCirculars.push(c);
+                    }
+                }.bind(this));
+                // Clean up the URL so a refresh doesn't re-add them
+                if (window.history.replaceState) {
+                    window.history.replaceState({}, document.title, '/chat');
+                }
+            }
+
+            this.$nextTick(() => {
+                lucide.createIcons();
+            });
+        },
+
+        isSelected(c) {
+            return this.selectedCirculars.some(s => s.id === c.id);
+        },
+
+        addSelected(c) {
+            if (!this.selectedCirculars.some(s => s.id === c.id)) {
+                this.selectedCirculars.push(c);
+            }
+        },
+
+        removeSelected(id) {
+            const idx = this.selectedCirculars.findIndex(s => s.id === id);
+            if (idx >= 0) {
+                this.selectedCirculars.splice(idx, 1);
+            }
+        },
+
+        async loadSessions() {
+            const resp = await fetch('/api/chat/sessions');
+            this.sessions = await resp.json();
+        },
+
+        async loadSession(sessionId) {
+            this.currentSessionId = sessionId;
+            const resp = await fetch(`/api/chat/sessions/${sessionId}`);
+            const data = await resp.json();
+            this.messages = data.messages || [];
+            this.selectedCirculars = data.circulars || [];
+            this.$nextTick(() => {
+                const el = document.getElementById('chat-messages');
+                if (el) el.scrollTop = el.scrollHeight;
+                lucide.createIcons();
+            });
+        },
+
+        async newSession() {
+            this.currentSessionId = null;
+            this.messages = [];
+            this.selectedCirculars = [];
+        },
+
+        async deleteSession(sessionId) {
+            if (!confirm('Delete this chat?')) return;
+            try {
+                const resp = await fetch('/api/chat/sessions/' + sessionId, {method: 'DELETE'});
+                if (resp.ok) {
+                    if (this.currentSessionId === sessionId) {
+                        this.currentSessionId = null;
+                        this.messages = [];
+                        this.selectedCirculars = [];
+                    }
+                    await this.loadSessions();
+                } else {
+                    alert('Failed to delete chat.');
+                }
+            } catch (err) {
+                console.error('Delete session error:', err);
+            }
+        },
+
+        async sendMessage() {
+            if (!this.inputMessage.trim() || this.sending) return;
+            const msg = this.inputMessage.trim();
+            this.inputMessage = '';
+            this.messages.push({id: Date.now(), role: 'user', content: msg});
+            this.sending = true;
+
+            this.$nextTick(() => {
+                const el = document.getElementById('chat-messages');
+                if (el) el.scrollTop = el.scrollHeight;
+            });
+
+            try {
+                const resp = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        session_id: this.currentSessionId,
+                        message: msg,
+                        circular_ids: this.selectedCirculars.map(c => c.id),
+                    }),
+                });
+                const data = await resp.json();
+                if (data.session_id && !this.currentSessionId) {
+                    this.currentSessionId = data.session_id;
+                }
+                this.messages.push({id: Date.now() + 1, role: 'assistant', content: data.response});
+            } catch (err) {
+                this.messages.push({id: Date.now() + 1, role: 'assistant', content: 'Error: ' + err.message});
+            }
+            this.sending = false;
+            this.$nextTick(() => {
+                const el = document.getElementById('chat-messages');
+                if (el) el.scrollTop = el.scrollHeight;
+                lucide.createIcons();
+            });
+            await this.loadSessions();
+        },
+    }
+}
+</script>
+{% endblock %}

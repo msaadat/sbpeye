@@ -1,0 +1,202 @@
+{% extends "_base.html" %}
+
+{% block title %}Circular View - SBPEye{% endblock %}
+
+{% block nav_actions %}
+<div class="flex items-center gap-3">
+    <span id="circular-status" class="text-xs font-medium px-2 py-0.5 rounded-full"></span>
+    <a href="{{ url }}" target="_blank" rel="noopener noreferrer"
+       class="inline-flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400 hover:text-sbp-700 dark:hover:text-sbp-400 transition-colors">
+        <i data-lucide="external-link" class="w-3.5 h-3.5"></i>
+        View Original
+    </a>
+</div>
+{% endblock %}
+
+{% block content %}
+<div x-data="circularDetail()" x-init="init()">
+{% if error %}
+<div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6">
+    <div class="flex items-start gap-3">
+        <div class="flex-shrink-0 w-10 h-10 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center">
+            <i data-lucide="alert-circle" class="w-5 h-5 text-red-600 dark:text-red-400"></i>
+        </div>
+        <div class="flex-1 min-w-0">
+            <h3 class="font-semibold text-gray-900 dark:text-gray-100">Error Loading Circular</h3>
+            <p class="text-sm text-gray-600 dark:text-gray-400 mt-1">{{ error }}</p>
+            <p class="text-xs text-gray-400 dark:text-gray-500 mt-2">URL: <a href="{{ url }}" target="_blank" class="text-sbp-600 dark:text-sbp-400 hover:underline">{{ url }}</a></p>
+            <a href="/" class="inline-flex items-center gap-1 mt-3 text-sm text-sbp-600 dark:text-sbp-400 hover:text-sbp-700 dark:hover:text-sbp-300 transition-colors">
+                <i data-lucide="arrow-left" class="w-4 h-4"></i>
+                Back to SBPEye
+            </a>
+        </div>
+    </div>
+</div>
+{% else %}
+<div class="space-y-4">
+    <!-- Circular Content -->
+    <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-4 sm:p-6 lg:p-8">
+        <div class="circular-view">
+            {{ content | safe }}
+        </div>
+    </div>
+
+    <!-- AI-Generated Sections -->
+    <div id="circular-details" class="space-y-4">
+        <!-- Loading skeleton -->
+        <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6">
+            <div class="flex items-center gap-2">
+                <div class="skeleton h-4 w-32"></div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+</div>
+
+<script>
+function circularDetail() {
+    return {
+        detail: null,
+        loading: true,
+
+        async init() {
+            const params = new URLSearchParams(window.location.search);
+            const cirUrl = params.get('cir');
+            if (!cirUrl) return;
+
+            // Find the circular in the DB by URL to get its ID
+            try {
+                const resp = await fetch('/api/circulars/by_url?url=' + encodeURIComponent(cirUrl));
+                if (resp.ok) {
+                    const data = await resp.json();
+                    if (data.id) {
+                        const detailResp = await fetch('/api/circulars/' + data.id);
+                        if (detailResp.ok) {
+                            this.detail = await detailResp.json();
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error('Failed to load circular details:', e);
+            }
+            this.loading = false;
+            this.renderDetails();
+        },
+
+        renderDetails() {
+            if (!this.detail) return;
+            const d = this.detail;
+            const container = document.getElementById('circular-details');
+            if (!container) return;
+            let html = '';
+
+            // Status badge
+            const statusEl = document.getElementById('circular-status');
+            if (statusEl && d.status) {
+                const statusColors = {
+                    'active': 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400',
+                    'amended': 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400',
+                    'superseded': 'bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400',
+                    'cancelled': 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400',
+                };
+                statusEl.className = 'text-xs font-medium px-2 py-0.5 rounded-full ' + (statusColors[d.status] || statusColors['active']);
+                statusEl.textContent = d.status.charAt(0).toUpperCase() + d.status.slice(1);
+            }
+
+            // Tags
+            if (d.tags && d.tags.length > 0) {
+                html += '<div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-4 sm:p-6">';
+                html += '<h3 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3 flex items-center gap-2"><i data-lucide="tag" class="w-4 h-4"></i>Tags</h3>';
+                html += '<div class="flex flex-wrap gap-2">';
+                d.tags.forEach(tag => {
+                    html += '<span class="px-2 py-1 text-xs font-medium rounded-full bg-sbp-50 text-sbp-700 dark:bg-sbp-900/30 dark:text-sbp-400">' + tag + '</span>';
+                });
+                html += '</div></div>';
+            }
+
+            // Summary
+            if (d.summary) {
+                html += '<details class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800">';
+                html += '<summary class="px-4 sm:px-6 py-3 cursor-pointer text-sm font-semibold text-gray-700 dark:text-gray-300 flex items-center gap-2 hover:bg-gray-50 dark:hover:bg-gray-800 rounded-t-xl"><i data-lucide="file-text" class="w-4 h-4"></i>Summary</summary>';
+                html += '<div class="px-4 sm:px-6 pb-4 text-sm text-gray-700 dark:text-gray-300 leading-relaxed">' + d.summary + '</div>';
+                html += '</details>';
+            }
+
+            // Compliance Checklist
+            if (d.compliance_checklist && d.compliance_checklist.length > 0) {
+                html += '<details class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800">';
+                html += '<summary class="px-4 sm:px-6 py-3 cursor-pointer text-sm font-semibold text-gray-700 dark:text-gray-300 flex items-center gap-2 hover:bg-gray-50 dark:hover:bg-gray-800 rounded-t-xl"><i data-lucide="check-square" class="w-4 h-4"></i>Compliance Checklist (' + d.compliance_checklist.length + ' items)</summary>';
+                html += '<div class="px-4 sm:px-6 pb-4 space-y-2">';
+                d.compliance_checklist.forEach(item => {
+                    const actionIcon = item.action_required ? '<i data-lucide="alert-triangle" class="w-3.5 h-3.5 text-yellow-500"></i>' : '<i data-lucide="info" class="w-3.5 h-3.5 text-blue-500"></i>';
+                    html += '<div class="flex items-start gap-2 py-1.5 border-b border-gray-100 dark:border-gray-800 last:border-0">';
+                    html += actionIcon;
+                    html += '<span class="text-sm text-gray-700 dark:text-gray-300">' + item.item + '</span>';
+                    if (item.action_required) {
+                        html += '<span class="text-xs px-1.5 py-0.5 bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400 rounded ml-1">Action Required</span>';
+                    }
+                    html += '</div>';
+                });
+                html += '</div></details>';
+            }
+
+            // Relationships
+            const rels = d.relationships;
+            if (rels && ((rels.outgoing && rels.outgoing.length > 0) || (rels.incoming && rels.incoming.length > 0))) {
+                html += '<div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-4 sm:p-6">';
+                html += '<h3 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3 flex items-center gap-2"><i data-lucide="git-branch" class="w-4 h-4"></i>Related Circulars</h3>';
+
+                const relTypeLabels = {
+                    'amends': 'Amends',
+                    'supersedes': 'Supersedes',
+                    'cancels': 'Cancels',
+                    'adds_to': 'Adds to',
+                    'clarifies': 'Clarifies',
+                };
+
+                if (rels.outgoing && rels.outgoing.length > 0) {
+                    html += '<div class="mb-3"><h4 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2 uppercase tracking-wider">Outgoing</h4>';
+                    html += '<div class="space-y-1.5">';
+                    rels.outgoing.forEach(r => {
+                        html += '<div class="flex items-center gap-2 text-sm">';
+                        html += '<span class="text-xs font-medium px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">' + (relTypeLabels[r.type] || r.type) + '</span>';
+                        if (r.target) {
+                            html += '<a href="/view_circular?cir=' + encodeURIComponent(r.target.url) + '" class="text-sbp-600 dark:text-sbp-400 hover:underline">' + (r.target.reference || r.target.title) + '</a>';
+                            html += '<span class="text-xs text-gray-400 dark:text-gray-500">' + r.target.title.substring(0, 60) + '</span>';
+                        } else {
+                            html += '<span class="text-gray-600 dark:text-gray-400">' + (r.target_reference || 'Unknown') + '</span>';
+                        }
+                        html += '</div>';
+                    });
+                    html += '</div></div>';
+                }
+
+                if (rels.incoming && rels.incoming.length > 0) {
+                    html += '<div><h4 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2 uppercase tracking-wider">Incoming</h4>';
+                    html += '<div class="space-y-1.5">';
+                    rels.incoming.forEach(r => {
+                        html += '<div class="flex items-center gap-2 text-sm">';
+                        const sourceUrl = '/view_circular?cir=' + encodeURIComponent(r.target ? r.target.url : '');
+                        html += '<span class="text-xs font-medium px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400">' + (relTypeLabels[r.type] || r.type) + ' by</span>';
+                        if (r.target) {
+                            html += '<a href="' + sourceUrl + '" class="text-sbp-600 dark:text-sbp-400 hover:underline">' + (r.target.reference || r.target.title) + '</a>';
+                            html += '<span class="text-xs text-gray-400 dark:text-gray-500">' + r.target.title.substring(0, 60) + '</span>';
+                        } else {
+                            html += '<span class="text-gray-600 dark:text-gray-400">' + (r.target_reference || 'Unknown') + '</span>';
+                        }
+                        html += '</div>';
+                    });
+                    html += '</div></div>';
+                }
+
+                html += '</div>';
+            }
+
+            container.innerHTML = html;
+            lucide.createIcons();
+        }
+    }
+}
+</script>
+{% endblock %}

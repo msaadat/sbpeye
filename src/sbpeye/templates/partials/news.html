@@ -1,0 +1,49 @@
+<div class="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
+    <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 shadow-sm overflow-hidden">
+        <div class="px-4 py-3 border-b border-gray-100 dark:border-gray-800 flex items-center gap-2">
+            <i data-lucide="newspaper" class="w-4 h-4 text-sbp-600 dark:text-sbp-400"></i>
+            <h3 class="font-semibold text-sm text-gray-900 dark:text-gray-100">Press Releases</h3>
+        </div>
+        <div class="p-4">
+            {% if press_releases %}
+            <ul class="space-y-2">
+                {% for item in press_releases %}
+                <li class="flex items-start gap-2 group">
+                    <span class="mt-1.5 w-1.5 h-1.5 rounded-full bg-sbp-500 flex-shrink-0"></span>
+                    <a href="{{ item.url }}" target="_blank" rel="noopener noreferrer"
+                       class="text-sm text-gray-700 dark:text-gray-300 hover:text-sbp-700 dark:hover:text-sbp-400 transition-colors leading-snug">
+                        {{ item.title }}
+                    </a>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="text-sm text-gray-400 dark:text-gray-600">No press releases available.</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 shadow-sm overflow-hidden">
+        <div class="px-4 py-3 border-b border-gray-100 dark:border-gray-800 flex items-center gap-2">
+            <i data-lucide="bell" class="w-4 h-4 text-sbp-600 dark:text-sbp-400"></i>
+            <h3 class="font-semibold text-sm text-gray-900 dark:text-gray-100">What's New?</h3>
+        </div>
+        <div class="p-4">
+            {% if whats_new %}
+            <ul class="space-y-2">
+                {% for item in whats_new %}
+                <li class="flex items-start gap-2 group">
+                    <span class="mt-1.5 w-1.5 h-1.5 rounded-full bg-sbp-500 flex-shrink-0"></span>
+                    <a href="{{ item.url }}" target="_blank" rel="noopener noreferrer"
+                       class="text-sm text-gray-700 dark:text-gray-300 hover:text-sbp-700 dark:hover:text-sbp-400 transition-colors leading-snug">
+                        {{ item.title }}
+                    </a>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="text-sm text-gray-400 dark:text-gray-600">No updates available.</p>
+            {% endif %}
+        </div>
+    </div>
+</div>

@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en" x-data="{ dark: localStorage.getItem('theme') === 'dark' }" x-bind:class="{ 'dark': dark }" x-init="$watch('dark', val => localStorage.setItem('theme', val ? 'dark' : 'light'))">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}SBPEye{% endblock %}</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        sbp: {
+                            50: '#f0fdf6',
+                            100: '#dbfce8',
+                            200: '#b9f6d1',
+                            300: '#7eedac',
+                            400: '#3dd87e',
+                            500: '#1ab960',
+                            600: '#0d9a4b',
+                            700: '#0b7a3e',
+                            800: '#0c6034',
+                            900: '#0b4f2c',
+                            950: '#042c18',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <link rel="stylesheet" href="/static/tailwind.css">
+    <script>if(localStorage.getItem('theme')==='dark')document.documentElement.classList.add('dark')</script>
+    {% block head %}{% endblock %}
+</head>
+<body class="bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 min-h-screen transition-colors duration-200">
+    <nav class="sticky top-0 z-50 bg-white/80 dark:bg-gray-900/80 backdrop-blur-md border-b border-gray-200 dark:border-gray-800">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center justify-between h-14">
+                <div class="flex items-center gap-2">
+                    <a href="/" class="flex items-center gap-2 text-lg font-bold text-sbp-700 dark:text-sbp-400 hover:text-sbp-800 dark:hover:text-sbp-300 transition-colors">
+                        <i data-lucide="eye" class="w-5 h-5"></i>
+                        SBPEye
+                    </a>
+                    <a href="/ecodata" class="text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-sbp-700 dark:hover:text-sbp-400 transition-colors px-2 py-1 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800">
+                        <i data-lucide="bar-chart-3" class="w-3.5 h-3.5 inline -mt-0.5"></i>
+                        EcoData
+                    </a>
+                    <a href="/chat" class="text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-sbp-700 dark:hover:text-sbp-400 transition-colors px-2 py-1 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800">
+                        <i data-lucide="message-square" class="w-3.5 h-3.5 inline -mt-0.5"></i>
+                        Chat
+                    </a>
+                    <a href="/settings" class="text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-sbp-700 dark:hover:text-sbp-400 transition-colors px-2 py-1 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800">
+                        <i data-lucide="settings" class="w-3.5 h-3.5 inline -mt-0.5"></i>
+                        Settings
+                    </a>
+                </div>
+                <div class="flex items-center gap-2">
+                    {% block nav_actions %}{% endblock %}
+                    <button @click="dark = !dark" class="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors" :title="dark ? 'Switch to light mode' : 'Switch to dark mode'">
+                        <i x-show="!dark" data-lucide="moon" class="w-4 h-4"></i>
+                        <i x-show="dark" data-lucide="sun" class="w-4 h-4"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="border-t border-gray-200 dark:border-gray-800 mt-12">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 text-center text-xs text-gray-400 dark:text-gray-600">
+            SBPEye &mdash; Independent SBP Circulars & EcoData Indexer
+        </div>
+    </footer>
+
+    <!-- PDF Preview Modal (shared across all pages) -->
+    <dialog id="pdf-modal" class="backdrop:bg-black/50 bg-transparent p-4 max-w-3xl w-full rounded-xl shadow-2xl">
+        <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden">
+            <div class="flex items-center justify-between px-4 py-3 border-b border-gray-100 dark:border-gray-800">
+                <div class="flex items-center gap-2">
+                    <i data-lucide="file-text" class="w-4 h-4 text-sbp-600 dark:text-sbp-400"></i>
+                    <span class="font-medium text-sm text-gray-900 dark:text-gray-100">PDF Preview</span>
+                    <span id="pdf-modal-pages" class="text-xs text-gray-400 dark:text-gray-500"></span>
+                </div>
+                <button onclick="document.getElementById('pdf-modal').close()" class="p-1.5 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
+                    <i data-lucide="x" class="w-4 h-4"></i>
+                </button>
+            </div>
+            <div id="pdf-modal-content" class="p-4 max-h-[70vh] overflow-y-auto">
+            </div>
+        </div>
+    </dialog>
+
+    <script src="/static/app.js?v=2"></script>
+</body>
+</html>

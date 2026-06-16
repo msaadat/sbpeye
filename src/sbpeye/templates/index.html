@@ -1,187 +1,195 @@
 {% extends "_base.html" %}
 
-{% block title %}SBPEye - Intelligent SBP Index{% endblock %}
+{% block title %}SBPEye - Regulatory Intelligence Terminal{% endblock %}
 
 {% block nav_actions %}
-<div class="flex items-center gap-2">
-    <span class="hidden sm:inline text-xs text-gray-400 dark:text-gray-500" id="last-sync-label">
-        Last synced: {{ last_sync }}
-    </span>
+<div class="hidden items-center gap-2 lg:flex">
+    <span class="font-mono text-[11px] uppercase tracking-[0.18em] text-reg-slate">Last Sync</span>
+    <span class="reference-pill">{{ shell.last_sync }}</span>
 </div>
 {% endblock %}
 
 {% block content %}
 <div x-data="{ activeTab: 'browse' }" @switch-to-search="activeTab = 'search'">
-    <!-- Dashboard -->
-    <section class="mb-8">
-        <div id="news-container"
-             hx-get="/partials/news"
-             hx-trigger="load"
-             hx-swap="innerHTML">
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
-                <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden">
-                    <div class="px-4 py-3 border-b border-gray-100 dark:border-gray-800">
-                        <div class="skeleton h-4 w-32"></div>
-                    </div>
-                    <div class="p-4 space-y-3">
-                        <div class="skeleton h-3 w-full"></div>
-                        <div class="skeleton h-3 w-5/6"></div>
-                        <div class="skeleton h-3 w-4/6"></div>
-                    </div>
+    <div class="grid gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
+        <aside class="space-y-4">
+            <section class="terminal-panel p-5">
+                <div class="mb-4">
+                    <h2 class="panel-title mt-1">Search Parameters</h2>
                 </div>
-                <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden">
-                    <div class="px-4 py-3 border-b border-gray-100 dark:border-gray-800">
-                        <div class="skeleton h-4 w-28"></div>
+                <form id="search-form"
+                      hx-get="/partials/search"
+                      hx-target="#search-results"
+                      hx-swap="innerHTML"
+                      hx-indicator="#search-spinner"
+                      hx-on::after-request="this.dispatchEvent(new CustomEvent('switch-to-search', {bubbles: true}))"
+                      class="space-y-4">
+                    <div>
+                        <label for="search-input" class="filter-label">Query</label>
+                        <div class="relative">
+                            <i data-lucide="search" class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-reg-slate"></i>
+                            <input type="search" name="q" id="search-input" placeholder="Search text, themes, departments, references" class="terminal-input pl-10 text-sm">
+                        </div>
                     </div>
-                    <div class="p-4 space-y-3">
-                        <div class="skeleton h-3 w-full"></div>
-                        <div class="skeleton h-3 w-4/5"></div>
-                        <div class="skeleton h-3 w-3/5"></div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </section>
 
-    <!-- Circulars -->
-    <section>
-        <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-4">
-            <h2 class="text-xl font-bold text-gray-900 dark:text-gray-100">Circulars Index</h2>
-            <form id="search-form"
-                  hx-get="/partials/search"
-                  hx-target="#search-results"
-                  hx-swap="innerHTML"
-                  hx-indicator="#search-spinner"
-                  hx-on::after-request="this.dispatchEvent(new CustomEvent('switch-to-search', {bubbles: true}))"
-                  class="flex flex-col gap-3 w-full sm:w-auto">
-                <div class="flex items-center gap-2">
-                    <div class="relative flex-1 sm:w-72">
-                        <i data-lucide="search" class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400"></i>
-                        <input type="search" name="q" id="search-input"
-                               placeholder="Search by text or meaning..."
-                               class="w-full pl-9 pr-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-sbp-500/50 focus:border-sbp-500 transition-colors">
-                    </div>
-                    <button type="submit"
-                            class="px-4 py-2 text-sm font-medium rounded-lg bg-sbp-600 hover:bg-sbp-700 text-white transition-colors">
-                        Search
-                    </button>
-                </div>
-                <div class="flex flex-wrap items-center gap-3">
-                    <select name="department" class="px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-sbp-500/50 focus:border-sbp-500 transition-colors">
-                        <option value="">All Departments</option>
-                        {% for dept in departments %}
+                    <div>
+                        <label class="filter-label">Department</label>
+                        <select name="department" class="terminal-select text-sm">
+                            <option value="">All departments</option>
+                            {% for dept in departments %}
                             <option value="{{ dept }}">{{ dept }}</option>
-                        {% endfor %}
-                    </select>
-                    
-                    <div class="flex items-center gap-2">
-                        <select name="start_year" class="px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-sbp-500/50 focus:border-sbp-500 transition-colors">
-                            <option value="">Start Year</option>
-                            {% for y in range(min_year, max_year + 1) %}
-                                <option value="{{ y }}">{{ y }}</option>
-                            {% endfor %}
-                        </select>
-                        <span class="text-gray-500 dark:text-gray-400">-</span>
-                        <select name="end_year" class="px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-sbp-500/50 focus:border-sbp-500 transition-colors">
-                            <option value="">End Year</option>
-                            {% for y in range(max_year, min_year - 1, -1) %}
-                                <option value="{{ y }}">{{ y }}</option>
                             {% endfor %}
                         </select>
                     </div>
 
-                    <select name="sort_by" class="px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-sbp-500/50 focus:border-sbp-500 transition-colors">
-                        <option value="relevance">Sort by Relevance</option>
-                        <option value="date">Sort by Date</option>
-                    </select>
+                    <div class="grid grid-cols-2 gap-3">
+                        <div>
+                            <label class="filter-label">Start Year</label>
+                            <select name="start_year" class="terminal-select text-sm">
+                                <option value="">Any</option>
+                                {% for y in range(min_year, max_year + 1) %}
+                                <option value="{{ y }}">{{ y }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div>
+                            <label class="filter-label">End Year</label>
+                            <select name="end_year" class="terminal-select text-sm">
+                                <option value="">Any</option>
+                                {% for y in range(max_year, min_year - 1, -1) %}
+                                <option value="{{ y }}">{{ y }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                    </div>
 
-                    <select name="tag" id="tag-select" class="px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-sbp-500/50 focus:border-sbp-500 transition-colors">
-                        <option value="">All Tags</option>
-                    </select>
+                    <div>
+                        <label class="filter-label">Sort</label>
+                        <select name="sort_by" class="terminal-select text-sm">
+                            <option value="relevance">Relevance</option>
+                            <option value="date">Date</option>
+                        </select>
+                    </div>
 
-                    <button type="button" onclick="exportCSV()" class="ml-auto inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
-                        <i data-lucide="download" class="w-4 h-4"></i>
-                        Export CSV
+                    <div>
+                        <label class="filter-label">Tag</label>
+                        <select name="tag" id="tag-select" class="terminal-select text-sm">
+                            <option value="">All tags</option>
+                        </select>
+                    </div>
+
+                    <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-1">
+                        <button type="submit" class="terminal-btn terminal-btn-primary justify-center">
+                            <i data-lucide="scan-search" class="h-4 w-4"></i>
+                            Search
+                        </button>
+                        <button type="button" onclick="exportCSV()" class="terminal-btn terminal-btn-secondary justify-center">
+                            <i data-lucide="download" class="h-4 w-4"></i>
+                            Export CSV
+                        </button>
+                    </div>
+                </form>
+            </section>
+
+            <section class="terminal-panel-muted p-5">
+                <div class="mb-3 flex items-center justify-between">
+                    <div>
+                        <p class="panel-kicker">Browse Index</p>
+                        <h2 class="panel-title mt-1 text-[0.95rem]">Department Drilldown</h2>
+                    </div>
+                    <span class="reference-pill">{{ shell.total_circulars }} docs</span>
+                </div>
+                <div class="space-y-2 text-sm text-slate-600 dark:text-reg-slate">
+                    <button @click="activeTab = 'browse'" :class="activeTab === 'browse' ? 'border-reg-amber text-reg-amber' : 'border-transparent'" class="flex w-full items-center justify-between border px-3 py-2 text-left transition">
+                        <span>Browse archive hierarchy</span>
+                        <i data-lucide="folder-tree" class="h-4 w-4"></i>
+                    </button>
+                    <button @click="activeTab = 'search'" :class="activeTab === 'search' ? 'border-reg-amber text-reg-amber' : 'border-transparent'" class="flex w-full items-center justify-between border px-3 py-2 text-left transition">
+                        <span>Inspect search results</span>
+                        <i data-lucide="list-filter" class="h-4 w-4"></i>
                     </button>
                 </div>
-            </form>
+            </section>
+        </aside>
 
-            <script>
-            function exportCSV() {
-                var form = document.getElementById('search-form');
-                var url = new URL('/api/circulars/export_csv', window.location.origin);
-                var formData = new FormData(form);
-                for (var pair of formData.entries()) {
-                    if (pair[1]) {
-                        url.searchParams.append(pair[0], pair[1]);
-                    }
-                }
-                window.open(url, '_blank');
-            }
-            fetch('/api/circulars/tags').then(r => r.json()).then(tags => {
-                var sel = document.getElementById('tag-select');
-                tags.forEach(function(t) {
-                    var opt = document.createElement('option');
-                    opt.value = t.tag;
-                    opt.textContent = t.tag + ' (' + t.count + ')';
-                    sel.appendChild(opt);
-                });
-            });
-            </script>
-        </div>
+        <section class="space-y-6">
 
-        <!-- Tabs -->
-        <div class="mb-6">
-            <div class="flex gap-1 border-b border-gray-200 dark:border-gray-800">
-                <button @click="activeTab = 'browse'"
-                        :class="activeTab === 'browse' ? 'border-sbp-600 text-sbp-700 dark:text-sbp-400' : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'"
-                        class="px-4 py-2.5 text-sm font-medium border-b-2 transition-colors">
-                    Browse
-                </button>
-                <button @click="activeTab = 'search'"
-                        :class="activeTab === 'search' ? 'border-sbp-600 text-sbp-700 dark:text-sbp-400' : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'"
-                        class="px-4 py-2.5 text-sm font-medium border-b-2 transition-colors">
-                    Search Results
-                </button>
-            </div>
-
-            <div x-show="activeTab === 'browse'" x-transition class="mt-4">
-                <!-- Browse content -->
-                <div id="browse-content"
-                     hx-get="/partials/departments"
-                     hx-trigger="load"
-                     hx-swap="innerHTML"
-                     hx-indicator="#browse-spinner">
+            <div class="terminal-panel overflow-hidden">
+                <div class="flex flex-col gap-3 border-b border-reg-lineSoft/80 px-5 py-4 dark:border-reg-line sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                        <h2 class="panel-title mt-1">Circular Intelligence Grid</h2>
+                    </div>
+                    <div class="flex items-center gap-2 text-xs">
+                        <button @click="activeTab = 'browse'" :class="activeTab === 'browse' ? 'border-reg-amber bg-reg-amber/10 text-reg-amber' : 'border-reg-lineSoft dark:border-reg-line text-reg-slate'" class="rounded-xl border px-3 py-2 font-mono uppercase tracking-[0.16em] transition">Browse</button>
+                        <button @click="activeTab = 'search'" :class="activeTab === 'search' ? 'border-reg-amber bg-reg-amber/10 text-reg-amber' : 'border-reg-lineSoft dark:border-reg-line text-reg-slate'" class="rounded-xl border px-3 py-2 font-mono uppercase tracking-[0.16em] transition">Search Results</button>
+                    </div>
                 </div>
-                <div id="browse-spinner" class="htmx-indicator flex items-center justify-center py-8">
-                    <div class="flex items-center gap-2 text-sm text-gray-400 dark:text-gray-500">
-                        <svg class="animate-spin w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
-                        </svg>
-                        Loading...
+
+                <div class="p-4 sm:p-5">
+                    <div x-show="activeTab === 'browse'" x-transition class="space-y-4">
+                        <div id="browse-content"
+                             hx-get="/partials/departments"
+                             hx-trigger="load"
+                             hx-swap="innerHTML"
+                             hx-indicator="#browse-spinner"></div>
+                        <div id="browse-spinner" class="htmx-indicator flex items-center justify-center py-8">
+                            <div class="flex items-center gap-2 font-mono text-xs uppercase tracking-[0.18em] text-reg-slate">
+                                <svg class="h-4 w-4 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                                </svg>
+                                Loading archive
+                            </div>
+                        </div>
+                    </div>
+
+                    <div x-show="activeTab === 'search'" x-transition class="space-y-4">
+                        <div id="search-results">
+                            <div class="flex min-h-[18rem] items-center justify-center rounded-2xl border border-dashed border-reg-lineSoft/80 px-6 py-12 text-center dark:border-reg-line">
+                                <div>
+                                    <i data-lucide="scan-search" class="mx-auto mb-3 h-10 w-10 text-reg-slate"></i>
+                                    <p class="font-serif text-lg text-reg-navy dark:text-reg-ivory">Run a query to generate dossier rows.</p>
+                                    <p class="mt-2 text-sm text-slate-500 dark:text-reg-slate">Search, filter, select, preview, export, or send chosen circulars into chat without leaving the page.</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div id="search-spinner" class="htmx-indicator flex items-center justify-center py-8">
+                            <div class="flex items-center gap-2 font-mono text-xs uppercase tracking-[0.18em] text-reg-slate">
+                                <svg class="h-4 w-4 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                                </svg>
+                                Querying index
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
-
-            <div x-show="activeTab === 'search'" x-transition class="mt-4">
-                <div id="search-results">
-                    <div class="text-center py-12 text-gray-400 dark:text-gray-600">
-                        <i data-lucide="search" class="w-10 h-10 mx-auto mb-3 opacity-50"></i>
-                        <p>Enter a search term to find circulars.</p>
-                    </div>
-                </div>
-                <div id="search-spinner" class="htmx-indicator flex items-center justify-center py-8">
-                    <div class="flex items-center gap-2 text-sm text-gray-400 dark:text-gray-500">
-                        <svg class="animate-spin w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
-                        </svg>
-                        Searching...
-                    </div>
-                </div>
-            </div>
-        </div>
-    </section>
+        </section>
+    </div>
 </div>
+
+<script>
+function exportCSV() {
+    var form = document.getElementById('search-form');
+    var url = new URL('/api/circulars/export_csv', window.location.origin);
+    var formData = new FormData(form);
+    for (var pair of formData.entries()) {
+        if (pair[1]) {
+            url.searchParams.append(pair[0], pair[1]);
+        }
+    }
+    window.open(url, '_blank');
+}
+
+fetch('/api/circulars/tags').then(function(r) { return r.json(); }).then(function(tags) {
+    var sel = document.getElementById('tag-select');
+    tags.forEach(function(t) {
+        var opt = document.createElement('option');
+        opt.value = t.tag;
+        opt.textContent = t.tag + ' (' + t.count + ')';
+        sel.appendChild(opt);
+    });
+});
+</script>
 {% endblock %}

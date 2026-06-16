@@ -1,17 +1,37 @@
 <!DOCTYPE html>
-<html lang="en" x-data="{ dark: localStorage.getItem('theme') === 'dark' }" x-bind:class="{ 'dark': dark }" x-init="$watch('dark', val => localStorage.setItem('theme', val ? 'dark' : 'light'))">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}SBPEye{% endblock %}</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
             darkMode: 'class',
             theme: {
                 extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        serif: ['IBM Plex Serif', 'serif'],
+                        mono: ['IBM Plex Mono', 'monospace'],
+                    },
                     colors: {
+                        ink: '#0F1C2E',
+                        ivory: '#F5F0E8',
+                        reg: {
+                            navy: '#0F1C2E',
+                            navySoft: '#18283D',
+                            ivory: '#F5F0E8',
+                            green: '#1A6B4A',
+                            amber: '#C8861A',
+                            slate: '#8FA3B8',
+                            line: '#2B3A4B',
+                            lineSoft: '#D5D0C8',
+                        },
                         sbp: {
                             50: '#f0fdf6',
                             100: '#dbfce8',
@@ -24,7 +44,10 @@
                             800: '#0c6034',
                             900: '#0b4f2c',
                             950: '#042c18',
-                        }
+                        },
+                    },
+                    boxShadow: {
+                        terminal: '0 20px 70px rgba(3, 10, 22, 0.35)',
                     }
                 }
             }
@@ -34,70 +57,113 @@
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
     <link rel="stylesheet" href="/static/tailwind.css">
-    <script>if(localStorage.getItem('theme')==='dark')document.documentElement.classList.add('dark')</script>
+    <script>if(localStorage.getItem('theme')!=='light')document.documentElement.classList.add('dark')</script>
     {% block head %}{% endblock %}
 </head>
-<body class="bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 min-h-screen transition-colors duration-200">
-    <nav class="sticky top-0 z-50 bg-white/80 dark:bg-gray-900/80 backdrop-blur-md border-b border-gray-200 dark:border-gray-800">
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div class="flex items-center justify-between h-14">
-                <div class="flex items-center gap-2">
-                    <a href="/" class="flex items-center gap-2 text-lg font-bold text-sbp-700 dark:text-sbp-400 hover:text-sbp-800 dark:hover:text-sbp-300 transition-colors">
-                        <i data-lucide="eye" class="w-5 h-5"></i>
-                        SBPEye
-                    </a>
-                    <a href="/ecodata" class="text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-sbp-700 dark:hover:text-sbp-400 transition-colors px-2 py-1 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800">
-                        <i data-lucide="bar-chart-3" class="w-3.5 h-3.5 inline -mt-0.5"></i>
-                        EcoData
-                    </a>
-                    <a href="/chat" class="text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-sbp-700 dark:hover:text-sbp-400 transition-colors px-2 py-1 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800">
-                        <i data-lucide="message-square" class="w-3.5 h-3.5 inline -mt-0.5"></i>
-                        Chat
-                    </a>
-                    <a href="/settings" class="text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-sbp-700 dark:hover:text-sbp-400 transition-colors px-2 py-1 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800">
-                        <i data-lucide="settings" class="w-3.5 h-3.5 inline -mt-0.5"></i>
-                        Settings
-                    </a>
-                </div>
-                <div class="flex items-center gap-2">
-                    {% block nav_actions %}{% endblock %}
-                    <button @click="dark = !dark" class="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors" :title="dark ? 'Switch to light mode' : 'Switch to dark mode'">
-                        <i x-show="!dark" data-lucide="moon" class="w-4 h-4"></i>
-                        <i x-show="dark" data-lucide="sun" class="w-4 h-4"></i>
-                    </button>
+<body x-data="{ dark: localStorage.getItem('theme') !== 'light', newsDrawer: null }" x-init="$watch('dark', val => { localStorage.setItem('theme', val ? 'dark' : 'light'); document.documentElement.classList.toggle('dark', val); })" x-effect="if (newsDrawer) { $nextTick(() => document.body.dispatchEvent(new CustomEvent('newsDrawerChanged', { bubbles: true }))) }" @keydown.escape.window="newsDrawer = null" class="min-h-screen bg-reg-ivory text-slate-900 dark:bg-reg-navy dark:text-reg-ivory transition-colors duration-200">
+    <div class="fixed inset-0 -z-10 bg-[radial-gradient(circle_at_top,_rgba(200,134,26,0.12),_transparent_32%),linear-gradient(180deg,_rgba(15,28,46,0.98)_0%,_rgba(15,28,46,1)_52%,_rgba(10,18,31,1)_100%)] dark:block hidden"></div>
+    <div class="fixed inset-0 -z-10 bg-[radial-gradient(circle_at_top,_rgba(200,134,26,0.10),_transparent_22%),linear-gradient(180deg,_#f7f3ec_0%,_#efe8dc_100%)] dark:hidden"></div>
+
+    <header class="sticky top-0 z-50 border-b border-reg-lineSoft/80 bg-reg-ivory/92 backdrop-blur dark:border-reg-line dark:bg-[#0b1627]">
+        <div class="mx-auto flex max-w-[1600px] items-center justify-between gap-4 px-4 py-3 sm:px-6 lg:px-8">
+            <div class="flex items-center gap-5">
+                <a href="/" class="flex items-center gap-3">
+                    <span class="flex h-9 w-9 items-center justify-center rounded-full border border-reg-amber/50 bg-reg-amber/10 text-reg-amber dark:border-reg-amber/40 dark:bg-reg-amber/12">
+                        <i data-lucide="scan-search" class="h-4 w-4"></i>
+                    </span>
+                    <div>
+                        <div class="font-serif text-lg font-semibold tracking-[0.08em] text-reg-navy dark:text-reg-ivory">SBPEye</div>
+                        <div class="font-mono text-[10px] uppercase tracking-[0.28em] text-reg-slate">Regulatory Intelligence</div>
+                    </div>
+                </a>
+                <nav class="hidden items-center gap-2 md:flex">
+                    <a href="/" class="shell-nav-link {% if active_nav == 'dashboard' %}is-active{% endif %}">Terminal</a>
+                    <a href="/chat" class="shell-nav-link {% if active_nav == 'chat' %}is-active{% endif %}">Chat</a>
+                    <a href="/ecodata" class="shell-nav-link {% if active_nav == 'ecodata' %}is-active{% endif %}">EcoData</a>
+                    <a href="/settings" class="shell-nav-link {% if active_nav == 'settings' %}is-active{% endif %}">Settings</a>
+                </nav>
+            </div>
+            <div class="flex items-center gap-2">
+                {% block nav_actions %}{% endblock %}
+                <button @click="dark = !dark" class="inline-flex h-9 w-9 items-center justify-center rounded-full border border-reg-lineSoft bg-white/70 text-reg-slate transition hover:text-reg-navy dark:border-reg-line dark:bg-[#132238] dark:text-reg-slate dark:hover:text-reg-ivory" :title="dark ? 'Switch to light mode' : 'Switch to dark mode'">
+                    <i x-show="dark" data-lucide="sun-medium" class="h-4 w-4"></i>
+                    <i x-show="!dark" data-lucide="moon-star" class="h-4 w-4"></i>
+                </button>
+            </div>
+        </div>
+        <div class="border-t border-reg-lineSoft/70 bg-reg-navy text-reg-ivory dark:border-reg-line dark:bg-[#0b1627]">
+            <div class="mx-auto grid max-w-[1600px] grid-cols-2 gap-px bg-reg-lineSoft/15 px-4 py-0.5 text-[10px] uppercase tracking-[0.22em] sm:grid-cols-4 xl:grid-cols-8 sm:px-6 lg:px-8">
+                <div class="ticker-cell"><span>Status</span><strong>{{ shell.live_status }}</strong></div>
+                <div class="ticker-cell"><span>Total Circulars</span><strong>{{ shell.total_circulars }}</strong></div>
+                <div class="ticker-cell"><span>Departments</span><strong>{{ shell.department_count }}</strong></div>
+                <div class="ticker-cell"><span>Indexed Today</span><strong>{{ shell.indexed_today }}</strong></div>
+                <div class="ticker-cell"><span>Vector DB</span><strong>{{ shell.vector_db_state }}</strong></div>
+                <div class="ticker-cell"><span>Last Sync</span><strong>{{ shell.last_sync }}</strong></div>
+                <button type="button"
+                        @click="newsDrawer = newsDrawer === 'press' ? null : 'press'"
+                        :class="newsDrawer === 'press' ? 'text-reg-amber' : ''"
+                        class="ticker-cell ticker-action text-left">
+                    <span>Press Releases</span><strong>Open</strong>
+                </button>
+                <button type="button"
+                        @click="newsDrawer = newsDrawer === 'updates' ? null : 'updates'"
+                        :class="newsDrawer === 'updates' ? 'text-reg-amber' : ''"
+                        class="ticker-cell ticker-action text-left">
+                    <span>What's New</span><strong>Open</strong>
+                </button>
+            </div>
+            <div x-show="newsDrawer" x-cloak class="border-t border-reg-line bg-[#0b1627]" @click.outside="newsDrawer = null">
+                <div id="news-drawer-panel"
+                     class="mx-auto max-w-[1600px] px-4 py-4 sm:px-6 lg:px-8"
+                     hx-get="/partials/news"
+                     hx-trigger="newsDrawerChanged from:body"
+                     hx-target="#news-drawer-panel"
+                     hx-swap="innerHTML">
+                    <div class="terminal-panel p-4">
+                        <div class="flex items-center gap-2 font-mono text-xs uppercase tracking-[0.18em] text-reg-slate">
+                            <svg class="h-4 w-4 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                            </svg>
+                            Loading bulletin
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
-    </nav>
+    </header>
 
-    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+    <main class="mx-auto max-w-[1600px] px-4 py-6 sm:px-6 lg:px-8">
+
         {% block content %}{% endblock %}
     </main>
 
-    <footer class="border-t border-gray-200 dark:border-gray-800 mt-12">
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 text-center text-xs text-gray-400 dark:text-gray-600">
-            SBPEye &mdash; Independent SBP Circulars & EcoData Indexer
+    <footer class="border-t border-reg-lineSoft/80 py-5 dark:border-reg-line">
+        <div class="mx-auto flex max-w-[1600px] flex-col gap-2 px-4 text-[11px] sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8">
+            <p class="font-mono uppercase tracking-[0.2em] text-reg-slate">SBPEye / Independent SBP Circulars and Economic Data Index</p>
+            <p class="text-slate-500 dark:text-reg-slate">Document-led workflow for banking supervision, compliance, and policy research.</p>
         </div>
     </footer>
 
-    <!-- PDF Preview Modal (shared across all pages) -->
-    <dialog id="pdf-modal" class="backdrop:bg-black/50 bg-transparent p-4 max-w-3xl w-full rounded-xl shadow-2xl">
-        <div class="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden">
-            <div class="flex items-center justify-between px-4 py-3 border-b border-gray-100 dark:border-gray-800">
-                <div class="flex items-center gap-2">
-                    <i data-lucide="file-text" class="w-4 h-4 text-sbp-600 dark:text-sbp-400"></i>
-                    <span class="font-medium text-sm text-gray-900 dark:text-gray-100">PDF Preview</span>
-                    <span id="pdf-modal-pages" class="text-xs text-gray-400 dark:text-gray-500"></span>
+    <dialog id="pdf-modal" class="backdrop:bg-black/70 bg-transparent p-3 max-w-5xl w-full">
+        <div class="overflow-hidden border border-reg-lineSoft bg-reg-ivory shadow-terminal dark:border-reg-line dark:bg-reg-navySoft">
+            <div class="flex items-center justify-between border-b border-reg-lineSoft px-4 py-3 dark:border-reg-line">
+                <div class="flex items-center gap-3">
+                    <span class="inline-flex h-8 w-8 items-center justify-center rounded-full border border-reg-amber/40 bg-reg-amber/10 text-reg-amber">
+                        <i data-lucide="file-search" class="h-4 w-4"></i>
+                    </span>
+                    <div>
+                        <div class="font-serif text-sm font-semibold text-reg-navy dark:text-reg-ivory">Source Preview</div>
+                        <div id="pdf-modal-pages" class="font-mono text-[11px] uppercase tracking-[0.2em] text-reg-slate"></div>
+                    </div>
                 </div>
-                <button onclick="document.getElementById('pdf-modal').close()" class="p-1.5 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
-                    <i data-lucide="x" class="w-4 h-4"></i>
+                <button onclick="document.getElementById('pdf-modal').close()" class="inline-flex h-8 w-8 items-center justify-center rounded-full border border-reg-lineSoft text-reg-slate transition hover:text-reg-navy dark:border-reg-line dark:hover:text-reg-ivory">
+                    <i data-lucide="x" class="h-4 w-4"></i>
                 </button>
             </div>
-            <div id="pdf-modal-content" class="p-4 max-h-[70vh] overflow-y-auto">
-            </div>
+            <div id="pdf-modal-content" class="max-h-[76vh] overflow-y-auto p-4 sm:p-6"></div>
         </div>
     </dialog>
-
-    <script src="/static/app.js?v=2"></script>
+    <script src="/static/app.js?v=3"></script>
 </body>
 </html>

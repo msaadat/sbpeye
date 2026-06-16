@@ -27,6 +27,37 @@ from datetime import datetime, timedelta
 def _parse_year(val: str | None) -> int | None:
     return int(val) if val else None
 
+
+def _format_timestamp(value: datetime | str | None) -> str:
+    if isinstance(value, datetime):
+        return value.strftime("%d %b %Y %H:%M")
+    return value or "Never"
+
+
+def _build_shell_context(db: Session, active_nav: str, page_title: str, page_kicker: str, page_summary: str) -> dict:
+    sync_status = db.query(SyncStatus).order_by(SyncStatus.id.desc()).first()
+    last_sync_dt = sync_status.last_sync_date if sync_status else None
+    total_circulars = db.query(func.count(Circular.id)).scalar() or 0
+    department_count = db.query(func.count(func.distinct(Circular.department))).filter(Circular.department.isnot(None)).scalar() or 0
+    indexed_today = db.query(func.count(Circular.id)).filter(func.date(Circular.date) == datetime.now().date()).scalar() or 0
+    vector_db_ready = os.path.exists("chroma_db/chroma.sqlite3")
+
+    return {
+        "active_nav": active_nav,
+        "page_title": page_title,
+        "page_kicker": page_kicker,
+        "page_summary": page_summary,
+        "shell": {
+            "live_status": (sync_status.status if sync_status and sync_status.status else "idle").upper(),
+            "total_circulars": total_circulars,
+            "department_count": department_count,
+            "indexed_today": indexed_today,
+            "vector_db_state": "READY" if vector_db_ready else "OFFLINE",
+            "last_sync": _format_timestamp(last_sync_dt),
+            "last_sync_dt": last_sync_dt,
+        },
+    }
+
 ALLOWED_DOMAINS = {"www.sbp.org.pk", "sbp.org.pk"}
 
 SBP_BASE = "https://www.sbp.org.pk"
@@ -54,10 +85,6 @@ templates = Jinja2Templates(directory="src/sbpeye/templates")
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request, db: Session = Depends(get_db)):
-    # Get last sync date
-    sync_status = db.query(SyncStatus).order_by(SyncStatus.id.desc()).first()
-    last_sync = sync_status.last_sync_date if sync_status else "Never"
-    
     # Get departments for filters
     departments_query = db.query(Circular.department).distinct().order_by(Circular.department).all()
     departments = [d[0] for d in departments_query if d[0]]
@@ -70,15 +97,19 @@ async def read_root(request: Request, db: Session = Depends(get_db)):
     min_year = int(year_range[0]) if year_range[0] else datetime.now().year
     max_year = int(year_range[1]) if year_range[1] else datetime.now().year
 
-    return templates.TemplateResponse(
-        request=request, name="index.html",
-        context={
-            "last_sync": last_sync,
-            "departments": departments,
-            "min_year": min_year,
-            "max_year": max_year,
-        }
+    context = _build_shell_context(
+        db,
+        active_nav="dashboard",
+        page_title="Regulatory Intelligence Terminal",
+        page_kicker="SBP Circulars Workspace",
+        page_summary="Search, compare, and operationalize Pakistan banking circulars from a single analyst console.",
     )
+    context.update({
+        "departments": departments,
+        "min_year": min_year,
+        "max_year": max_year,
+    })
+    return templates.TemplateResponse(request=request, name="index.html", context=context)
 
 
 def clean_sbp_html(html_content: bytes, base_url: str = "") -> str:
@@ -172,15 +203,19 @@ def clean_sbp_html(html_content: bytes, base_url: str = "") -> str:
 
 
 @app.get("/view_circular", response_class=HTMLResponse)
-async def view_circular(request: Request, cir: str):
+async def view_circular(request: Request, cir: str, db: Session = Depends(get_db)):
+    context = _build_shell_context(
+        db,
+        active_nav="dashboard",
+        page_title="Circular Reading Room",
+        page_kicker="Source Document",
+        page_summary="Read the original SBP circular alongside extracted intelligence, compliance notes, and relationships.",
+    )
     parsed = urlparse(cir)
     domain = parsed.netloc.lower()
     if domain not in ALLOWED_DOMAINS:
-        return templates.TemplateResponse(
-            request=request, name="circular.html",
-            context={"content": "", "url": cir,
-                     "error": "Only SBP (sbp.org.pk) circulars are supported."}
-        )
+        context.update({"content": "", "url": cir, "error": "Only SBP (sbp.org.pk) circulars are supported."})
+        return templates.TemplateResponse(request=request, name="circular.html", context=context)
 
     try:
         resp = http_requests.get(cir, headers=HEADERS, timeout=50)
@@ -192,31 +227,28 @@ async def view_circular(request: Request, cir: str):
 
         cleaned_html = clean_sbp_html(resp.content, base_url=cir)
 
-        return templates.TemplateResponse(
-            request=request, name="circular.html",
-            context={"content": cleaned_html, "url": cir, "error": None}
-        )
+        context.update({"content": cleaned_html, "url": cir, "error": None})
+        return templates.TemplateResponse(request=request, name="circular.html", context=context)
     except Exception as e:
-        return templates.TemplateResponse(
-            request=request, name="circular.html",
-            context={"content": "", "url": cir, "error": str(e)}
-        )
+        context.update({"content": "", "url": cir, "error": str(e)})
+        return templates.TemplateResponse(request=request, name="circular.html", context=context)
 
 ECODATA_CACHE_TTL_HOURS = 1
 
 @app.get("/ecodata", response_class=HTMLResponse)
 async def ecodata_page(request: Request, db: Session = Depends(get_db)):
     sync_status = db.query(SyncStatus).order_by(SyncStatus.id.desc()).first()
-    last_sync = sync_status.last_sync_date if sync_status else None
     ecodata_time = sync_status.ecodata_index_time if sync_status else None
 
-    return templates.TemplateResponse(
-        request=request, name="ecodata.html",
-        context={
-            "last_sync": last_sync,
-            "ecodata_time": ecodata_time,
-        }
+    context = _build_shell_context(
+        db,
+        active_nav="ecodata",
+        page_title="Economic Data Registry",
+        page_kicker="SBP EcoData",
+        page_summary="Traverse SBP statistical releases, archives, and downloadable datasets from the same research shell.",
     )
+    context.update({"ecodata_time": ecodata_time})
+    return templates.TemplateResponse(request=request, name="ecodata.html", context=context)
 
 
 def _get_ecodata_entries(db: Session, force_refresh: bool = False) -> list[dict]:
@@ -747,10 +779,15 @@ import time
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request, db: Session = Depends(get_db)):
     config = AIConfig.from_db(db) or AIConfig.from_env()
-    return templates.TemplateResponse(
-        request=request, name="settings.html",
-        context={"config": config}
+    context = _build_shell_context(
+        db,
+        active_nav="settings",
+        page_title="Model and Retrieval Settings",
+        page_kicker="System Configuration",
+        page_summary="Control provider, model, and context settings for summarization, classification, and grounded chat.",
     )
+    context.update({"config": config})
+    return templates.TemplateResponse(request=request, name="settings.html", context=context)
 
 
 @app.post("/api/settings")
@@ -781,8 +818,15 @@ async def test_ai_connection(db: Session = Depends(get_db)):
 # --- Chat Feature ---
 
 @app.get("/chat", response_class=HTMLResponse)
-async def chat_page(request: Request):
-    return templates.TemplateResponse(request=request, name="chat.html", context={})
+async def chat_page(request: Request, db: Session = Depends(get_db)):
+    context = _build_shell_context(
+        db,
+        active_nav="chat",
+        page_title="Analyst Chat Workspace",
+        page_kicker="Grounded Conversation",
+        page_summary="Interrogate selected circulars, preserve session context, and trace answers back to the source record.",
+    )
+    return templates.TemplateResponse(request=request, name="chat.html", context=context)
 
 
 @app.get("/api/chat/sessions")

@@ -1,166 +1,163 @@
 {% extends "_base.html" %}
 
-{% block title %}Chat - SBPEye{% endblock %}
+{% block title %}Analyst Chat - SBPEye{% endblock %}
 
 {% block head %}
 <script src="https://cdn.jsdelivr.net/npm/marked@14.1.3/marked.min.js"></script>
-<style>
-.chat-bubble h1, .chat-bubble h2, .chat-bubble h3 { font-weight: 600; margin: 0.75rem 0 0.5rem; }
-.chat-bubble h1 { font-size: 1.1rem; }
-.chat-bubble h2 { font-size: 1rem; }
-.chat-bubble h3 { font-size: 0.9rem; }
-.chat-bubble p { margin: 0.4rem 0; }
-.chat-bubble ul, .chat-bubble ol { margin: 0.4rem 0; padding-left: 1.2rem; }
-.chat-bubble li { margin: 0.15rem 0; }
-.chat-bubble code { background: rgba(0,0,0,0.07); padding: 0.1rem 0.3rem; border-radius: 4px; font-size: 0.85em; font-family: ui-monospace, monospace; }
-.dark .chat-bubble code { background: rgba(255,255,255,0.12); }
-.chat-bubble pre { background: rgba(0,0,0,0.07); padding: 0.6rem; border-radius: 6px; overflow-x: auto; margin: 0.5rem 0; }
-.dark .chat-bubble pre { background: rgba(255,255,255,0.08); }
-.chat-bubble pre code { background: none; padding: 0; }
-.chat-bubble blockquote { border-left: 3px solid #cbd5e1; padding-left: 0.75rem; margin: 0.5rem 0; color: #64748b; }
-.dark .chat-bubble blockquote { border-left-color: #475569; color: #94a3b8; }
-.chat-bubble table { border-collapse: collapse; margin: 0.5rem 0; font-size: 0.85em; }
-.chat-bubble th, .chat-bubble td { border: 1px solid #e2e8f0; padding: 0.3rem 0.5rem; }
-.dark .chat-bubble th, .dark .chat-bubble td { border-color: #334155; }
-.chat-bubble th { background: rgba(0,0,0,0.04); font-weight: 600; }
-.dark .chat-bubble th { background: rgba(255,255,255,0.06); }
-.chat-bubble strong { font-weight: 600; }
-.chat-bubble a { color: #0d9a4b; text-decoration: underline; }
-.dark .chat-bubble a { color: #3dd87e; }
-</style>
 {% endblock %}
 
 {% block content %}
-<div x-data="chatApp()" class="flex h-[calc(100vh-5rem)] gap-4">
-    <!-- Sidebar -->
-    <div class="w-80 flex-shrink-0 bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 flex flex-col overflow-hidden">
-        <!-- Header -->
-        <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-800">
-            <h2 class="font-semibold text-gray-900 dark:text-gray-100 text-sm">Chat Context</h2>
-            <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Selected circulars for this conversation</p>
+<div x-data="chatApp()" class="grid h-[calc(100vh-15rem)] min-h-[640px] gap-4 xl:grid-cols-[320px_minmax(0,1fr)]">
+    <aside class="terminal-panel flex h-full min-h-0 flex-col overflow-hidden">
+        <div class="border-b border-reg-lineSoft/80 px-4 py-3 dark:border-reg-line">
+            <p class="panel-kicker">Context Rail</p>
+            <h2 class="panel-title mt-1">Selected Circulars</h2>
+            <p class="mt-1 text-sm text-slate-500 dark:text-reg-slate">Search and stage source circulars before sending a grounded question.</p>
         </div>
 
-        <!-- Selected circulars -->
-        <div class="px-4 py-3 border-b border-gray-100 dark:border-gray-800">
-            <div class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2 uppercase tracking-wider">Selected</div>
-            <div x-show="selectedCirculars.length === 0" class="text-xs text-gray-400 dark:text-gray-500 py-2">
-                No circulars selected. Search below or come from a search result.
+        <div class="border-b border-reg-lineSoft/80 px-4 py-3 dark:border-reg-line">
+            <div class="mb-2 flex items-center justify-between">
+                <span class="font-mono text-[11px] uppercase tracking-[0.16em] text-reg-slate">Selection</span>
+                <span class="reference-pill" x-text="selectedCirculars.length + ' docs'"></span>
             </div>
-            <div class="space-y-1.5 max-h-48 overflow-y-auto">
+            <div x-show="selectedCirculars.length === 0" class="rounded-xl border border-dashed border-reg-lineSoft/80 px-3 py-4 text-sm text-slate-500 dark:border-reg-line dark:text-reg-slate">
+                No circulars selected. Search below or hand off a selection from the terminal.
+            </div>
+            <div class="max-h-56 space-y-2 overflow-y-auto pr-1">
                 <template x-for="c in selectedCirculars" :key="c.id">
-                    <div class="flex items-center gap-1.5 bg-sbp-50 dark:bg-sbp-900/30 border border-sbp-200 dark:border-sbp-800 rounded-md px-2 py-1.5 group">
-                        <div class="flex-1 min-w-0">
-                            <p class="text-xs font-medium text-gray-900 dark:text-gray-100 truncate" x-text="c.title"></p>
-                            <p class="text-[10px] text-gray-500 dark:text-gray-400" x-text="c.department + ' · ' + (c.reference || c.date || 'N/A')"></p>
+                    <div class="rounded-xl border border-reg-lineSoft/80 px-3 py-3 dark:border-reg-line">
+                        <div class="flex items-start gap-2">
+                            <div class="min-w-0 flex-1">
+                                <p class="text-sm font-medium leading-6 text-reg-navy dark:text-reg-ivory" x-text="c.title"></p>
+                                <div class="mt-2 flex flex-wrap items-center gap-2">
+                                    <span class="reference-pill" x-text="c.reference || 'Reference pending'"></span>
+                                    <span class="font-mono text-[10px] uppercase tracking-[0.14em] text-reg-slate" x-text="c.department"></span>
+                                </div>
+                            </div>
+                            <button @click="removeSelected(c.id)" class="text-reg-slate transition hover:text-red-500">
+                                <i data-lucide="x" class="h-4 w-4"></i>
+                            </button>
                         </div>
-                        <button @click="removeSelected(c.id)" class="p-0.5 rounded hover:bg-red-100 dark:hover:bg-red-900/30 text-gray-400 hover:text-red-600 dark:hover:text-red-400 flex-shrink-0 transition-colors">
-                            <i data-lucide="x" class="w-3 h-3"></i>
-                        </button>
                     </div>
                 </template>
             </div>
-            <div class="flex items-center justify-between mt-2 pt-2 border-t border-gray-100 dark:border-gray-800">
-                <span class="text-xs text-gray-500 dark:text-gray-400"><span x-text="selectedCirculars.length"></span> selected</span>
-                <button x-show="selectedCirculars.length > 0" @click="selectedCirculars = []" class="text-xs text-red-500 hover:text-red-600 dark:hover:text-red-400 transition-colors">Clear all</button>
+            <div class="mt-3 flex items-center justify-between">
+                <span class="font-mono text-[11px] uppercase tracking-[0.16em] text-reg-slate">Scope</span>
+                <button x-show="selectedCirculars.length > 0" @click="selectedCirculars = []" class="text-xs uppercase tracking-[0.14em] text-red-500 transition hover:text-red-600">Clear</button>
             </div>
         </div>
 
-        <!-- Search -->
-        <div class="px-3 py-2 border-b border-gray-100 dark:border-gray-800">
+        <div class="border-b border-reg-lineSoft/80 px-4 py-3 dark:border-reg-line">
+            <span class="filter-label">Query Search</span>
             <div class="relative">
-                <i data-lucide="search" class="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400"></i>
-                <input type="search" x-model="searchQuery" placeholder="Search circulars..."
-                       class="w-full pl-8 pr-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-sbp-500/50">
+                <i data-lucide="search" class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-reg-slate"></i>
+                <input type="search" x-model="searchQuery" placeholder="Search circular titles or topics" class="terminal-input pl-10 text-sm">
             </div>
         </div>
 
-        <!-- Results list -->
-        <div class="flex-1 overflow-y-auto px-3 py-2 space-y-1">
-            <div class="text-xs text-gray-500 dark:text-gray-400 mb-1 px-1">Search results</div>
-            <template x-for="c in filteredCirculars" :key="c.id">
-                <div class="w-full text-left px-2.5 py-2 rounded-lg border border-transparent hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors group">
-                    <div class="flex items-center gap-2">
-                        <div class="flex-1 min-w-0">
-                            <p class="text-xs font-medium text-gray-900 dark:text-gray-100 truncate" x-text="c.title"></p>
-                            <p class="text-[10px] text-gray-500 dark:text-gray-400" x-text="c.department + ' · ' + (c.date || 'N/A')"></p>
+        <div class="min-h-0 flex-1 px-4 py-3">
+            <div class="mb-3 flex items-center justify-between">
+                <span class="font-mono text-[11px] uppercase tracking-[0.16em] text-reg-slate">Search Results</span>
+                <span x-show="searchLoading" class="font-mono text-[10px] uppercase tracking-[0.14em] text-reg-amber">Loading</span>
+            </div>
+            <div class="h-full space-y-2 overflow-y-auto pr-1">
+                <template x-for="c in filteredCirculars" :key="c.id">
+                    <div class="rounded-xl border border-reg-lineSoft/80 px-3 py-3 dark:border-reg-line">
+                        <div class="flex items-start gap-3">
+                            <div class="min-w-0 flex-1">
+                                <p class="text-sm font-medium leading-6 text-reg-navy dark:text-reg-ivory" x-text="c.title"></p>
+                                <div class="mt-2 flex flex-wrap items-center gap-2">
+                                    <span class="font-mono text-[10px] uppercase tracking-[0.14em] text-reg-slate" x-text="c.department"></span>
+                                    <span class="font-mono text-[10px] uppercase tracking-[0.14em] text-reg-slate" x-text="c.date || 'N/A'"></span>
+                                </div>
+                            </div>
+                            <button x-show="!isSelected(c)" @click="addSelected(c)" class="terminal-btn terminal-btn-secondary !px-2.5 !py-2 !text-[10px]">
+                                <i data-lucide="plus" class="h-3.5 w-3.5"></i>
+                                Add
+                            </button>
+                            <span x-show="isSelected(c)" class="status-pill status-active">Added</span>
                         </div>
-                        <button x-show="!isSelected(c)" @click="addSelected(c)"
-                                class="p-1 rounded-md text-gray-400 hover:text-sbp-600 hover:bg-sbp-50 dark:hover:bg-sbp-900/30 flex-shrink-0 transition-colors"
-                                title="Add to chat">
-                            <i data-lucide="plus" class="w-3.5 h-3.5"></i>
+                    </div>
+                </template>
+                <div x-show="!searchLoading && filteredCirculars.length === 0 && searchQuery" class="rounded-xl border border-dashed border-reg-lineSoft/80 px-3 py-4 text-sm text-slate-500 dark:border-reg-line dark:text-reg-slate">
+                    No circulars found for this query.
+                </div>
+            </div>
+        </div>
+    </aside>
+
+    <section class="terminal-panel flex h-full min-h-0 flex-col overflow-hidden">
+        <div class="border-b border-reg-lineSoft/80 px-4 py-3 dark:border-reg-line">
+            <div class="mb-2 flex flex-wrap items-center gap-2">
+                <template x-for="session in sessions" :key="session.id">
+                    <div class="flex items-center rounded-xl border"
+                         :class="currentSessionId === session.id ? 'border-reg-amber bg-reg-amber/10 text-reg-amber' : 'border-reg-lineSoft dark:border-reg-line text-reg-slate'">
+                        <button @click="loadSession(session.id)" class="px-3 py-2 font-mono text-[11px] uppercase tracking-[0.14em]">
+                            <span x-text="session.title || 'New Chat'"></span>
                         </button>
-                        <span x-show="isSelected(c)"
-                              class="text-xs text-sbp-600 dark:text-sbp-400 font-medium flex-shrink-0 flex items-center gap-0.5">
-                            <i data-lucide="check" class="w-3.5 h-3.5"></i> Added
-                        </span>
+                        <button @click="deleteSession(session.id)" class="px-2 text-reg-slate transition hover:text-red-500">
+                            <i data-lucide="x" class="h-3.5 w-3.5"></i>
+                        </button>
+                    </div>
+                </template>
+                <button @click="newSession()" class="terminal-btn terminal-btn-secondary !px-3 !py-2 !text-[11px]">
+                    <i data-lucide="plus" class="h-3.5 w-3.5"></i>
+                    New Session
+                </button>
+            </div>
+
+            <div class="flex flex-wrap gap-2">
+                <span class="status-pill status-active">Grounded if circulars selected</span>
+                <template x-for="c in selectedCirculars.slice(0, 3)" :key="c.id + '-chip'">
+                    <span class="reference-pill" x-text="c.reference || c.title"></span>
+                </template>
+                <span x-show="selectedCirculars.length > 3" class="status-pill" x-text="'+' + (selectedCirculars.length - 3) + ' more'"></span>
+            </div>
+        </div>
+
+        <div id="chat-messages" class="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4">
+            <template x-if="messages.length === 0">
+                <div class="flex h-full min-h-[24rem] items-center justify-center">
+                    <div class="max-w-xl text-center">
+                        <i data-lucide="messages-square" class="mx-auto mb-4 h-12 w-12 text-reg-slate"></i>
+                        <h3 class="font-serif text-2xl text-reg-navy dark:text-reg-ivory">Analyst conversation has not started.</h3>
+                        <p class="mt-3 text-sm leading-6 text-slate-500 dark:text-reg-slate">Add circulars in the left rail, then ask a question. With no circulars selected, the model will respond without source grounding.</p>
                     </div>
                 </div>
             </template>
-            <div x-show="searchLoading" class="text-xs text-gray-400 dark:text-gray-500 text-center py-4">
-                Searching...
-            </div>
-            <div x-show="!searchLoading && filteredCirculars.length === 0 && searchQuery" class="text-xs text-gray-400 dark:text-gray-500 text-center py-4">
-                No circulars found.
-            </div>
-        </div>
-    </div>
 
-    <!-- Chat Area -->
-    <div class="flex-1 flex flex-col bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden">
-        <!-- Session tabs -->
-        <div class="px-4 py-2 border-b border-gray-200 dark:border-gray-800 flex items-center gap-2 overflow-x-auto">
-            <template x-for="session in sessions" :key="session.id">
-                <div class="flex items-center gap-0.5 rounded-md border transition-colors whitespace-nowrap"
-                     :class="currentSessionId === session.id ? 'bg-sbp-50 dark:bg-sbp-900/30 text-sbp-700 dark:text-sbp-300 border-sbp-500 dark:border-sbp-400' : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 border-transparent'">
-                    <button @click="loadSession(session.id)"
-                            class="px-3 py-1 text-xs font-medium rounded-l-md flex-shrink-0">
-                        <span x-text="session.title || 'New Chat'"></span>
-                    </button>
-                    <button @click="deleteSession(session.id)"
-                            class="px-1 py-1 text-gray-400 hover:text-red-500 dark:hover:text-red-400 rounded-r-md flex-shrink-0 transition-colors"
-                            title="Delete chat">
-                        <i data-lucide="x" class="w-3 h-3"></i>
-                    </button>
-                </div>
-            </template>
-            <button @click="newSession()" class="px-2 py-1 text-xs text-gray-500 dark:text-gray-400 hover:text-sbp-600 dark:hover:text-sbp-400 transition-colors flex-shrink-0">
-                <i data-lucide="plus" class="w-4 h-4"></i>
-            </button>
-        </div>
-
-        <!-- Messages -->
-        <div class="flex-1 overflow-y-auto p-4 space-y-4" id="chat-messages">
-            <template x-if="messages.length === 0">
-                <div class="flex flex-col items-center justify-center h-full text-center">
-                    <i data-lucide="message-square" class="w-12 h-12 text-gray-300 dark:text-gray-600 mb-3"></i>
-                    <h3 class="text-lg font-medium text-gray-400 dark:text-gray-500">Chat with Circulars</h3>
-                    <p class="text-sm text-gray-400 dark:text-gray-500 mt-1 max-w-md">Select circulars from the sidebar and ask questions. The AI will analyze the selected circulars and provide answers based on their content.</p>
-                </div>
-            </template>
             <template x-for="msg in messages" :key="msg.id">
                 <div :class="msg.role === 'user' ? 'flex justify-end' : 'flex justify-start'">
-                    <div :class="msg.role === 'user' ? 'bg-sbp-600 text-white' : 'bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100'"
-                         class="chat-bubble max-w-[80%] px-4 py-2.5 rounded-2xl text-sm leading-relaxed"
-                         x-html="renderMarkdown(msg.content)">
+                    <div class="max-w-[85%]">
+                        <div class="mb-1 font-mono text-[10px] uppercase tracking-[0.16em]"
+                             :class="msg.role === 'user' ? 'text-reg-green text-right' : 'text-reg-slate'">
+                            <span x-text="msg.role === 'user' ? 'User Prompt' : 'Assistant Response'"></span>
+                        </div>
+                        <div :class="msg.role === 'user' ? 'border-reg-green/50 bg-reg-green text-reg-ivory' : 'border-reg-lineSoft bg-white/55 text-slate-800 dark:border-reg-line dark:bg-[#101d30] dark:text-reg-ivory'"
+                             class="chat-bubble border px-4 py-3 text-sm leading-6"
+                             x-html="renderMarkdown(msg.content)">
+                        </div>
                     </div>
                 </div>
             </template>
         </div>
 
-        <!-- Input -->
-        <div class="px-4 py-3 border-t border-gray-200 dark:border-gray-800">
-            <div class="flex items-center gap-2">
-                <input type="text" x-model="inputMessage" @keydown.enter="sendMessage()" placeholder="Ask about the selected circulars..."
-                       :disabled="sending"
-                       class="flex-1 px-4 py-2.5 text-sm rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-sbp-500/50 focus:border-sbp-500 transition-colors disabled:opacity-50">
-                <button @click="sendMessage()" :disabled="sending || !inputMessage.trim()"
-                        class="px-4 py-2.5 text-sm font-medium rounded-xl bg-sbp-600 hover:bg-sbp-700 text-white transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed">
-                    <span x-show="!sending">Send</span>
-                    <span x-show="sending">...</span>
+        <div class="border-t border-reg-lineSoft/80 px-4 py-3 dark:border-reg-line">
+            <div class="mb-2 flex items-center justify-between gap-3">
+                <p class="font-mono text-[11px] uppercase tracking-[0.16em] text-reg-slate">Composer</p>
+                <p class="text-xs text-slate-500 dark:text-reg-slate" x-text="selectedCirculars.length ? 'Grounded mode: answers use selected circulars.' : 'Ungrounded mode: no circulars selected.'"></p>
+            </div>
+            <div class="flex gap-3">
+                <input type="text" x-model="inputMessage" @keydown.enter="sendMessage()" :disabled="sending"
+                       placeholder="Ask about regulatory impact, scope, deadlines, or relationships"
+                       class="terminal-input flex-1 text-sm disabled:opacity-60">
+                <button @click="sendMessage()" :disabled="sending || !inputMessage.trim()" class="terminal-btn terminal-btn-primary justify-center disabled:cursor-not-allowed disabled:opacity-60">
+                    <i data-lucide="send" class="h-4 w-4"></i>
+                    <span x-text="sending ? 'Sending' : 'Submit'"></span>
                 </button>
             </div>
         </div>
-    </div>
+    </section>
 </div>
 
 <script>
@@ -219,12 +216,10 @@ function chatApp() {
                 }, 300);
             });
 
-            // Pre-select circulars from URL query param
             const params = new URLSearchParams(window.location.search);
             const preselectIds = params.get('circular_ids');
             if (preselectIds) {
                 const ids = preselectIds.split(',');
-                // Fetch any circulars that are not in the recent list
                 const missingIds = ids.filter(function(id) {
                     return !this.allCirculars.some(function(c) { return c.id === id; });
                 }.bind(this));
@@ -249,14 +244,12 @@ function chatApp() {
                         console.error('Failed to fetch circular', missingIds[i], e);
                     }
                 }
-                // Now select them
                 ids.forEach(function(id) {
                     const c = this.allCirculars.find(function(x) { return x.id === id; });
                     if (c && !this.selectedCirculars.some(function(s) { return s.id === c.id; })) {
                         this.selectedCirculars.push(c);
                     }
                 }.bind(this));
-                // Clean up the URL so a refresh doesn't re-add them
                 if (window.history.replaceState) {
                     window.history.replaceState({}, document.title, '/chat');
                 }
@@ -291,7 +284,7 @@ function chatApp() {
 
         async loadSession(sessionId) {
             this.currentSessionId = sessionId;
-            const resp = await fetch(`/api/chat/sessions/${sessionId}`);
+            const resp = await fetch('/api/chat/sessions/' + sessionId);
             const data = await resp.json();
             this.messages = data.messages || [];
             this.selectedCirculars = data.circulars || [];

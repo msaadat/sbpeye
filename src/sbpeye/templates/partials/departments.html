@@ -1,21 +1,24 @@
-<nav class="flex items-center gap-1.5 text-sm mb-4 flex-wrap">
-    <span class="font-medium text-gray-900 dark:text-gray-100">All Departments</span>
-</nav>
+<div class="space-y-4">
+    <nav class="flex items-center gap-2 border-b border-reg-lineSoft/80 pb-3 text-[11px] uppercase tracking-[0.18em] text-reg-slate dark:border-reg-line">
+        <span class="reference-pill">Browse</span>
+        <span>/</span>
+        <span>Departments</span>
+    </nav>
 
-<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
-    {% for d in departments %}
-    <div hx-get="/partials/years?department={{ d.department | urlencode }}"
-         hx-target="#browse-content"
-         hx-indicator="#browse-spinner"
-         class="group cursor-pointer bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-4 hover:border-sbp-500 dark:hover:border-sbp-400 hover:shadow-md transition-all duration-150">
-        <div class="flex items-start justify-between gap-2">
-            <div class="font-medium text-gray-900 dark:text-gray-100 group-hover:text-sbp-700 dark:group-hover:text-sbp-400 transition-colors text-sm leading-snug">
-                {{ d.department }}
+    <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {% for d in departments %}
+        <button hx-get="/partials/years?department={{ d.department | urlencode }}"
+                hx-target="#browse-content"
+                hx-indicator="#browse-spinner"
+                class="dossier-row text-left">
+            <div class="flex items-start justify-between gap-3">
+                <div>
+                    <p class="panel-kicker">Department</p>
+                    <p class="mt-2 text-sm font-medium leading-6 text-reg-navy dark:text-reg-ivory">{{ d.department }}</p>
+                </div>
+                <span class="reference-pill">{{ d.count }}</span>
             </div>
-            <span class="flex-shrink-0 text-xs bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 px-2 py-0.5 rounded-full">
-                {{ d.count }}
-            </span>
-        </div>
+        </button>
+        {% endfor %}
     </div>
-    {% endfor %}
 </div>

@@ -67,6 +67,7 @@ function injectPdfPreviewIcons() {
         if (!href) return;
         if (!href.toLowerCase().endsWith('.pdf')) return;
         if (link.closest('#pdf-modal')) return;
+        if (link.closest('#news-container') || link.closest('#news-drawer-panel')) return;
 
         link.dataset.pdfPreviewInjected = 'true';
         var icon = document.createElement('button');

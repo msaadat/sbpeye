@@ -5,46 +5,50 @@
 {% block nav_actions %}
 <div class="flex items-center gap-2">
     {% if ecodata_time %}
-    <span class="hidden sm:inline text-xs text-gray-400 dark:text-gray-500">
-        Updated: {{ ecodata_time.strftime('%b %d, %Y %H:%M') }}
-    </span>
+    <span class="reference-pill hidden lg:inline-flex">{{ ecodata_time.strftime('%d %b %Y %H:%M') }}</span>
     {% endif %}
     <button id="sync-btn"
             hx-post="/api/sync"
             hx-trigger="click"
             hx-swap="none"
             hx-on::after-request="showSyncToast(event.detail.successful)"
-            class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
-        <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+            class="terminal-btn terminal-btn-secondary !px-3 !py-2 !text-[11px]">
+        <i data-lucide="refresh-cw" class="h-3.5 w-3.5"></i>
         Sync
     </button>
 </div>
 {% endblock %}
 
 {% block content %}
-<div>
-    <div id="sync-toast" class="fixed top-20 right-4 z-50 max-w-sm hidden"></div>
+<div class="space-y-6">
+    <div id="sync-toast" class="fixed right-4 top-24 z-50 hidden max-w-sm"></div>
 
     <script>
     function showSyncToast(success) {
         var toast = document.getElementById('sync-toast');
-        toast.className = 'fixed top-20 right-4 z-50 max-w-sm';
+        toast.className = 'fixed right-4 top-24 z-50 max-w-sm';
         if (success) {
-            toast.innerHTML = '<div class="flex items-center gap-2 px-4 py-3 bg-sbp-50 dark:bg-sbp-900/30 border border-sbp-200 dark:border-sbp-800 rounded-lg shadow-lg"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-sbp-600 dark:text-sbp-400"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg><span class="text-sm text-sbp-800 dark:text-sbp-300">Sync started in the background.</span></div>';
+            toast.innerHTML = '<div class="terminal-panel p-4 text-sm text-reg-navy dark:text-reg-ivory">Sync started in the background.</div>';
         } else {
-            toast.innerHTML = '<div class="flex items-center gap-2 px-4 py-3 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg shadow-lg"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-red-600 dark:text-red-400"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg><span class="text-sm text-red-800 dark:text-red-300">Failed to start sync.</span></div>';
+            toast.innerHTML = '<div class="terminal-panel p-4 text-sm text-red-500">Failed to start sync.</div>';
         }
         setTimeout(function() {
-            toast.className = 'fixed top-20 right-4 z-50 max-w-sm hidden';
+            toast.className = 'fixed right-4 top-24 z-50 max-w-sm hidden';
         }, 3000);
     }
     </script>
 
-    <section class="mb-6">
-        <h1 class="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-2">Economic Data</h1>
-        <p class="text-sm text-gray-500 dark:text-gray-400">
-            Data sourced from <a href="https://www.sbp.org.pk/ecodata/index2.asp" target="_blank" rel="noopener noreferrer" class="text-sbp-600 dark:text-sbp-400 hover:underline">State Bank of Pakistan</a>
-        </p>
+    <section class="terminal-panel p-5">
+        <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+            <div>
+                <p class="panel-kicker">SBP Statistical Registry</p>
+                <h2 class="panel-title mt-1">Economic Data Sources</h2>
+            </div>
+            <p class="max-w-3xl text-sm leading-6 text-slate-500 dark:text-reg-slate">
+                Data sourced from
+                <a href="https://www.sbp.org.pk/ecodata/index2.asp" target="_blank" rel="noopener noreferrer" class="text-reg-green underline dark:text-reg-amber">State Bank of Pakistan EcoData</a>.
+            </p>
+        </div>
     </section>
 
     <section>
@@ -52,15 +56,14 @@
              hx-get="/partials/ecodata_table"
              hx-trigger="load"
              hx-swap="innerHTML"
-             hx-indicator="#ecodata-spinner">
-        </div>
+             hx-indicator="#ecodata-spinner"></div>
         <div id="ecodata-spinner" class="htmx-indicator flex items-center justify-center py-12">
-            <div class="flex items-center gap-2 text-sm text-gray-400 dark:text-gray-500">
-                <svg class="animate-spin w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <div class="flex items-center gap-2 font-mono text-xs uppercase tracking-[0.18em] text-reg-slate">
+                <svg class="h-4 w-4 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                     <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                     <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
                 </svg>
-                Loading economic data...
+                Loading economic data
             </div>
         </div>
     </section>

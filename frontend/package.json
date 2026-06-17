@@ -1,0 +1,30 @@
+{
+  "name": "sbpeye-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "@primeuix/themes": "^1.0",
+    "dompurify": "^3.4.10",
+    "marked": "^15",
+    "pdfjs-dist": "^6.0.227",
+    "pinia": "^3.0",
+    "primeicons": "^7.0",
+    "primevue": "^4.3",
+    "vue": "^3.5",
+    "vue-router": "^4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.3",
+    "@vitejs/plugin-vue": "^5.2",
+    "typescript": "~5.8",
+    "vite": "^6.3",
+    "vue-tsc": "^2.2"
+  }
+}

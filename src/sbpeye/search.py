@@ -627,7 +627,7 @@ class SearchEngine:
         )
 
         # Apply filters to candidates before sorting
-        if start_year or end_year or department:
+        if start_year or end_year or department or tag:
             q_obj = db.query(Circular.id).filter(Circular.id.in_(all_candidate_ids))
             q_obj = apply_filters(q_obj)
             valid_ids = {r[0] for r in q_obj.all()}

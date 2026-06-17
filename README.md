@@ -9,7 +9,7 @@ It scrapes SBP pages, stores circulars and economic datasets, and provides a mod
 - Stores data in SQLite with persistent ChromaDB vector embeddings
 - Hybrid search combining BM25 keyword ranking with vector similarity
 - AI-driven summary, tagging, compliance checklists, and relationship extraction
-- HTMX + Alpine.js front-end for fast interactive browsing and search
+- Vue 3 + PrimeVue SPA front-end for fast interactive browsing and search
 - Localizable AI backend supporting LM Studio, OpenAI, and Google Gemini
 - CLI for batch sync, summarization, tagging, relationships, and status updates
 
@@ -17,8 +17,8 @@ It scrapes SBP pages, stores circulars and economic datasets, and provides a mod
 
 - Python 3.12+
 - FastAPI + Uvicorn
-- Jinja2 templates
-- HTMX, Alpine.js, Tailwind CSS
+- Vue 3 + TypeScript + Vite + Vue Router + Pinia
+- PrimeVue Aura (SBP green/gold accents, light/dark support)
 - SQLite via SQLAlchemy
 - ChromaDB for embeddings
 - BeautifulSoup4, requests, pdfplumber for scraping
@@ -30,21 +30,37 @@ It scrapes SBP pages, stores circulars and economic datasets, and provides a mod
 
 - Python 3.12+
 - `uv` for dependency management if using the supplied lockfile
+- Node.js 18+ and npm (for frontend)
 
 ### Install
 
 ```bash
-cd /home/saad/Work/SBPEye
+# Backend dependencies
 uv sync
+
+# Frontend dependencies
+cd frontend && npm install
 ```
 
-### Run the app
+### Run the app (development)
 
 ```bash
+# Terminal 1: Backend (FastAPI)
 python run.py
+
+# Terminal 2: Frontend dev server (Vite)
+cd frontend && npm run dev
 ```
 
-Then open `http://localhost:8000`.
+Then open `http://localhost:5173` (Vite dev server proxies API to FastAPI).
+
+### Build frontend for production
+
+```bash
+cd frontend && npm run build
+```
+
+FastAPI serves the built SPA from `frontend/dist/` at `http://localhost:8000`.
 
 ## AI Configuration
 
@@ -97,6 +113,20 @@ SBPEye/
 ├── uv.lock
 ├── sbpeye.db
 ├── chroma_db/
+├── frontend/                        # Vue 3 + PrimeVue SPA
+│   ├── index.html
+│   ├── vite.config.ts
+│   ├── tsconfig.json
+│   ├── package.json
+│   ├── src/
+│   │   ├── App.vue
+│   │   ├── main.ts
+│   │   ├── router/
+│   │   ├── stores/
+│   │   ├── views/
+│   │   ├── components/
+│   │   └── assets/
+│   └── public/
 └── src/sbpeye/
     ├── __init__.py
     ├── main.py
@@ -110,20 +140,8 @@ SBPEye/
     │   ├── ecodata_index.py
     │   ├── llm.py
     │   └── pdf_summarizer.py
-    ├── cli/
-    │   └── commands.py
-    ├── templates/
-    │   ├── _base.html
-    │   ├── index.html
-    │   ├── circular.html
-    │   ├── chat.html
-    │   ├── settings.html
-    │   ├── ecodata.html
-    │   └── partials/
-    └── static/
-        ├── app.js
-        ├── tailwind.css
-        └── favicon.svg
+    └── cli/
+        └── commands.py
 ```
 
 ## Notes
@@ -131,6 +149,16 @@ SBPEye/
 - `uv.lock` is the committed lockfile for dependency reproducibility when using `uv`.
 - `.python-version` is optional and only required if using `pyenv` or similar local version managers.
 - Scraping is driven by the CLI; the web UI is for browsing, searching, and AI analysis.
+- Frontend typecheck: `cd frontend && npm run typecheck`
+
+## Development Commands
+
+| Task | Command |
+|------|---------|
+| Backend server | `python run.py` |
+| Frontend dev server | `cd frontend && npm run dev` |
+| Frontend build | `cd frontend && npm run build` |
+| Frontend typecheck | `cd frontend && npm run typecheck` |
 
 ## License
 

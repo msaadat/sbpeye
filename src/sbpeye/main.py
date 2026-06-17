@@ -1,10 +1,10 @@
 from fastapi import FastAPI, Depends, Request, BackgroundTasks, Form
-from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 from sqlalchemy import func, extract
 from urllib.parse import urljoin, urlparse, urlencode
+from pathlib import Path
 import requests as http_requests
 from bs4 import BeautifulSoup
 import re as _re
@@ -34,29 +34,56 @@ def _format_timestamp(value: datetime | str | None) -> str:
     return value or "Never"
 
 
-def _build_shell_context(db: Session, active_nav: str, page_title: str, page_kicker: str, page_summary: str) -> dict:
-    sync_status = db.query(SyncStatus).order_by(SyncStatus.id.desc()).first()
-    last_sync_dt = sync_status.last_sync_date if sync_status else None
-    total_circulars = db.query(func.count(Circular.id)).scalar() or 0
-    department_count = db.query(func.count(func.distinct(Circular.department))).filter(Circular.department.isnot(None)).scalar() or 0
-    indexed_today = db.query(func.count(Circular.id)).filter(func.date(Circular.date) == datetime.now().date()).scalar() or 0
-    vector_db_ready = os.path.exists("chroma_db/chroma.sqlite3")
+def _safe_json_list(value: str | None) -> list:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
 
+
+def _circular_summary(circular: Circular, snippet: str | None = None) -> dict:
     return {
-        "active_nav": active_nav,
-        "page_title": page_title,
-        "page_kicker": page_kicker,
-        "page_summary": page_summary,
-        "shell": {
-            "live_status": (sync_status.status if sync_status and sync_status.status else "idle").upper(),
-            "total_circulars": total_circulars,
-            "department_count": department_count,
-            "indexed_today": indexed_today,
-            "vector_db_state": "READY" if vector_db_ready else "OFFLINE",
-            "last_sync": _format_timestamp(last_sync_dt),
-            "last_sync_dt": last_sync_dt,
-        },
+        "id": circular.id,
+        "title": circular.title,
+        "department": circular.department,
+        "reference": circular.reference,
+        "date": circular.date.strftime("%Y-%m-%d") if circular.date else None,
+        "url": circular.url,
+        "summary": circular.summary[:200] if circular.summary else None,
+        "tags": _safe_json_list(circular.tags),
+        "status": circular.status or "active",
+        "snippet": snippet or "",
     }
+
+
+def _settings_payload(config: AIConfig) -> dict:
+    return {
+        "provider": config.provider,
+        "base_url": config.base_url,
+        "api_key": config.api_key,
+        "model": config.model,
+        "chat_model": config.chat_model,
+        "max_context_tokens": config.max_context_tokens,
+        "ai_provider": config.provider,
+        "ai_base_url": config.base_url,
+        "ai_api_key": config.api_key,
+        "ai_model": config.model,
+        "ai_chat_model": config.chat_model,
+        "ai_max_context_tokens": config.max_context_tokens,
+    }
+
+
+def _is_allowed_sbp_url(url: str | None) -> bool:
+    if not url:
+        return False
+    parsed = urlparse(url)
+    return parsed.scheme in ("http", "https") and parsed.netloc.lower() in ALLOWED_DOMAINS
+
+
+
 
 ALLOWED_DOMAINS = {"www.sbp.org.pk", "sbp.org.pk"}
 
@@ -76,40 +103,35 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="SBPEye", description="Independent SBP Circulars & EcoData Indexer")
 
-# Setup templates and static files
+# Setup SPA static files
 os.makedirs("src/sbpeye/static", exist_ok=True)
-os.makedirs("src/sbpeye/templates", exist_ok=True)
+
+SPA_DIR = Path("src/sbpeye/static/spa")
+SPA_INDEX = SPA_DIR / "index.html"
+SPA_ASSETS_DIR = SPA_DIR / "assets"
 
 app.mount("/static", StaticFiles(directory="src/sbpeye/static"), name="static")
-templates = Jinja2Templates(directory="src/sbpeye/templates")
+if SPA_ASSETS_DIR.exists():
+    app.mount("/spa/assets", StaticFiles(directory=SPA_ASSETS_DIR), name="spa-assets")
 
-@app.get("/", response_class=HTMLResponse)
-async def read_root(request: Request, db: Session = Depends(get_db)):
-    # Get departments for filters
-    departments_query = db.query(Circular.department).distinct().order_by(Circular.department).all()
-    departments = [d[0] for d in departments_query if d[0]]
 
-    # Get year range for filter dropdowns
-    year_range = db.query(
-        func.min(extract('year', Circular.date)),
-        func.max(extract('year', Circular.date)),
-    ).filter(Circular.date.isnot(None)).first()
-    min_year = int(year_range[0]) if year_range[0] else datetime.now().year
-    max_year = int(year_range[1]) if year_range[1] else datetime.now().year
+def spa_index_response() -> FileResponse:
+    return FileResponse(SPA_INDEX)
 
-    context = _build_shell_context(
-        db,
-        active_nav="dashboard",
-        page_title="Regulatory Intelligence Terminal",
-        page_kicker="SBP Circulars Workspace",
-        page_summary="Search, compare, and operationalize Pakistan banking circulars from a single analyst console.",
-    )
-    context.update({
-        "departments": departments,
-        "min_year": min_year,
-        "max_year": max_year,
-    })
-    return templates.TemplateResponse(request=request, name="index.html", context=context)
+
+@app.get("/")
+async def read_root():
+    return spa_index_response()
+
+
+@app.get("/circulars")
+async def circulars_spa():
+    return spa_index_response()
+
+
+@app.get("/circulars/{path:path}")
+async def circulars_spa_fallback(path: str):
+    return spa_index_response()
 
 
 def clean_sbp_html(html_content: bytes, base_url: str = "") -> str:
@@ -202,53 +224,35 @@ def clean_sbp_html(html_content: bytes, base_url: str = "") -> str:
     return result
 
 
-@app.get("/view_circular", response_class=HTMLResponse)
-async def view_circular(request: Request, cir: str, db: Session = Depends(get_db)):
-    context = _build_shell_context(
-        db,
-        active_nav="dashboard",
-        page_title="Circular Reading Room",
-        page_kicker="Source Document",
-        page_summary="Read the original SBP circular alongside extracted intelligence, compliance notes, and relationships.",
-    )
-    parsed = urlparse(cir)
-    domain = parsed.netloc.lower()
-    if domain not in ALLOWED_DOMAINS:
-        context.update({"content": "", "url": cir, "error": "Only SBP (sbp.org.pk) circulars are supported."})
-        return templates.TemplateResponse(request=request, name="circular.html", context=context)
-
-    try:
-        resp = http_requests.get(cir, headers=HEADERS, timeout=50)
-        resp.raise_for_status()
-
-        if resp.encoding and resp.encoding.lower() in ("iso-8859-1", "windows-1252"):
-            if resp.apparent_encoding:
-                resp.encoding = resp.apparent_encoding
-
-        cleaned_html = clean_sbp_html(resp.content, base_url=cir)
-
-        context.update({"content": cleaned_html, "url": cir, "error": None})
-        return templates.TemplateResponse(request=request, name="circular.html", context=context)
-    except Exception as e:
-        context.update({"content": "", "url": cir, "error": str(e)})
-        return templates.TemplateResponse(request=request, name="circular.html", context=context)
 
 ECODATA_CACHE_TTL_HOURS = 1
 
-@app.get("/ecodata", response_class=HTMLResponse)
-async def ecodata_page(request: Request, db: Session = Depends(get_db)):
-    sync_status = db.query(SyncStatus).order_by(SyncStatus.id.desc()).first()
-    ecodata_time = sync_status.ecodata_index_time if sync_status else None
+@app.get("/ecodata")
+async def ecodata_page():
+    return spa_index_response()
 
-    context = _build_shell_context(
-        db,
-        active_nav="ecodata",
-        page_title="Economic Data Registry",
-        page_kicker="SBP EcoData",
-        page_summary="Traverse SBP statistical releases, archives, and downloadable datasets from the same research shell.",
-    )
-    context.update({"ecodata_time": ecodata_time})
-    return templates.TemplateResponse(request=request, name="ecodata.html", context=context)
+
+@app.get("/api/app/status")
+async def get_app_status(db: Session = Depends(get_db)):
+    sync_status = db.query(SyncStatus).order_by(SyncStatus.id.desc()).first()
+    last_sync_dt = sync_status.last_sync_date if sync_status else None
+    total_circulars = db.query(func.count(Circular.id)).scalar() or 0
+    department_count = db.query(func.count(func.distinct(Circular.department))).filter(Circular.department.isnot(None)).scalar() or 0
+    indexed_today = db.query(func.count(Circular.id)).filter(func.date(Circular.date) == datetime.now().date()).scalar() or 0
+    vector_db_ready = os.path.exists("chroma_db/chroma.sqlite3")
+
+    return {
+        "sync_status": sync_status.status if sync_status and sync_status.status else "idle",
+        "live_status": (sync_status.status if sync_status and sync_status.status else "idle").upper(),
+        "total_circulars": total_circulars,
+        "department_count": department_count,
+        "indexed_today": indexed_today,
+        "vector_db_state": "READY" if vector_db_ready else "OFFLINE",
+        "last_sync_display": _format_timestamp(last_sync_dt),
+        "last_sync": _format_timestamp(last_sync_dt),
+        "last_sync_dt": last_sync_dt.isoformat() if isinstance(last_sync_dt, datetime) else None,
+        "last_sync_raw": last_sync_dt.isoformat() if isinstance(last_sync_dt, datetime) else None,
+    }
 
 
 def _get_ecodata_entries(db: Session, force_refresh: bool = False) -> list[dict]:
@@ -312,53 +316,6 @@ async def get_pdf_summary(url: str, db: Session = Depends(get_db)):
         return {"error": str(e), "url": url}
 
 
-@app.get("/partials/ecodata_table", response_class=HTMLResponse)
-async def partial_ecodata_table(request: Request, db: Session = Depends(get_db)):
-    entries = _get_ecodata_entries(db)
-
-    quick_links = [e for e in entries if e["is_quick_link"]]
-    sections = {}
-    for e in entries:
-        if e["is_quick_link"]:
-            continue
-        section = e["section"]
-        subsection = e["subsection"]
-        if section not in sections:
-            sections[section] = {"subsections": {}, "entries": []}
-        if subsection:
-            if subsection not in sections[section]["subsections"]:
-                sections[section]["subsections"][subsection] = []
-            sections[section]["subsections"][subsection].append(e)
-        else:
-            sections[section]["entries"].append(e)
-
-    return templates.TemplateResponse(
-        request=request, name="partials/ecodata_table.html",
-        context={
-            "quick_links": quick_links,
-            "sections": sections,
-        }
-    )
-
-
-@app.get("/partials/ecodata_summary", response_class=HTMLResponse)
-async def partial_ecodata_summary(request: Request, url: str, db: Session = Depends(get_db)):
-    if not is_summarizable(url):
-        return templates.TemplateResponse(
-            request=request, name="partials/ecodata_summary.html",
-            context={"error": "This document is not configured for summarization.", "summary": None}
-        )
-    try:
-        summary = summarize_pdf(url, db)
-        return templates.TemplateResponse(
-            request=request, name="partials/ecodata_summary.html",
-            context={"summary": summary, "error": None, "url": url}
-        )
-    except Exception as e:
-        return templates.TemplateResponse(
-            request=request, name="partials/ecodata_summary.html",
-            context={"error": str(e), "summary": None}
-        )
 
 
 @app.get("/api/circulars/tags")
@@ -367,11 +324,7 @@ async def get_tags(db: Session = Depends(get_db)):
     rows = db.query(Circular.tags).filter(Circular.tags != None, Circular.tags != "").all()
     tag_counts = {}
     for row in rows:
-        try:
-            tags = json.loads(row[0]) if row[0] else []
-        except (json.JSONDecodeError, TypeError):
-            tags = []
-        for t in tags:
+        for t in _safe_json_list(row[0]):
             tag_counts[t] = tag_counts.get(t, 0) + 1
     sorted_tags = sorted(tag_counts.items(), key=lambda x: -x[1])
     return [{"tag": t, "count": c} for t, c in sorted_tags]
@@ -391,31 +344,31 @@ async def search_circulars(
     department: str | None = None,
     sort_by: str = "relevance",
     tag: str | None = None,
+    page: int = 1,
+    per_page: int = 20,
     db: Session = Depends(get_db)
 ):
+    page = max(page, 1)
+    per_page = min(max(per_page, 1), 100)
+    offset = (page - 1) * per_page
     results, total = search_engine.search(
         q, db,
+        offset=offset,
+        limit=per_page,
         start_year=_parse_year(start_year),
         end_year=_parse_year(end_year),
         department=department,
         sort_by=sort_by,
         tag=tag,
     )
-    return [
-        {
-            "id": r["circular"].id,
-            "title": r["circular"].title,
-            "department": r["circular"].department,
-            "reference": r["circular"].reference,
-            "date": r["circular"].date.strftime("%Y-%m-%d") if r["circular"].date else None,
-            "url": r["circular"].url,
-            "summary": r["circular"].summary[:200] if r["circular"].summary else None,
-            "tags": json.loads(r["circular"].tags) if r["circular"].tags else [],
-            "status": r["circular"].status or "active",
-            "snippet": r["snippet"],
-        }
-        for r in results
-    ]
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    return {
+        "items": [_circular_summary(r["circular"], r.get("snippet")) for r in results],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages,
+    }
 
 
 @app.get("/api/circulars/departments")
@@ -458,17 +411,7 @@ async def browse_circulars(department: str, year: int, db: Session = Depends(get
 async def browse_recent_circulars(limit: int = 100, db: Session = Depends(get_db)):
     circulars = db.query(Circular).order_by(Circular.date.desc()).limit(limit).all()
     return [
-        {
-            "id": c.id,
-            "title": c.title,
-            "department": c.department,
-            "reference": c.reference,
-            "date": c.date.strftime("%Y-%m-%d") if c.date else None,
-            "url": c.url,
-            "summary": c.summary[:200] if c.summary else None,
-            "tags": json.loads(c.tags) if c.tags else [],
-            "status": c.status or "active",
-        }
+        _circular_summary(c)
         for c in circulars
     ]
 
@@ -477,15 +420,46 @@ async def browse_recent_circulars(limit: int = 100, db: Session = Depends(get_db
 async def get_circular_by_url(url: str, db: Session = Depends(get_db)):
     c = db.query(Circular).filter(Circular.url == url).first()
     if not c:
+        normalized = url.rstrip("/")
+        c = db.query(Circular).filter(Circular.url == normalized).first()
+    if not c:
+        c = db.query(Circular).filter(func.lower(Circular.url) == url.lower()).first()
+    if not c:
         return JSONResponse({"error": "Circular not found"}, status_code=404)
-    return {
-        "id": c.id,
-        "title": c.title,
-        "reference": c.reference,
-        "department": c.department,
-        "date": c.date.strftime("%Y-%m-%d") if c.date else None,
-        "url": c.url,
-    }
+    return _circular_summary(c)
+
+
+@app.get("/api/circulars/{circular_id}/source")
+async def get_circular_source(circular_id: str, db: Session = Depends(get_db)):
+    c = db.query(Circular).filter(Circular.id == circular_id).first()
+    if not c:
+        return JSONResponse({"error": "Circular not found"}, status_code=404)
+    if not _is_allowed_sbp_url(c.url):
+        return JSONResponse({"error": "Only SBP (sbp.org.pk) circulars are supported."}, status_code=400)
+
+    if c.url.lower().split("?", 1)[0].endswith(".pdf"):
+        return {
+            "type": "pdf",
+            "url": c.url,
+            "content": None,
+            "preview_url": f"/api/pdf_preview?url={urlencode({'': c.url})[1:]}",
+        }
+
+    try:
+        resp = http_requests.get(c.url, headers=HEADERS, timeout=50)
+        resp.raise_for_status()
+
+        if resp.encoding and resp.encoding.lower() in ("iso-8859-1", "windows-1252"):
+            if resp.apparent_encoding:
+                resp.encoding = resp.apparent_encoding
+
+        return {
+            "type": "html",
+            "url": c.url,
+            "content": clean_sbp_html(resp.content, base_url=c.url),
+        }
+    except Exception as e:
+        return JSONResponse({"error": str(e), "type": "html", "url": c.url, "content": ""}, status_code=502)
 
 
 @app.get("/api/circulars/{circular_id}")
@@ -502,15 +476,23 @@ async def get_circular_detail(circular_id: str, db: Session = Depends(get_db)):
     ).all()
 
     def rel_dict(r):
+        source = None
         target = None
+        if r.source_id:
+            sc = db.query(Circular).filter(Circular.id == r.source_id).first()
+            if sc:
+                source = {"id": sc.id, "title": sc.title, "reference": sc.reference, "url": sc.url, "status": sc.status or "active"}
         if r.target_id:
             tc = db.query(Circular).filter(Circular.id == r.target_id).first()
             if tc:
                 target = {"id": tc.id, "title": tc.title, "reference": tc.reference, "url": tc.url, "status": tc.status or "active"}
         return {
             "type": r.type,
+            "source_id": r.source_id,
             "target_id": r.target_id,
             "target_reference": r.target_reference,
+            "confidence": r.confidence,
+            "source": source,
             "target": target,
         }
 
@@ -522,8 +504,8 @@ async def get_circular_detail(circular_id: str, db: Session = Depends(get_db)):
         "date": c.date.strftime("%Y-%m-%d") if c.date else None,
         "url": c.url,
         "summary": c.summary,
-        "tags": json.loads(c.tags) if c.tags else [],
-        "compliance_checklist": json.loads(c.compliance_checklist) if c.compliance_checklist else [],
+        "tags": _safe_json_list(c.tags),
+        "compliance_checklist": _safe_json_list(c.compliance_checklist),
         "status": c.status or "active",
         "relationships": {
             "outgoing": [rel_dict(r) for r in outgoing],
@@ -542,15 +524,23 @@ async def get_circular_relationships(circular_id: str, db: Session = Depends(get
     ).all()
 
     def rel_dict(r):
+        source = None
         target = None
+        if r.source_id:
+            sc = db.query(Circular).filter(Circular.id == r.source_id).first()
+            if sc:
+                source = {"id": sc.id, "title": sc.title, "reference": sc.reference, "url": sc.url, "status": sc.status or "active"}
         if r.target_id:
             tc = db.query(Circular).filter(Circular.id == r.target_id).first()
             if tc:
                 target = {"id": tc.id, "title": tc.title, "reference": tc.reference, "url": tc.url, "status": tc.status or "active"}
         return {
             "type": r.type,
+            "source_id": r.source_id,
             "target_id": r.target_id,
             "target_reference": r.target_reference,
+            "confidence": r.confidence,
+            "source": source,
             "target": target,
         }
 
@@ -663,111 +653,35 @@ async def pdf_preview(url: str):
         return {"error": str(e)}
 
 
-# --- HTMX Partial Routes ---
+@app.get("/api/pdf_proxy")
+async def pdf_proxy(url: str):
+    if not _is_allowed_sbp_url(url):
+        return JSONResponse({"error": "Only SBP PDFs are supported."}, status_code=400)
 
-@app.get("/partials/news", response_class=HTMLResponse)
-async def partial_news(request: Request, db: Session = Depends(get_db)):
+    if not urlparse(url).path.lower().endswith(".pdf"):
+        return JSONResponse({"error": "Only PDF files are supported."}, status_code=400)
+
     try:
-        data = _scrape_sbp_news(db)
-    except Exception:
-        data = {"press_releases": [], "whats_new": [], "error": "Failed to load news"}
-    return templates.TemplateResponse(
-        request=request, name="partials/news.html",
-        context={"press_releases": data.get("press_releases", []), "whats_new": data.get("whats_new", [])}
+        resp = http_requests.get(url, headers=HEADERS, timeout=30)
+        resp.raise_for_status()
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=502)
+
+    content_type = resp.headers.get("content-type", "")
+    if "pdf" not in content_type.lower() and not resp.content.startswith(b"%PDF"):
+        return JSONResponse({"error": "The source did not return a PDF document."}, status_code=502)
+
+    return StreamingResponse(
+        iter([resp.content]),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": 'inline; filename="sbp-document.pdf"',
+            "Cache-Control": "private, max-age=300",
+        },
     )
 
 
-@app.get("/partials/departments", response_class=HTMLResponse)
-async def partial_departments(request: Request, db: Session = Depends(get_db)):
-    results = db.query(
-        Circular.department, func.count(Circular.id).label("count")
-    ).group_by(Circular.department).order_by(Circular.department.asc()).all()
-    departments = [{"department": r.department, "count": r.count} for r in results]
-    return templates.TemplateResponse(
-        request=request, name="partials/departments.html",
-        context={"departments": departments}
-    )
 
-
-@app.get("/partials/years", response_class=HTMLResponse)
-async def partial_years(request: Request, department: str, db: Session = Depends(get_db)):
-    results = db.query(
-        extract("year", Circular.date).label("year"),
-        func.count(Circular.id).label("count")
-    ).filter(
-        Circular.department == department
-    ).group_by(
-        extract("year", Circular.date)
-    ).order_by(
-        extract("year", Circular.date).desc()
-    ).all()
-    years = [{"year": int(r.year), "count": r.count} for r in results]
-    return templates.TemplateResponse(
-        request=request, name="partials/years.html",
-        context={"years": years, "department": department}
-    )
-
-
-@app.get("/partials/circulars", response_class=HTMLResponse)
-async def partial_circulars(request: Request, department: str, year: int, db: Session = Depends(get_db)):
-    circulars = db.query(Circular).filter(
-        Circular.department == department,
-        extract("year", Circular.date) == year
-    ).order_by(Circular.date.desc()).all()
-    return templates.TemplateResponse(
-        request=request, name="partials/circulars.html",
-        context={"circulars": circulars, "department": department, "year": year}
-    )
-
-
-@app.get("/partials/search", response_class=HTMLResponse)
-async def partial_search(
-    request: Request,
-    q: str = "",
-    start_year: str | None = None,
-    end_year: str | None = None,
-    department: str | None = None,
-    sort_by: str = "relevance",
-    tag: str | None = None,
-    page: int = 1,
-    per_page: int = 20,
-    db: Session = Depends(get_db)
-):
-    offset = (page - 1) * per_page
-    results, total = search_engine.search(
-        q, db,
-        offset=offset,
-        limit=per_page,
-        start_year=_parse_year(start_year),
-        end_year=_parse_year(end_year),
-        department=department,
-        sort_by=sort_by,
-        tag=tag,
-    )
-    total_pages = max(1, (total + per_page - 1) // per_page)
-
-    params = {}
-    if q: params['q'] = q
-    if start_year: params['start_year'] = start_year
-    if end_year: params['end_year'] = end_year
-    if department: params['department'] = department
-    if tag: params['tag'] = tag
-    params['sort_by'] = sort_by
-    params['per_page'] = per_page
-    base_qs = urlencode(params)
-
-    return templates.TemplateResponse(
-        request=request, name="partials/search_results.html",
-        context={
-            "results": results, "query": q,
-            "page": page, "total_pages": total_pages,
-            "total": total, "per_page": per_page,
-            "base_qs": base_qs,
-            "start_year": start_year, "end_year": end_year,
-            "department": department, "sort_by": sort_by,
-            "tag": tag,
-        }
-    )
 
 import csv
 import io
@@ -776,33 +690,30 @@ import time
 
 # --- Settings Page ---
 
-@app.get("/settings", response_class=HTMLResponse)
-async def settings_page(request: Request, db: Session = Depends(get_db)):
+@app.get("/settings")
+async def settings_page():
+    return spa_index_response()
+
+
+@app.get("/api/settings")
+async def get_settings(db: Session = Depends(get_db)):
     config = AIConfig.from_db(db) or AIConfig.from_env()
-    context = _build_shell_context(
-        db,
-        active_nav="settings",
-        page_title="Model and Retrieval Settings",
-        page_kicker="System Configuration",
-        page_summary="Control provider, model, and context settings for summarization, classification, and grounded chat.",
-    )
-    context.update({"config": config})
-    return templates.TemplateResponse(request=request, name="settings.html", context=context)
+    return _settings_payload(config)
 
 
 @app.post("/api/settings")
 async def save_settings(request: Request, db: Session = Depends(get_db)):
     data = await request.json()
     config = AIConfig(
-        provider=data.get("ai_provider", "lmstudio"),
-        base_url=data.get("ai_base_url", "http://localhost:1234/v1"),
-        api_key=data.get("ai_api_key", "lm-studio"),
-        model=data.get("ai_model", "local-model"),
-        chat_model=data.get("ai_chat_model", ""),
-        max_context_tokens=int(data.get("ai_max_context_tokens", 4000)),
+        provider=data.get("provider", data.get("ai_provider", "lmstudio")),
+        base_url=data.get("base_url", data.get("ai_base_url", "http://localhost:1234/v1")),
+        api_key=data.get("api_key", data.get("ai_api_key", "lm-studio")),
+        model=data.get("model", data.get("ai_model", "local-model")),
+        chat_model=data.get("chat_model", data.get("ai_chat_model", "")),
+        max_context_tokens=int(data.get("max_context_tokens", data.get("ai_max_context_tokens", 4000))),
     )
     config.save_to_db(db)
-    return {"message": "Settings saved successfully"}
+    return {"message": "Settings saved successfully", "settings": _settings_payload(config)}
 
 
 @app.post("/api/settings/test")
@@ -817,16 +728,9 @@ async def test_ai_connection(db: Session = Depends(get_db)):
 
 # --- Chat Feature ---
 
-@app.get("/chat", response_class=HTMLResponse)
-async def chat_page(request: Request, db: Session = Depends(get_db)):
-    context = _build_shell_context(
-        db,
-        active_nav="chat",
-        page_title="Analyst Chat Workspace",
-        page_kicker="Grounded Conversation",
-        page_summary="Interrogate selected circulars, preserve session context, and trace answers back to the source record.",
-    )
-    return templates.TemplateResponse(request=request, name="chat.html", context=context)
+@app.get("/chat")
+async def chat_page():
+    return spa_index_response()
 
 
 @app.get("/api/chat/sessions")
@@ -857,10 +761,7 @@ async def get_chat_session(session_id: str, db: Session = Depends(get_db)):
             {"id": m.id, "role": m.role, "content": m.content, "created_at": m.created_at.isoformat() if m.created_at else None}
             for m in messages
         ],
-        "circulars": [
-            {"id": c.id, "title": c.title, "department": c.department, "reference": c.reference, "date": c.date.strftime("%Y-%m-%d") if c.date else None}
-            for c in circulars
-        ],
+        "circulars": [_circular_summary(c) for c in circulars],
     }
 
 
@@ -873,6 +774,21 @@ async def delete_chat_session(session_id: str, db: Session = Depends(get_db)):
     db.delete(session)
     db.commit()
     return {"success": True}
+
+
+def _build_chat_circulars_context(db: Session, circular_ids: list[str]) -> str:
+    circulars_context = ""
+    if circular_ids:
+        circulars = db.query(Circular).filter(Circular.id.in_(circular_ids)).all()
+        for c in circulars:
+            title = c.title or "Untitled"
+            ref = c.reference or "No reference"
+            content = c.content_text or ""
+            if len(content) > 2000:
+                content = content[:2000] + "..."
+            circulars_context += f"\n---\n[{ref}] {title}\n{content}\n---\n"
+
+    return circulars_context or "No circulars selected for context."
 
 
 @app.post("/api/chat")
@@ -906,20 +822,7 @@ async def chat_message(request: Request, db: Session = Depends(get_db)):
     db.add(user_msg)
     db.commit()
 
-    circulars_context = ""
-    if circular_ids:
-        circulars = db.query(Circular).filter(Circular.id.in_(circular_ids)).all()
-        for c in circulars:
-            title = c.title or "Untitled"
-            ref = c.reference or "No reference"
-            content = c.content_text or ""
-            if len(content) > 2000:
-                content = content[:2000] + "..."
-            circulars_context += f"\n---\n[{ref}] {title}\n{content}\n---\n"
-
-    if not circulars_context:
-        circulars_context = "No circulars selected for context."
-
+    circulars_context = _build_chat_circulars_context(db, circular_ids)
     messages = db.query(ChatMessage).filter(ChatMessage.session_id == session_id).order_by(ChatMessage.created_at).all()
     chat_messages = [{"role": m.role, "content": m.content} for m in messages]
 
@@ -939,6 +842,94 @@ async def chat_message(request: Request, db: Session = Depends(get_db)):
     db.commit()
 
     return {"response": response_text, "session_id": session_id}
+
+
+@app.post("/api/chat/stream")
+async def chat_message_stream(request: Request, db: Session = Depends(get_db)):
+    data = await request.json()
+    message = data.get("message", "")
+    circular_ids = data.get("circular_ids", [])
+    session_id = data.get("session_id")
+
+    if not message.strip():
+        return JSONResponse({"error": "Message cannot be empty"}, status_code=400)
+
+    if not session_id:
+        session_id = str(uuid.uuid4())
+        session = ChatSession(id=session_id, title=message[:80])
+        db.add(session)
+    else:
+        session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+        if not session:
+            session_id = str(uuid.uuid4())
+            session = ChatSession(id=session_id, title=message[:80])
+            db.add(session)
+
+    user_msg = ChatMessage(
+        id=str(uuid.uuid4()),
+        session_id=session_id,
+        role="user",
+        content=message,
+        circular_ids=json.dumps(circular_ids) if circular_ids else None,
+    )
+    db.add(user_msg)
+    db.commit()
+
+    def sse(event: str, payload: dict) -> str:
+        return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
+
+    def stream_response():
+        stream_db = SessionLocal()
+        response_parts: list[str] = []
+        try:
+            yield sse("meta", {"session_id": session_id})
+
+            circulars_context = _build_chat_circulars_context(stream_db, circular_ids)
+            rows = stream_db.query(ChatMessage).filter(ChatMessage.session_id == session_id).order_by(ChatMessage.created_at).all()
+            chat_messages = [{"role": m.role, "content": m.content} for m in rows]
+            client = get_ai_client(stream_db)
+
+            for chunk in client.stream_chat(chat_messages, stream_db, circulars_context=circulars_context):
+                response_parts.append(chunk)
+                yield sse("token", {"content": chunk})
+
+            response_text = "".join(response_parts)
+            assistant_msg = ChatMessage(
+                id=str(uuid.uuid4()),
+                session_id=session_id,
+                role="assistant",
+                content=response_text,
+            )
+            stream_db.add(assistant_msg)
+            stream_db.commit()
+            yield sse("done", {"session_id": session_id})
+        except Exception as e:
+            stream_db.rollback()
+            error_text = f"Error generating response: {str(e)}"
+            if not response_parts:
+                response_parts.append(error_text)
+                yield sse("token", {"content": error_text})
+            assistant_msg = ChatMessage(
+                id=str(uuid.uuid4()),
+                session_id=session_id,
+                role="assistant",
+                content="".join(response_parts),
+            )
+            stream_db.add(assistant_msg)
+            stream_db.commit()
+            yield sse("error", {"error": str(e), "session_id": session_id})
+        finally:
+            stream_db.close()
+
+    return StreamingResponse(
+        stream_response(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
 
 @app.get("/api/circulars/export_csv")
 async def export_search_csv(

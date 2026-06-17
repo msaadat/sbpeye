@@ -390,9 +390,9 @@ class AIClient:
         except Exception as e:
             return json.dumps({"error": str(e)})
 
-    def chat(self, messages: list[dict[str, str]], db: Session, circulars_context: str | None = None) -> str:
+    def _chat_system_prompt(self, circulars_context: str | None = None) -> str:
         if circulars_context:
-            system_prompt = f"""You are an expert assistant for analyzing State Bank of Pakistan (SBP) circulars and regulations.
+            return f"""You are an expert assistant for analyzing State Bank of Pakistan (SBP) circulars and regulations.
 You have been provided with pre-selected circulars as context below. Answer primarily from these,
 but you also have tools to search the database if the user asks about circulars not covered here.
 
@@ -404,8 +404,7 @@ Never fabricate URLs — only use urls from tool results.
 
 Pre-selected circulars:
 {circulars_context}"""
-        else:
-            system_prompt = """You are an expert assistant for SBP circulars and regulations.
+        return """You are an expert assistant for SBP circulars and regulations.
 Use your tools to search and retrieve relevant circulars from the database before answering.
 
 IMPORTANT RULES:
@@ -414,6 +413,8 @@ IMPORTANT RULES:
 Never fabricate URLs — only use urls from tool results.
 3. If you need more details on a circular found in a search, use the get_circular_details tool with the circular reference or title."""
 
+    def chat(self, messages: list[dict[str, str]], db: Session, circulars_context: str | None = None) -> str:
+        system_prompt = self._chat_system_prompt(circulars_context)
         full_messages = [{"role": "system", "content": system_prompt}] + messages
 
         max_iterations = 5
@@ -468,6 +469,82 @@ Never fabricate URLs — only use urls from tool results.
             temperature=0.3,
         )
         return final_response.choices[0].message.content or ""
+
+    def stream_chat(self, messages: list[dict[str, str]], db: Session, circulars_context: str | None = None):
+        system_prompt = self._chat_system_prompt(circulars_context)
+        full_messages = [{"role": "system", "content": system_prompt}] + messages
+
+        max_iterations = 5
+        for _ in range(max_iterations):
+            stream = self._client.chat.completions.create(
+                model=self.config.effective_chat_model,
+                messages=full_messages,
+                temperature=0.3,
+                tools=TOOLS,
+                tool_choice="auto",
+                stream=True,
+            )
+
+            content_parts: list[str] = []
+            tool_calls: dict[int, dict] = {}
+
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    content_parts.append(delta.content)
+                    yield delta.content
+
+                for tc in delta.tool_calls or []:
+                    index = tc.index
+                    item = tool_calls.setdefault(
+                        index,
+                        {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+                    )
+                    if tc.id:
+                        item["id"] = tc.id
+                    if tc.type:
+                        item["type"] = tc.type
+                    if tc.function:
+                        if tc.function.name:
+                            item["function"]["name"] += tc.function.name
+                        if tc.function.arguments:
+                            item["function"]["arguments"] += tc.function.arguments
+
+            if not tool_calls:
+                return
+
+            full_messages.append({
+                "role": "assistant",
+                "content": "".join(content_parts),
+                "tool_calls": [tool_calls[index] for index in sorted(tool_calls)],
+            })
+
+            for tc in [tool_calls[index] for index in sorted(tool_calls)]:
+                try:
+                    args = json.loads(tc["function"]["arguments"])
+                except json.JSONDecodeError:
+                    args = {}
+                result = self._execute_tool(tc["function"]["name"], args, db)
+                full_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": result,
+                })
+
+        final_stream = self._client.chat.completions.create(
+            model=self.config.effective_chat_model,
+            messages=full_messages,
+            temperature=0.3,
+            stream=True,
+        )
+        for chunk in final_stream:
+            if not chunk.choices:
+                continue
+            content = chunk.choices[0].delta.content
+            if content:
+                yield content
 
     def test_connection(self) -> dict:
         try:

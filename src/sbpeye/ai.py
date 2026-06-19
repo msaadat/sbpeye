@@ -3,7 +3,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from openai import OpenAI
+from openai import BadRequestError, OpenAI
 
 from sqlalchemy.orm import Session
 
@@ -206,7 +206,14 @@ class AIClient:
             api_key=self.config.api_key,
         )
 
-    def _complete(self, system_prompt: str, user_prompt: str, model: str = "", temperature: float = 0.0, json_mode: bool = True) -> str:
+    def _complete(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        model: str = "",
+        temperature: float = 0.0,
+        json_schema: dict[str, Any] | None = None,
+    ) -> str:
         model = model or self.config.model
         kwargs: dict[str, Any] = {
             "model": model,
@@ -216,9 +223,23 @@ class AIClient:
             ],
             "temperature": temperature,
         }
-        if json_mode:
-            kwargs["response_format"] = {"type": "json_object"}
-        response = self._client.chat.completions.create(**kwargs)
+        if json_schema:
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "sbpeye_response",
+                    "strict": True,
+                    "schema": json_schema,
+                },
+            }
+        try:
+            response = self._client.chat.completions.create(**kwargs)
+        except BadRequestError as exc:
+            if not json_schema or "response_format" not in str(exc):
+                raise
+            # Some OpenAI-compatible local servers only accept text responses.
+            kwargs["response_format"] = {"type": "text"}
+            response = self._client.chat.completions.create(**kwargs)
         return response.choices[0].message.content or ""
 
     def _complete_chat(self, messages: list[dict[str, str]], model: str = "", temperature: float = 0.3) -> str:
@@ -234,51 +255,122 @@ class AIClient:
         system = "You are a concise financial regulations analyst. Summarize the following SBP circular in 3-5 sentences, focusing on the key regulatory changes, requirements, and impact on banks/DFIs/MFBs. Be factual and specific."
         truncated = content_text[: self.config.max_context_tokens] if len(content_text) > self.config.max_context_tokens else content_text
         user = f"Title: {title}\n\nContent:\n{truncated}"
-        result = self._complete(system, user, temperature=0.2, json_mode=False)
+        result = self._complete(system, user, temperature=0.2)
         return result.strip()
 
     def generate_tags(self, title: str, content_text: str) -> list[str]:
         system = f"You are a financial regulations classifier. Select the most relevant tags from the following taxonomy that apply to the given SBP circular.\n\nTaxonomy: {json.dumps(TAG_TAXONOMY)}\n\nReturn ONLY a JSON object with a 'tags' key containing a list of 1-5 selected tag strings from the taxonomy."
         truncated = content_text[: self.config.max_context_tokens] if len(content_text) > self.config.max_context_tokens else content_text
         user = f"Title: {title}\n\nContent:\n{truncated}"
+        result = self._complete(
+            system,
+            user,
+            temperature=0.0,
+            json_schema={
+                "type": "object",
+                "properties": {
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": TAG_TAXONOMY},
+                        "maxItems": 5,
+                    },
+                },
+                "required": ["tags"],
+                "additionalProperties": False,
+            },
+        )
         try:
-            result = self._complete(system, user, temperature=0.0, json_mode=True)
             parsed = json.loads(result)
-            tags = parsed.get("tags", [])
-            valid_tags = [t for t in tags if t in TAG_TAXONOMY]
-            if not valid_tags:
-                valid_tags = tags[:5]
-            return valid_tags[:5]
-        except (json.JSONDecodeError, Exception):
-            return []
+        except json.JSONDecodeError as exc:
+            raise ValueError("The model returned invalid JSON for tags.") from exc
+        tags = parsed.get("tags") if isinstance(parsed, dict) else None
+        if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
+            raise ValueError("The model returned an invalid tags payload.")
+        valid_tags = [tag for tag in tags if tag in TAG_TAXONOMY]
+        if not valid_tags:
+            valid_tags = tags[:5]
+        return valid_tags[:5]
 
     def generate_checklist(self, title: str, content_text: str) -> list[dict]:
         system = "You are a compliance analyst. Generate a compliance checklist from the given SBP circular. Each item should be a specific, actionable requirement from the circular. Return a JSON object with a 'checklist' key containing an array of objects, each with 'item' (the requirement) and 'action_required' (boolean, true if banks must take concrete action)."
         truncated = content_text[: self.config.max_context_tokens] if len(content_text) > self.config.max_context_tokens else content_text
         user = f"Title: {title}\n\nContent:\n{truncated}"
+        result = self._complete(
+            system,
+            user,
+            temperature=0.1,
+            json_schema={
+                "type": "object",
+                "properties": {
+                    "checklist": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "item": {"type": "string"},
+                                "action_required": {"type": "boolean"},
+                            },
+                            "required": ["item", "action_required"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["checklist"],
+                "additionalProperties": False,
+            },
+        )
         try:
-            result = self._complete(system, user, temperature=0.1, json_mode=True)
             parsed = json.loads(result)
-            return parsed.get("checklist", [])
-        except (json.JSONDecodeError, Exception):
-            return []
+        except json.JSONDecodeError as exc:
+            raise ValueError("The model returned invalid JSON for the checklist.") from exc
+        checklist = parsed.get("checklist") if isinstance(parsed, dict) else None
+        if not isinstance(checklist, list):
+            raise ValueError("The model returned an invalid checklist payload.")
+        normalized = []
+        for entry in checklist:
+            if not isinstance(entry, dict) or not isinstance(entry.get("item"), str):
+                raise ValueError("The model returned an invalid checklist item.")
+            action_required = entry.get("action_required", False)
+            if not isinstance(action_required, bool):
+                raise ValueError("The model returned a non-boolean checklist action flag.")
+            normalized.append({
+                "item": entry["item"].strip(),
+                "action_required": action_required,
+            })
+        return normalized
 
     def extract_relationships(self, title: str, reference: str, content_text: str) -> dict:
         system = "You are a financial regulations analyst. Extract any mentions of this circular relating to previous circulars — whether it amends, supersedes, cancels, adds to, or clarifies them. Return ONLY valid JSON with these keys: 'amends' (list of reference strings), 'supersedes' (list), 'cancels' (list), 'adds_to' (list), 'clarifies' (list). Each reference string should be as close to the original format as possible, e.g. 'BPRD Circular No. 12 of 2023'."
         truncated = content_text[: self.config.max_context_tokens] if len(content_text) > self.config.max_context_tokens else content_text
         user = f"Title: {title}\nReference: {reference}\n\nContent:\n{truncated}"
+        relationship_properties = {
+            key: {"type": "array", "items": {"type": "string"}}
+            for key in ("amends", "supersedes", "cancels", "adds_to", "clarifies")
+        }
+        result = self._complete(
+            system,
+            user,
+            temperature=0.0,
+            json_schema={
+                "type": "object",
+                "properties": relationship_properties,
+                "required": list(relationship_properties),
+                "additionalProperties": False,
+            },
+        )
         try:
-            result = self._complete(system, user, temperature=0.0, json_mode=True)
             parsed = json.loads(result)
-            return {
-                "amends": parsed.get("amends", []),
-                "supersedes": parsed.get("supersedes", []),
-                "cancels": parsed.get("cancels", []),
-                "adds_to": parsed.get("adds_to", []),
-                "clarifies": parsed.get("clarifies", []),
-            }
-        except (json.JSONDecodeError, Exception):
-            return {"amends": [], "supersedes": [], "cancels": [], "adds_to": [], "clarifies": []}
+        except json.JSONDecodeError as exc:
+            raise ValueError("The model returned invalid JSON for relationships.") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("The model returned an invalid relationships payload.")
+        relationships = {}
+        for key in ("amends", "supersedes", "cancels", "adds_to", "clarifies"):
+            values = parsed.get(key, [])
+            if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+                raise ValueError(f"The model returned invalid {key} relationships.")
+            relationships[key] = values
+        return relationships
 
     def _execute_tool(self, name: str, arguments: dict, db: Session) -> str:
         """Execute a tool by name and return the result as a JSON string.

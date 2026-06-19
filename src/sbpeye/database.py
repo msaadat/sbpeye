@@ -41,20 +41,47 @@ def has_vector_store_data() -> bool:
 
 def _ensure_columns():
     insp = inspect(engine)
+    table_names = insp.get_table_names()
     with engine.begin() as conn:
-        if "circulars" in insp.get_table_names():
+        if "circulars" in table_names:
             existing = {c["name"] for c in insp.get_columns("circulars")}
             new_columns = [
                 ("summary", "TEXT"),
                 ("tags", "TEXT"),
                 ("compliance_checklist", "TEXT"),
                 ("status", "VARCHAR(20) DEFAULT 'active'"),
+                ("summary_generated_at", "DATETIME"),
+                ("tags_generated_at", "DATETIME"),
+                ("checklist_generated_at", "DATETIME"),
+                ("relationships_generated_at", "DATETIME"),
             ]
             for col_name, col_type in new_columns:
                 if col_name not in existing:
                     conn.execute(text(f"ALTER TABLE circulars ADD COLUMN {col_name} {col_type}"))
 
-        if "circular_relationships" in insp.get_table_names():
+            # Existing stored output predates generation tracking. Backfill it once so
+            # the frontend correctly presents those actions as regeneration.
+            conn.execute(text(
+                "UPDATE circulars SET summary_generated_at = CURRENT_TIMESTAMP "
+                "WHERE summary_generated_at IS NULL AND summary IS NOT NULL AND summary != ''"
+            ))
+            conn.execute(text(
+                "UPDATE circulars SET tags_generated_at = CURRENT_TIMESTAMP "
+                "WHERE tags_generated_at IS NULL AND tags IS NOT NULL AND tags != ''"
+            ))
+            conn.execute(text(
+                "UPDATE circulars SET checklist_generated_at = CURRENT_TIMESTAMP "
+                "WHERE checklist_generated_at IS NULL AND compliance_checklist IS NOT NULL "
+                "AND compliance_checklist != ''"
+            ))
+            if "circular_relationships" in table_names:
+                conn.execute(text(
+                    "UPDATE circulars SET relationships_generated_at = CURRENT_TIMESTAMP "
+                    "WHERE relationships_generated_at IS NULL AND id IN "
+                    "(SELECT DISTINCT source_id FROM circular_relationships)"
+                ))
+
+        if "circular_relationships" in table_names:
             existing = {c["name"] for c in insp.get_columns("circular_relationships")}
             new_columns = [
                 ("target_reference", "TEXT"),

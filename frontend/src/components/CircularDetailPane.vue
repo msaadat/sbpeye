@@ -1,14 +1,23 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { useToast } from 'primevue/usetoast'
 import Button from 'primevue/button'
 import Message from 'primevue/message'
+import Popover from 'primevue/popover'
 import ProgressSpinner from 'primevue/progressspinner'
 import Tag from 'primevue/tag'
 import {
+  getAIGenerationJob,
   getCircularDetail,
   getCircularSource,
+  startCircularGeneration,
+  type AIGenerationJob,
+  type ApiError,
   type CircularDetail,
+  type ComplianceChecklistItem,
+  type GenerationAction,
+  type GenerationFeature,
   type CircularRelationship,
   type CircularRelationshipTarget,
   type CircularSourceContent,
@@ -19,6 +28,7 @@ const PdfPreviewDialog = defineAsyncComponent(() => import('@/components/PdfPrev
 const props = defineProps<{ id: string }>()
 const emit = defineEmits<{ close: [] }>()
 const router = useRouter()
+const toast = useToast()
 
 const circular = ref<CircularDetail | null>(null)
 const source = ref<CircularSourceContent | null>(null)
@@ -27,6 +37,19 @@ const sourceLoading = ref(false)
 const errorMessage = ref('')
 const sourceError = ref('')
 const pdfDialogVisible = ref(false)
+const summaryExpanded = ref(false)
+const checklistExpanded = ref(false)
+const generationPopover = ref<InstanceType<typeof Popover> | null>(null)
+const activeJob = ref<AIGenerationJob | null>(null)
+let pollTimer: ReturnType<typeof setTimeout> | null = null
+let pollEpoch = 0
+
+const generationFeatures: Array<{ feature: GenerationFeature; label: string; icon: string }> = [
+  { feature: 'summary', label: 'Summary', icon: 'pi pi-align-left' },
+  { feature: 'tags', label: 'Tags', icon: 'pi pi-tags' },
+  { feature: 'checklist', label: 'Checklist', icon: 'pi pi-list-check' },
+  { feature: 'relationships', label: 'Relationships', icon: 'pi pi-share-alt' },
+]
 
 const sourceUrl = computed(() => source.value?.url || circular.value?.url || '')
 const isPdf = computed(() => source.value?.type === 'pdf' || sourceUrl.value.toLowerCase().split('?', 1)[0].endsWith('.pdf'))
@@ -67,7 +90,84 @@ function handoffToChat() {
   void router.push({ path: '/chat', query: { circular_ids: props.id } })
 }
 
+function checklistText(item: ComplianceChecklistItem | string): string {
+  return typeof item === 'string' ? item : item.item
+}
+
+function checklistNeedsAction(item: ComplianceChecklistItem | string): boolean {
+  return typeof item !== 'string' && item.action_required
+}
+
+function hasGenerated(feature: GenerationFeature): boolean {
+  return Boolean(circular.value?.generation?.[feature])
+}
+
+function generationLabel(feature: GenerationFeature, label: string): string {
+  return `${hasGenerated(feature) ? 'Regenerate' : 'Generate'} ${label}`
+}
+
+const allGenerated = computed(() => generationFeatures.every(({ feature }) => hasGenerated(feature)))
+
+function stopPolling() {
+  pollEpoch += 1
+  if (pollTimer) clearTimeout(pollTimer)
+  pollTimer = null
+}
+
+async function refreshCircular() {
+  circular.value = await getCircularDetail(props.id)
+}
+
+async function pollGeneration(jobId: string, epoch: number) {
+  if (epoch !== pollEpoch) return
+  try {
+    const job = await getAIGenerationJob(jobId)
+    if (epoch !== pollEpoch) return
+    activeJob.value = job
+    if (job.status === 'succeeded') {
+      await refreshCircular()
+      activeJob.value = null
+      toast.add({ severity: 'success', summary: 'AI analysis complete', detail: 'The circular intelligence was updated.', life: 3500 })
+      return
+    }
+    if (job.status === 'failed') {
+      activeJob.value = null
+      toast.add({ severity: 'error', summary: 'AI generation failed', detail: job.error || 'The background job failed.', life: 6000 })
+      return
+    }
+    pollTimer = setTimeout(() => void pollGeneration(jobId, epoch), 1000)
+  } catch (error) {
+    activeJob.value = null
+    toast.add({ severity: 'error', summary: 'Job status unavailable', detail: error instanceof Error ? error.message : 'Unable to check generation status.', life: 5000 })
+  }
+}
+
+async function generate(feature: GenerationAction) {
+  generationPopover.value?.hide()
+  if (activeJob.value) return
+  stopPolling()
+  const epoch = pollEpoch
+  try {
+    const job = await startCircularGeneration(props.id, feature)
+    activeJob.value = job
+    void pollGeneration(job.id, epoch)
+  } catch (error) {
+    const apiError = error as ApiError
+    const existingJob = apiError.payload?.job as AIGenerationJob | undefined
+    if (apiError.status === 409 && existingJob?.id) {
+      activeJob.value = existingJob
+      void pollGeneration(existingJob.id, epoch)
+      return
+    }
+    toast.add({ severity: 'error', summary: 'Unable to start generation', detail: error instanceof Error ? error.message : 'The request failed.', life: 5000 })
+  }
+}
+
 async function loadCircular() {
+  stopPolling()
+  activeJob.value = null
+  summaryExpanded.value = false
+  checklistExpanded.value = false
   loading.value = true
   sourceLoading.value = true
   errorMessage.value = ''
@@ -98,6 +198,7 @@ async function loadCircular() {
 
 onMounted(loadCircular)
 watch(() => props.id, loadCircular)
+onBeforeUnmount(stopPolling)
 </script>
 
 <template>
@@ -115,6 +216,7 @@ watch(() => props.id, loadCircular)
           <div class="detail-badges">
             <Tag v-if="circular.reference" :value="circular.reference" severity="secondary" />
             <Tag v-if="circular.status" :value="circular.status" :severity="statusSeverity(circular.status)" />
+            <span v-for="item in circular.tags" :key="item" class="intelligence-pill tag-pill header-tag-pill">{{ item }}</span>
           </div>
           <Button icon="pi pi-times" text rounded aria-label="Close circular" title="Close" @click="emit('close')" />
         </div>
@@ -125,33 +227,84 @@ watch(() => props.id, loadCircular)
             <span v-if="circular.date"><i class="pi pi-calendar" /> {{ formatDate(circular.date) }}</span>
           </div>
           <div class="detail-actions">
+            <Button
+              icon="pi pi-sparkles"
+              text
+              rounded
+              severity="help"
+              :loading="Boolean(activeJob)"
+              aria-label="Generate AI analysis"
+              :title="activeJob ? `Generating ${activeJob.feature}` : 'Generate AI analysis'"
+              @click="generationPopover?.toggle($event)"
+            />
             <Button v-if="isPdf" icon="pi pi-file-pdf" text rounded severity="danger" aria-label="Preview PDF" title="Preview PDF" @click="pdfDialogVisible = true" />
             <Button v-if="circular.url" as="a" :href="circular.url" target="_blank" rel="noreferrer" icon="pi pi-external-link" text rounded severity="secondary" aria-label="Open source" title="Open source" />
             <Button icon="pi pi-comments" text rounded severity="contrast" aria-label="Open in chat" title="Open in chat" @click="handoffToChat" />
           </div>
         </div>
+        <div v-if="activeJob" class="generation-progress" role="status">
+          <i class="pi pi-sparkles" /> Generating {{ activeJob.feature === 'all' ? 'all AI analysis' : activeJob.feature }} in the background
+        </div>
       </header>
 
+      <Popover ref="generationPopover" class="generation-popover">
+        <div class="generation-menu">
+          <span class="generation-menu-title">AI analysis</span>
+          <Button
+            v-for="item in generationFeatures"
+            :key="item.feature"
+            :icon="item.icon"
+            :label="generationLabel(item.feature, item.label)"
+            text
+            size="small"
+            :disabled="Boolean(activeJob)"
+            @click="generate(item.feature)"
+          />
+          <div class="generation-menu-divider" />
+          <Button
+            icon="pi pi-sparkles"
+            :label="allGenerated ? 'Regenerate All' : 'Generate All'"
+            size="small"
+            :disabled="Boolean(activeJob)"
+            @click="generate('all')"
+          />
+        </div>
+      </Popover>
+
       <section v-if="circular.summary" class="detail-section summary-section">
-        <h2>Summary</h2>
-        <p class="detail-copy">{{ circular.summary }}</p>
+        <h2>
+          <button
+            type="button"
+            class="collapsible-heading"
+            :aria-expanded="summaryExpanded"
+            @click="summaryExpanded = !summaryExpanded"
+          >
+            <span>Summary</span>
+            <i :class="summaryExpanded ? 'pi pi-chevron-up' : 'pi pi-chevron-down'" />
+          </button>
+        </h2>
+        <p v-show="summaryExpanded" class="detail-copy">{{ circular.summary }}</p>
       </section>
 
       <section
-        v-if="circular.tags?.length || circular.compliance_checklist?.length || circular.relationships.outgoing.length || circular.relationships.incoming.length"
+        v-if="circular.compliance_checklist?.length || circular.relationships.outgoing.length || circular.relationships.incoming.length"
         class="detail-section intelligence-section"
       >
-        <div v-if="circular.tags?.length" class="pill-group">
-          <h2>Tags</h2>
-          <div class="intelligence-pills">
-            <span v-for="item in circular.tags" :key="item" class="intelligence-pill tag-pill">{{ item }}</span>
-          </div>
-        </div>
         <div v-if="circular.compliance_checklist?.length" class="pill-group">
-          <h2>Checklist</h2>
-          <div class="intelligence-pills">
-            <span v-for="item in circular.compliance_checklist" :key="item" class="intelligence-pill checklist-pill">
-              <i class="pi pi-check-circle" /> {{ item }}
+          <h2>
+            <button
+              type="button"
+              class="collapsible-heading"
+              :aria-expanded="checklistExpanded"
+              @click="checklistExpanded = !checklistExpanded"
+            >
+              <span>Checklist</span>
+              <i :class="checklistExpanded ? 'pi pi-chevron-up' : 'pi pi-chevron-down'" />
+            </button>
+          </h2>
+          <div v-show="checklistExpanded" class="intelligence-pills">
+            <span v-for="(item, index) in circular.compliance_checklist" :key="`${checklistText(item)}-${index}`" class="intelligence-pill checklist-pill">
+              <i :class="checklistNeedsAction(item) ? 'pi pi-exclamation-circle action-required' : 'pi pi-check-circle'" /> {{ checklistText(item) }}
             </span>
           </div>
         </div>

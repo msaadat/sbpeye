@@ -17,6 +17,10 @@ class Circular(Base):
     tags = Column(Text, nullable=True)
     compliance_checklist = Column(Text, nullable=True)
     status = Column(String, default="active")
+    summary_generated_at = Column(DateTime, nullable=True)
+    tags_generated_at = Column(DateTime, nullable=True)
+    checklist_generated_at = Column(DateTime, nullable=True)
+    relationships_generated_at = Column(DateTime, nullable=True)
 
     amends = relationship("CircularRelationship", foreign_keys="[CircularRelationship.source_id]", back_populates="source")
     amended_by = relationship("CircularRelationship", foreign_keys="[CircularRelationship.target_id]", back_populates="target")
@@ -33,6 +37,19 @@ class CircularRelationship(Base):
 
     source = relationship("Circular", foreign_keys=[source_id], back_populates="amends")
     target = relationship("Circular", foreign_keys=[target_id], back_populates="amended_by")
+
+
+class AIGenerationJob(Base):
+    __tablename__ = "ai_generation_jobs"
+
+    id = Column(String, primary_key=True)
+    circular_id = Column(String, ForeignKey("circulars.id"), nullable=False, index=True)
+    feature = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="queued", index=True)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
 
 class EcoDataSeries(Base):
     __tablename__ = "ecodata_series"

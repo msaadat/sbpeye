@@ -13,9 +13,10 @@ import json
 import uuid
 
 from .database import engine, Base, get_db, SessionLocal, has_vector_store_data
-from .models import SyncStatus, Circular, CircularRelationship, EcoDataSeries, EcoDataEntry, Settings, ChatSession, ChatMessage
+from .models import AIGenerationJob, SyncStatus, Circular, CircularRelationship, EcoDataSeries, EcoDataEntry, Settings, ChatSession, ChatMessage
 from .search import search_engine
 from .ai import AIConfig, get_ai_client
+from .circular_ai import GENERATION_ACTIONS, generation_job_payload, run_generation_job
 from .embeddings import EmbeddingConfig, create_embedding_backend
 
 from .scraper.circulars import HEADERS
@@ -44,6 +45,10 @@ def _safe_json_list(value: str | None) -> list:
         return parsed if isinstance(parsed, list) else []
     except (json.JSONDecodeError, TypeError):
         return []
+
+
+def _isoformat(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
 
 
 def _circular_summary(circular: Circular, snippet: str | None = None) -> dict:
@@ -419,7 +424,74 @@ async def get_circular_detail(circular_id: str, db: Session = Depends(get_db)):
             "outgoing": [rel_dict(r) for r in outgoing],
             "incoming": [rel_dict(r) for r in incoming],
         },
+        "generation": {
+            "summary": _isoformat(c.summary_generated_at),
+            "tags": _isoformat(c.tags_generated_at),
+            "checklist": _isoformat(c.checklist_generated_at),
+            "relationships": _isoformat(c.relationships_generated_at),
+        },
     }
+
+
+@app.post("/api/circulars/{circular_id}/generate")
+async def generate_circular_intelligence(
+    circular_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "A JSON request body is required."}, status_code=400)
+    if not isinstance(data, dict):
+        return JSONResponse({"error": "The request body must be a JSON object."}, status_code=400)
+
+    feature = str(data.get("feature", "")).lower().strip()
+    if feature not in GENERATION_ACTIONS:
+        return JSONResponse(
+            {"error": f"Feature must be one of: {', '.join(GENERATION_ACTIONS)}."},
+            status_code=400,
+        )
+
+    circular = db.query(Circular).filter(Circular.id == circular_id).first()
+    if not circular:
+        return JSONResponse({"error": "Circular not found"}, status_code=404)
+    if not circular.content_text:
+        return JSONResponse(
+            {"error": "This circular has no extracted content to analyze."},
+            status_code=422,
+        )
+
+    active_job = db.query(AIGenerationJob).filter(
+        AIGenerationJob.circular_id == circular_id,
+        AIGenerationJob.status.in_(("queued", "running")),
+    ).order_by(AIGenerationJob.created_at.desc()).first()
+    if active_job:
+        return JSONResponse(
+            {"error": "Generation is already in progress for this circular.", "job": generation_job_payload(active_job)},
+            status_code=409,
+        )
+
+    job = AIGenerationJob(
+        id=str(uuid.uuid4()),
+        circular_id=circular_id,
+        feature=feature,
+        status="queued",
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    background_tasks.add_task(run_generation_job, job.id)
+    return JSONResponse(generation_job_payload(job), status_code=202)
+
+
+@app.get("/api/ai/jobs/{job_id}")
+async def get_ai_generation_job(job_id: str, db: Session = Depends(get_db)):
+    job = db.query(AIGenerationJob).filter(AIGenerationJob.id == job_id).first()
+    if not job:
+        return JSONResponse({"error": "Generation job not found"}, status_code=404)
+    return generation_job_payload(job)
 
 
 @app.get("/api/circulars/{circular_id}/relationships")

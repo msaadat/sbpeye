@@ -2,6 +2,7 @@ import click
 import sys
 import time
 import json
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
@@ -481,6 +482,7 @@ def _run_summarize(db, client, url, dept, year, limit, refresh, verbose, delay):
         try:
             summary = client.summarize(c.title, c.content_text)
             c.summary = summary
+            c.summary_generated_at = datetime.utcnow()
             db.commit()
             processed += 1
             if verbose:
@@ -518,6 +520,7 @@ def _run_tags(db, client, url, dept, year, limit, refresh, verbose, delay):
         try:
             tag_list = client.generate_tags(c.title, c.content_text)
             c.tags = json.dumps(tag_list)
+            c.tags_generated_at = datetime.utcnow()
             db.commit()
             processed += 1
             if verbose:
@@ -555,6 +558,7 @@ def _run_checklist(db, client, url, dept, year, limit, refresh, verbose, delay):
         try:
             checklist = client.generate_checklist(c.title, c.content_text)
             c.compliance_checklist = json.dumps(checklist)
+            c.checklist_generated_at = datetime.utcnow()
             db.commit()
             processed += 1
             if verbose:
@@ -616,6 +620,7 @@ def _run_relationships(db, client, url, dept, year, limit, refresh, verbose, del
                     db.add(rel)
                     all_rels.append(rel)
 
+            c.relationships_generated_at = datetime.utcnow()
             db.commit()
             total_rels += len(all_rels)
             processed += 1

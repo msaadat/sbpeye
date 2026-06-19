@@ -1325,6 +1325,43 @@ a {
   font-size: 0.7rem;
 }
 
+.generation-progress {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--sbp-muted);
+  font-size: 0.72rem;
+}
+
+.generation-progress i {
+  color: var(--p-purple-500);
+}
+
+.generation-menu {
+  display: grid;
+  width: 13rem;
+  gap: 0.15rem;
+}
+
+.generation-menu-title {
+  padding: 0.3rem 0.55rem;
+  color: var(--sbp-muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.generation-menu .p-button {
+  justify-content: flex-start;
+}
+
+.generation-menu-divider {
+  height: 1px;
+  margin: 0.2rem 0;
+  background: var(--sbp-border);
+}
+
 .detail-section {
   display: grid;
   gap: 0.4rem;
@@ -1333,6 +1370,25 @@ a {
 .detail-section h2,
 .detail-section p {
   margin: 0;
+}
+
+.collapsible-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.collapsible-heading i {
+  color: var(--sbp-muted);
+  font-size: 0.68rem;
 }
 
 .detail-copy {
@@ -1381,12 +1437,21 @@ a {
   background: color-mix(in srgb, var(--sbp-green) 9%, var(--sbp-surface));
 }
 
+.header-tag-pill {
+  padding-block: 0.18rem;
+  font-size: 0.65rem;
+}
+
 .sbpeye-dark .tag-pill {
   color: #aee0cc;
 }
 
 .checklist-pill i {
   color: var(--sbp-green);
+}
+
+.checklist-pill i.action-required {
+  color: var(--p-orange-500);
 }
 
 .relationship-pill {

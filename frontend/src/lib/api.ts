@@ -78,9 +78,36 @@ export interface CircularRelationshipsResponse {
   incoming: CircularRelationship[]
 }
 
+export interface ComplianceChecklistItem {
+  item: string
+  action_required: boolean
+}
+
+export type GenerationFeature = 'summary' | 'tags' | 'checklist' | 'relationships'
+export type GenerationAction = GenerationFeature | 'all'
+
+export interface CircularGenerationState {
+  summary?: string | null
+  tags?: string | null
+  checklist?: string | null
+  relationships?: string | null
+}
+
+export interface AIGenerationJob {
+  id: string
+  circular_id: string
+  feature: GenerationAction
+  status: 'queued' | 'running' | 'succeeded' | 'failed'
+  error?: string | null
+  created_at?: string | null
+  started_at?: string | null
+  completed_at?: string | null
+}
+
 export interface CircularDetail extends CircularSummary {
-  compliance_checklist: string[]
+  compliance_checklist: Array<ComplianceChecklistItem | string>
   relationships: CircularRelationshipsResponse
+  generation: CircularGenerationState
 }
 
 export interface CircularSourceContent {
@@ -267,6 +294,20 @@ export async function getCircularSearch(
 
 export async function getCircularDetail(id: string): Promise<CircularDetail> {
   return requestJson<CircularDetail>(`/circulars/${encodeURIComponent(id)}`)
+}
+
+export async function startCircularGeneration(id: string, feature: GenerationAction): Promise<AIGenerationJob> {
+  return requestJson<AIGenerationJob>(`/circulars/${encodeURIComponent(id)}/generate`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ feature }),
+  })
+}
+
+export async function getAIGenerationJob(jobId: string): Promise<AIGenerationJob> {
+  return requestJson<AIGenerationJob>(`/ai/jobs/${encodeURIComponent(jobId)}`)
 }
 
 export async function getCircularSource(id: string): Promise<CircularSourceContent> {

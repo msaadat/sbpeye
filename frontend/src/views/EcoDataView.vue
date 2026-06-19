@@ -7,7 +7,6 @@ import AccordionPanel from 'primevue/accordionpanel'
 import AccordionHeader from 'primevue/accordionheader'
 import AccordionContent from 'primevue/accordioncontent'
 import Button from 'primevue/button'
-import Card from 'primevue/card'
 import Column from 'primevue/column'
 import DataTable from 'primevue/datatable'
 import Dialog from 'primevue/dialog'
@@ -38,6 +37,7 @@ const searchQuery = ref('')
 
 // Active accordion section indexes
 const activeSectionIndexes = ref<string[]>([])
+const activeSubsectionIndexes = ref<Record<string, string[]>>({})
 
 // Dialog visibility states
 const pdfDialogVisible = ref(false)
@@ -159,6 +159,12 @@ watch(groupedSections, (newVal) => {
   if (activeSectionIndexes.value.length === 0 && newVal.length > 0) {
     activeSectionIndexes.value = newVal.map((_, i) => String(i))
   }
+
+  for (const section of newVal) {
+    if (!(section.name in activeSubsectionIndexes.value)) {
+      activeSubsectionIndexes.value[section.name] = Object.keys(section.subsections)
+    }
+  }
 }, { immediate: true })
 
 function frequencySeverity(freq: string): 'success' | 'info' | 'warn' | 'danger' | 'secondary' {
@@ -216,32 +222,42 @@ onMounted(() => {
 </script>
 
 <template>
-  <section class="view-stack">
-    <div class="page-heading">
-      <div>
-        <p>EcoData</p>
-        <h1>Economic data library</h1>
-      </div>
-      <Button label="Refresh" icon="pi pi-refresh" :loading="loading" @click="fetchEntries" />
-    </div>
-
-    <!-- Search/Filter Input -->
-    <div class="flex items-center gap-3">
-      <span class="p-input-icon-left wide-search">
+  <section class="view-stack eco-data-view">
+    <div class="eco-data-toolbar">
+      <span class="eco-data-search">
         <i class="pi pi-search" />
         <InputText
           v-model="searchQuery"
-          placeholder="Filter data entries by description, section, frequency..."
+          placeholder="Filter by description, section, or frequency"
+        />
+        <Button
+          v-if="searchQuery"
+          icon="pi pi-times"
+          severity="secondary"
+          text
+          rounded
+          aria-label="Clear filter"
+          title="Clear filter"
+          @click="searchQuery = ''"
         />
       </span>
-      <Button
-        v-if="searchQuery"
-        icon="pi pi-filter-slash"
-        severity="secondary"
-        outlined
-        label="Clear"
-        @click="searchQuery = ''"
-      />
+
+      <div v-if="quickLinks.length" class="toolbar-quick-links">
+        <a
+          v-for="entry in quickLinks"
+          :key="entry.id"
+          :href="entry.url || undefined"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="toolbar-quick-link"
+          :class="{ 'is-disabled': !entry.url }"
+        >
+          <span>{{ entry.description }}</span>
+          <i v-if="entry.url" class="pi pi-external-link" />
+        </a>
+      </div>
+
+      <Button class="refresh-button" label="Refresh" icon="pi pi-refresh" :loading="loading" @click="fetchEntries" />
     </div>
 
     <!-- Loading State -->
@@ -287,50 +303,10 @@ onMounted(() => {
     </div>
 
     <!-- Main Content -->
-    <div v-else class="space-y-6">
-      <!-- Quick Links Section -->
-      <div v-if="quickLinks.length" class="mb-6">
-        <h3 class="text-xs font-semibold mb-3 uppercase tracking-wider text-muted-color">Quick Links</h3>
-        <div class="quick-links-grid">
-          <Card
-            v-for="entry in quickLinks"
-            :key="entry.id"
-            class="quick-link-card"
-          >
-            <template #content>
-              <a
-                v-if="entry.url"
-                :href="entry.url"
-                target="_blank"
-                rel="noopener noreferrer"
-                class="flex flex-col h-full justify-between gap-2"
-              >
-                <div class="flex items-start justify-between gap-2">
-                  <span class="font-semibold text-sm link-text">
-                    {{ entry.description }}
-                  </span>
-                  <i class="pi pi-external-link text-muted-color text-xs flex-shrink-0 mt-0.5" />
-                </div>
-                <div v-if="entry.last_update" class="text-xs text-muted-color">
-                  {{ entry.last_update }}
-                </div>
-              </a>
-              <div v-else class="flex flex-col h-full justify-between gap-2">
-                <span class="font-semibold text-sm text-color">
-                  {{ entry.description }}
-                </span>
-                <div v-if="entry.last_update" class="text-xs text-muted-color">
-                  {{ entry.last_update }}
-                </div>
-              </div>
-            </template>
-          </Card>
-        </div>
-      </div>
-
+    <div v-else class="eco-data-content">
       <!-- Sections Accordion -->
       <div class="accordion-container">
-        <Accordion multiple v-model:value="activeSectionIndexes">
+        <Accordion v-model:value="activeSectionIndexes" multiple class="section-accordion">
           <AccordionPanel
             v-for="(section, secIndex) in groupedSections"
             :key="section.name"
@@ -463,7 +439,11 @@ onMounted(() => {
 
               <!-- Subsections Accordions -->
               <div v-if="Object.keys(section.subsections).length" class="subsection-container space-y-4">
-                <Accordion multiple>
+                <Accordion
+                  v-model:value="activeSubsectionIndexes[section.name]"
+                  multiple
+                  class="subsection-accordion"
+                >
                   <AccordionPanel
                     v-for="(subEntries, subName) in section.subsections"
                     :key="subName"
@@ -657,31 +637,138 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.quick-links-grid {
+.eco-data-toolbar {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
-  gap: 1rem;
+  grid-template-columns: minmax(17rem, 1.35fr) minmax(0, 3fr) auto;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.15rem 0 0.55rem;
+  border-bottom: 1px solid var(--sbp-border);
 }
 
-.quick-link-card {
+.eco-data-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.eco-data-search > .pi-search {
+  position: absolute;
+  z-index: 1;
+  left: 0.75rem;
+  color: var(--sbp-muted);
+  pointer-events: none;
+}
+
+.eco-data-search :deep(.p-inputtext) {
+  width: 100%;
+  padding-left: 2.25rem;
+  padding-right: 2.4rem;
+}
+
+.eco-data-search :deep(.p-button) {
+  position: absolute;
+  right: 0.15rem;
+}
+
+.toolbar-quick-links {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.toolbar-quick-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem;
+  min-width: 0;
+  min-height: 2.65rem;
+  padding: 0.4rem 0.55rem;
   border: 1px solid var(--sbp-border);
+  border-radius: 0.45rem;
   background: var(--sbp-surface);
-  transition: all 0.2s ease-in-out;
-}
-
-.quick-link-card:hover {
-  border-color: var(--sbp-green);
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(21, 111, 82, 0.08);
-}
-
-.link-text {
   color: var(--sbp-text);
-  transition: color 0.15s ease-in-out;
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.15;
+  transition: border-color 0.15s ease, background 0.15s ease;
 }
 
-.quick-link-card:hover .link-text {
+.toolbar-quick-link span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.toolbar-quick-link .pi {
   color: var(--sbp-green);
+  font-size: 0.7rem;
+  flex: 0 0 auto;
+}
+
+.toolbar-quick-link:hover {
+  border-color: var(--sbp-green);
+  background: color-mix(in srgb, var(--sbp-green) 6%, var(--sbp-surface));
+}
+
+.toolbar-quick-link.is-disabled {
+  pointer-events: none;
+  color: var(--sbp-muted);
+}
+
+.eco-data-content {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.eco-data-view :deep(.p-accordionheader) {
+  min-height: 0;
+  padding: 0.42rem 0.6rem;
+}
+
+.eco-data-view :deep(.p-accordioncontent-content) {
+  padding: 0.35rem 0.45rem 0.45rem;
+}
+
+.section-accordion > :deep(.p-accordionpanel > .p-accordionheader) {
+  border: 1px solid color-mix(in srgb, var(--sbp-green) 28%, var(--sbp-border));
+  background: color-mix(in srgb, var(--sbp-green) 10%, var(--sbp-surface));
+}
+
+.section-accordion > :deep(.p-accordionpanel > .p-accordionheader:hover) {
+  background: color-mix(in srgb, var(--sbp-green) 15%, var(--sbp-surface));
+}
+
+.subsection-accordion > :deep(.p-accordionpanel > .p-accordionheader) {
+  border: 1px solid var(--sbp-border);
+  background: color-mix(in srgb, var(--sbp-green) 5%, var(--sbp-surface));
+}
+
+.eco-data-view :deep(.p-datatable-header-cell),
+.eco-data-view :deep(.p-datatable-tbody > tr > td) {
+  padding: 0.32rem 0.5rem;
+  font-size: 0.82rem;
+  line-height: 1.25;
+}
+
+.eco-data-view :deep(.p-tag) {
+  padding: 0.15rem 0.38rem;
+  font-size: 0.7rem;
+}
+
+.eco-data-view :deep(.p-button-sm) {
+  padding: 0.28rem 0.48rem;
+  font-size: 0.76rem;
+}
+
+.eco-data-view .table-shell {
+  border-radius: 0.45rem;
+}
+
+.eco-data-view .subsection-container {
+  display: grid;
+  gap: 0.35rem;
 }
 
 .easydata-link {
@@ -712,5 +799,17 @@ onMounted(() => {
   max-height: 60vh;
   overflow-y: auto;
   line-height: 1.6;
+}
+
+@media (max-width: 760px) {
+  .eco-data-toolbar {
+    grid-template-columns: 1fr auto;
+  }
+
+  .toolbar-quick-links {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 </style>

@@ -15,8 +15,7 @@ const router = createRouter({
     {
       path: '/circulars/:id',
       name: 'circular-detail',
-      component: () => import('@/views/CircularDetailView.vue'),
-      props: true,
+      component: () => import('@/views/CircularsView.vue'),
     },
     {
       path: '/chat',

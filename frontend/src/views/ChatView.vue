@@ -55,7 +55,6 @@ marked.use({
 
 const hasContext = computed(() => selectedCirculars.value.length > 0)
 const contextModeLabel = computed(() => (hasContext.value ? 'Grounded' : 'Ungrounded'))
-const currentSession = computed(() => sessions.value.find((session) => session.id === currentSessionId.value) || null)
 
 function formatDate(value?: string | null): string {
   if (!value) {
@@ -329,18 +328,13 @@ onMounted(async () => {
 
 <template>
   <section class="view-stack chat-view">
-    <div class="page-heading">
-      <div>
-        <p>Chat</p>
-        <h1>Analyst chat</h1>
-      </div>
-      <Button label="New session" icon="pi pi-plus" @click="newSession" />
-    </div>
-
     <div class="chat-layout">
       <Card class="session-panel">
-        <template #title>Sessions</template>
         <template #content>
+          <div class="session-panel-actions">
+            <Button label="New" icon="pi pi-plus" size="small" fluid @click="newSession" />
+          </div>
+
           <div v-if="sessionsLoading" class="preview-loading compact-loading">
             <ProgressSpinner aria-label="Loading sessions" />
             <span>Loading sessions</span>
@@ -375,13 +369,10 @@ onMounted(async () => {
       </Card>
 
       <div class="chat-main">
-        <Card>
+        <Card class="context-card">
           <template #content>
             <div class="context-header">
-              <div>
-                <span>Context mode</span>
-                <Tag :value="contextModeLabel" :severity="hasContext ? 'success' : 'secondary'" />
-              </div>
+              <Tag :value="contextModeLabel" :severity="hasContext ? 'success' : 'secondary'" />
               <span>{{ selectedCirculars.length }} circulars selected</span>
             </div>
 
@@ -427,9 +418,6 @@ onMounted(async () => {
         </Card>
 
         <Card class="conversation-card">
-          <template #title>
-            {{ currentSession?.title || 'Conversation' }}
-          </template>
           <template #content>
             <Message v-if="errorMessage" severity="error" :closable="false">
               {{ errorMessage }}
@@ -465,7 +453,7 @@ onMounted(async () => {
 
               <div v-if="sending" class="assistant-typing">
                 <i class="pi pi-spin pi-spinner" />
-                <span>Generating response</span>
+                <span>Generating</span>
               </div>
             </div>
 
@@ -479,7 +467,6 @@ onMounted(async () => {
                 @keydown.enter.exact.prevent="sendMessage"
               />
               <div class="composer-actions">
-                <span>{{ contextModeLabel }} chat</span>
                 <Button
                   icon="pi pi-send"
                   label="Send"

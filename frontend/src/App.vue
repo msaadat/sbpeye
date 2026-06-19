@@ -5,9 +5,7 @@ import Button from 'primevue/button'
 import ConfirmDialog from 'primevue/confirmdialog'
 import Menubar from 'primevue/menubar'
 import Message from 'primevue/message'
-import Tag from 'primevue/tag'
 import Toast from 'primevue/toast'
-import ToggleSwitch from 'primevue/toggleswitch'
 import SbpNewsPanel from '@/components/SbpNewsPanel.vue'
 import { getAppStatus, type AppStatus } from '@/lib/api'
 
@@ -159,14 +157,10 @@ onMounted(() => {
             <Button
               text
               rounded
-              :icon="darkMode ? 'pi pi-moon' : 'pi pi-sun'"
-              aria-label="Toggle theme"
+              :icon="darkMode ? 'pi pi-sun' : 'pi pi-moon'"
+              :aria-label="darkMode ? 'Use light theme' : 'Use dark theme'"
+              :title="darkMode ? 'Use light theme' : 'Use dark theme'"
               @click="toggleTheme"
-            />
-            <ToggleSwitch
-              v-model="darkMode"
-              aria-label="Dark theme"
-              @change="syncThemeClass"
             />
           </div>
         </template>
@@ -181,9 +175,5 @@ onMounted(() => {
       <RouterView />
     </main>
 
-    <footer class="app-footer">
-      <span>Analyst workspace</span>
-      <Tag severity="success" value="Vue + PrimeVue" />
-    </footer>
   </div>
 </template>

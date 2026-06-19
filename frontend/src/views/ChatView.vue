@@ -12,6 +12,7 @@ import Message from 'primevue/message'
 import ProgressSpinner from 'primevue/progressspinner'
 import Tag from 'primevue/tag'
 import Textarea from 'primevue/textarea'
+import CircularResultContent from '@/components/CircularResultContent.vue'
 import {
   deleteChatSession,
   getChatSession,
@@ -406,11 +407,14 @@ onMounted(async () => {
                   v-for="result in searchResults"
                   :key="result.id"
                   type="button"
+                  class="circular-result-item"
                   :disabled="isSelected(result.id)"
                   @click="addContext(result)"
                 >
-                  <strong>{{ result.reference || result.title }}</strong>
-                  <span>{{ result.department || 'Unassigned' }} · {{ formatDate(result.date) }}</span>
+                  <span class="result-select result-action-icon">
+                    <i class="pi" :class="isSelected(result.id) ? 'pi-check' : 'pi-plus'" />
+                  </span>
+                  <CircularResultContent :circular="result" />
                 </button>
               </div>
             </div>

@@ -513,32 +513,24 @@ a {
 }
 
 .context-results {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.context-results button {
-  display: grid;
-  gap: 0.25rem;
-  min-width: 0;
-  padding: 0.55rem;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
   border: 1px solid var(--sbp-border);
   border-radius: 0.4rem;
-  color: var(--sbp-text);
-  text-align: left;
-  background: color-mix(in srgb, var(--sbp-surface) 78%, transparent);
-  cursor: pointer;
 }
 
-.context-results button:disabled {
+.context-results .circular-result-item:last-child {
+  border-bottom: 0;
+}
+
+.context-results .circular-result-item:disabled {
   cursor: default;
   opacity: 0.55;
 }
 
-.context-results strong,
-.context-results span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.result-action-icon {
+  color: var(--sbp-green);
+  text-align: center;
 }
 
 .conversation-card .p-card-content {
@@ -950,7 +942,7 @@ a {
   display: grid;
   height: 100%;
   min-height: 0;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
 }
 
 .chat-view .session-panel .p-card-content {
@@ -969,12 +961,14 @@ a {
 }
 
 .chat-view .context-card .p-card-content {
-  max-height: 8.5rem;
-  overflow-y: auto;
+  display: grid;
+  max-height: min(15rem, 32vh);
+  grid-template-rows: auto auto minmax(0, 1fr);
+  overflow: hidden;
 }
 
 .chat-view .context-results {
-  max-height: 5.5rem;
+  max-height: min(9rem, 20vh);
   overflow-y: auto;
 }
 
@@ -1004,7 +998,7 @@ a {
 
 .circular-workspace {
   display: grid;
-  grid-template-columns: 15.5rem minmax(28rem, 1fr);
+  grid-template-columns: 14.5rem minmax(28rem, 1fr);
   width: 100%;
   height: 100%;
   min-height: 0;
@@ -1015,7 +1009,7 @@ a {
 }
 
 .circular-workspace.has-detail {
-  grid-template-columns: 14.5rem minmax(17rem, 0.58fr) minmax(32rem, 1.42fr);
+  grid-template-columns: 13.5rem minmax(17rem, 0.58fr) minmax(32rem, 1.42fr);
 }
 
 .circular-filters,
@@ -1029,7 +1023,7 @@ a {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  padding: 0.75rem;
+  padding: 0.625rem;
   background: color-mix(in srgb, var(--sbp-subtle) 64%, var(--sbp-surface));
 }
 
@@ -1044,7 +1038,7 @@ a {
 }
 
 .workspace-brandline {
-  padding-bottom: 0.65rem;
+  padding-bottom: 0.5rem;
   border-bottom: 1px solid var(--sbp-border);
 }
 
@@ -1065,44 +1059,68 @@ a {
 }
 
 .workspace-brandline strong {
-  font-size: 0.98rem;
+  font-size: 0.9rem;
 }
 
 .filter-stack {
   display: grid;
-  gap: 0.6rem;
-  padding: 0.75rem 0;
+  gap: 0.45rem;
+  padding: 0.55rem 0;
   overflow: auto;
 }
 
 .filter-stack label {
   display: grid;
-  gap: 0.25rem;
+  min-width: 0;
+  gap: 0.18rem;
 }
 
-.filter-stack .p-input-icon-left,
+.filter-stack .filter-search,
 .filter-stack .p-inputtext,
 .filter-stack .p-select,
 .filter-stack .p-inputnumber,
 .filter-stack .p-inputnumber-input {
+  min-width: 0;
   width: 100%;
+}
+
+.filter-search {
+  position: relative;
+  display: block;
+}
+
+.filter-search > i {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  left: 0.6rem;
+  color: var(--sbp-muted);
+  font-size: 0.8rem;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.filter-search .p-inputtext {
+  padding-left: 1.8rem;
 }
 
 .year-fields {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 0.45rem;
+  min-width: 0;
+  gap: 0.35rem;
 }
 
 .filter-utilities {
   display: grid;
   margin-top: auto;
-  padding-top: 0.55rem;
+  padding-top: 0.4rem;
   border-top: 1px solid var(--sbp-border);
 }
 
 .filter-utilities .p-button {
   justify-content: flex-start;
+  padding-block: 0.35rem;
 }
 
 .circular-results-pane,

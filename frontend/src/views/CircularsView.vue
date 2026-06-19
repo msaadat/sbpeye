@@ -8,8 +8,8 @@ import InputNumber from 'primevue/inputnumber'
 import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
 import Select from 'primevue/select'
-import Tag from 'primevue/tag'
 import CircularDetailPane from '@/components/CircularDetailPane.vue'
+import CircularResultContent from '@/components/CircularResultContent.vue'
 import {
   downloadBatchZip,
   downloadCsvExport,
@@ -109,19 +109,6 @@ function routeQuery(): Record<string, string> {
 
 async function syncRoute() {
   await router.replace({ path: selectedCircularId.value ? `/circulars/${selectedCircularId.value}` : '/circulars', query: routeQuery() })
-}
-
-function formatDate(value?: string | null): string {
-  if (!value) return 'Not dated'
-  return new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short', day: '2-digit' }).format(new Date(value))
-}
-
-function statusSeverity(status: string): 'success' | 'info' | 'warn' | 'danger' {
-  const value = status.toLowerCase()
-  if (value.includes('active') || value.includes('indexed')) return 'success'
-  if (value.includes('superseded') || value.includes('replaced')) return 'warn'
-  if (value.includes('withdrawn') || value.includes('cancel')) return 'danger'
-  return 'info'
 }
 
 async function loadOptions() {
@@ -229,19 +216,19 @@ onBeforeUnmount(() => searchController?.abort())
     <aside class="circular-filters">
       <div class="workspace-brandline">
         <div><span>Circulars</span><strong>Search workspace</strong></div>
-        <Button icon="pi pi-filter-slash" text rounded aria-label="Reset filters" :disabled="!hasFilters" @click="clearFilters" />
+        <Button icon="pi pi-filter-slash" size="small" text rounded aria-label="Reset filters" :disabled="!hasFilters" @click="clearFilters" />
       </div>
 
       <form class="filter-stack" @submit.prevent="loadCirculars(true)">
-        <label><span>Search</span><span class="p-input-icon-left"><i class="pi pi-search" /><InputText v-model="query" placeholder="Reference, title, policy..." /></span></label>
-        <label><span>Department</span><Select v-model="department" :options="departmentOptions" option-label="label" option-value="value" :loading="optionsLoading" @change="loadCirculars(true)" /></label>
-        <label><span>Tag</span><Select v-model="tag" :options="tagOptions" option-label="label" option-value="value" :loading="optionsLoading" @change="loadCirculars(true)" /></label>
+        <label><span>Search</span><span class="filter-search"><i class="pi pi-search" /><InputText v-model="query" size="small" placeholder="Reference, title, policy..." /></span></label>
+        <label><span>Department</span><Select v-model="department" :options="departmentOptions" option-label="label" option-value="value" size="small" :loading="optionsLoading" @change="loadCirculars(true)" /></label>
+        <label><span>Tag</span><Select v-model="tag" :options="tagOptions" option-label="label" option-value="value" size="small" :loading="optionsLoading" @change="loadCirculars(true)" /></label>
         <div class="year-fields">
-          <label><span>From year</span><InputNumber v-model="startYear" :use-grouping="false" :min="1900" :max="2100" placeholder="From" /></label>
-          <label><span>To year</span><InputNumber v-model="endYear" :use-grouping="false" :min="1900" :max="2100" placeholder="To" /></label>
+          <label><span>From year</span><InputNumber v-model="startYear" size="small" :use-grouping="false" :min="1900" :max="2100" placeholder="From" /></label>
+          <label><span>To year</span><InputNumber v-model="endYear" size="small" :use-grouping="false" :min="1900" :max="2100" placeholder="To" /></label>
         </div>
-        <label><span>Sort</span><Select v-model="sortBy" :options="sortOptions" option-label="label" option-value="value" @change="loadCirculars(true)" /></label>
-        <Button type="submit" label="Search" icon="pi pi-search" :loading="loading" />
+        <label><span>Sort</span><Select v-model="sortBy" :options="sortOptions" option-label="label" option-value="value" size="small" @change="loadCirculars(true)" /></label>
+        <Button type="submit" label="Search" icon="pi pi-search" size="small" :loading="loading" />
       </form>
 
       <div class="filter-utilities">
@@ -274,19 +261,11 @@ onBeforeUnmount(() => searchController?.abort())
           <span class="result-select" @click.stop>
             <Checkbox v-model="selectedIds" :value="row.id" :input-id="`select-${row.id}`" :aria-label="`Select ${row.title}`" />
           </span>
-          <span class="result-content">
-            <span class="result-topline">
-              <code>{{ row.reference || 'No reference' }}</code>
-              <Tag :value="row.status" :severity="statusSeverity(row.status)" />
-            </span>
-            <strong>{{ row.title }}</strong>
-            <span class="result-meta">{{ row.department || 'Unassigned' }} · {{ formatDate(row.date) }}</span>
-            <span v-if="!selectedCircularId && row.snippet" class="result-snippet" v-html="row.snippet" />
-            <span v-else-if="!selectedCircularId && row.summary" class="result-snippet">{{ row.summary }}</span>
-            <span v-if="row.tags?.length" class="result-tags">
-              <Tag v-for="item in row.tags.slice(0, selectedCircularId ? 1 : 3)" :key="item" :value="item" severity="secondary" />
-            </span>
-          </span>
+          <CircularResultContent
+            :circular="row"
+            :show-snippet="!selectedCircularId"
+            :max-tags="selectedCircularId ? 1 : 3"
+          />
         </button>
         <div v-if="!loading && !rows.length" class="empty-table-state"><i class="pi pi-search" /><strong>No circulars found</strong><span>Adjust the filters and try again.</span></div>
       </div>

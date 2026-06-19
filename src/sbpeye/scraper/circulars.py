@@ -382,8 +382,12 @@ def process_circular(
             }
             for i in range(len(chunks))
         ]
+        from sbpeye.database import embedding_backend
+
+        embeddings = embedding_backend.embed_documents(chunks)
         collection.add(
             documents=chunks,
+            embeddings=embeddings,
             metadatas=chunk_metas,
             ids=chunk_ids,
         )

@@ -12,10 +12,11 @@ import os
 import json
 import uuid
 
-from .database import engine, Base, get_db, SessionLocal
+from .database import engine, Base, get_db, SessionLocal, has_vector_store_data
 from .models import SyncStatus, Circular, CircularRelationship, EcoDataSeries, EcoDataEntry, Settings, ChatSession, ChatMessage
 from .search import search_engine
 from .ai import AIConfig, get_ai_client
+from .embeddings import EmbeddingConfig, create_embedding_backend
 
 from .scraper.circulars import HEADERS
 from .scraper.ecodata import scrape_ecodata
@@ -59,7 +60,7 @@ def _circular_summary(circular: Circular, snippet: str | None = None) -> dict:
     }
 
 
-def _settings_payload(config: AIConfig) -> dict:
+def _settings_payload(config: AIConfig, embedding: EmbeddingConfig) -> dict:
     return {
         "provider": config.provider,
         "base_url": config.base_url,
@@ -73,6 +74,10 @@ def _settings_payload(config: AIConfig) -> dict:
         "ai_model": config.model,
         "ai_chat_model": config.chat_model,
         "ai_max_context_tokens": config.max_context_tokens,
+        "embedding_provider": embedding.provider,
+        "embedding_model": embedding.model,
+        "embedding_base_url": embedding.base_url,
+        "embedding_api_key": embedding.api_key,
     }
 
 
@@ -239,7 +244,7 @@ async def get_app_status(db: Session = Depends(get_db)):
     total_circulars = db.query(func.count(Circular.id)).scalar() or 0
     department_count = db.query(func.count(func.distinct(Circular.department))).filter(Circular.department.isnot(None)).scalar() or 0
     indexed_today = db.query(func.count(Circular.id)).filter(func.date(Circular.date) == datetime.now().date()).scalar() or 0
-    vector_db_ready = os.path.exists("chroma_db/chroma.sqlite3")
+    vector_db_ready = has_vector_store_data()
 
     return {
         "sync_status": sync_status.status if sync_status and sync_status.status else "idle",
@@ -247,7 +252,7 @@ async def get_app_status(db: Session = Depends(get_db)):
         "total_circulars": total_circulars,
         "department_count": department_count,
         "indexed_today": indexed_today,
-        "vector_db_state": "READY" if vector_db_ready else "OFFLINE",
+        "vector_db_state": "READY" if vector_db_ready else "NOT_INDEXED",
         "last_sync_display": _format_timestamp(last_sync_dt),
         "last_sync": _format_timestamp(last_sync_dt),
         "last_sync_dt": last_sync_dt.isoformat() if isinstance(last_sync_dt, datetime) else None,
@@ -337,7 +342,7 @@ async def get_ecodata(series: str = "KIBOR_6M", db: Session = Depends(get_db)):
     return [{"date": d.date.strftime("%Y-%m-%d"), "value": d.value} for d in data]
 
 @app.get("/api/circulars/search")
-async def search_circulars(
+def search_circulars(
     q: str = "",
     start_year: str | None = None,
     end_year: str | None = None,
@@ -698,7 +703,8 @@ async def settings_page():
 @app.get("/api/settings")
 async def get_settings(db: Session = Depends(get_db)):
     config = AIConfig.from_db(db) or AIConfig.from_env()
-    return _settings_payload(config)
+    embedding = EmbeddingConfig.from_db(db)
+    return _settings_payload(config, embedding)
 
 
 @app.post("/api/settings")
@@ -713,7 +719,28 @@ async def save_settings(request: Request, db: Session = Depends(get_db)):
         max_context_tokens=int(data.get("max_context_tokens", data.get("ai_max_context_tokens", 4000))),
     )
     config.save_to_db(db)
-    return {"message": "Settings saved successfully", "settings": _settings_payload(config)}
+    embedding = EmbeddingConfig(
+        provider=data.get("embedding_provider", "fastembed"),
+        model=data.get("embedding_model", "BAAI/bge-base-en-v1.5"),
+        base_url=data.get("embedding_base_url", "http://localhost:1234/v1"),
+        api_key=data.get("embedding_api_key", "lm-studio"),
+    )
+    embedding.save_to_db(db)
+    return {
+        "message": "Settings saved. Restart the server and run sbpeye reindex after changing the embedding backend or model.",
+        "settings": _settings_payload(config, embedding),
+    }
+
+
+@app.post("/api/settings/embeddings/test")
+def test_embedding_connection(db: Session = Depends(get_db)):
+    try:
+        config = EmbeddingConfig.from_db(db)
+        backend = create_embedding_backend(config)
+        embedding = backend.embed_queries(["SBP monetary policy"])
+        return {"success": True, "dimensions": len(embedding[0]), "provider": config.provider}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 @app.post("/api/settings/test")

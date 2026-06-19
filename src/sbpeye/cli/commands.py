@@ -286,7 +286,7 @@ def stats_cmd():
 @click.option("--dry-run", is_flag=True, help="Show what would be indexed without writing")
 def reindex_cmd(dry_run):
     """Re-index all circulars into ChromaDB."""
-    from sbpeye.database import chroma_client, embedding_fn
+    from sbpeye.database import chroma_client, embedding_backend, embedding_config
     from sbpeye.search import prepare_chunks
 
     COLLECTION_NAME = "circulars"
@@ -306,16 +306,17 @@ def reindex_cmd(dry_run):
             print(f"Would create {total_chunks} chunks (avg {total_chunks/total:.1f} per circular)")
             return
 
+        print(f"Embedding backend: {embedding_config.provider} ({embedding_config.model})")
+        probe = embedding_backend.embed_queries(["SBP circular search"])
+        print(f"Embedding dimensions: {len(probe[0])}")
+
         try:
             chroma_client.delete_collection(COLLECTION_NAME)
             print(f"Deleted old '{COLLECTION_NAME}' collection")
         except Exception:
             print(f"No existing '{COLLECTION_NAME}' collection to delete")
 
-        col = chroma_client.create_collection(
-            name=COLLECTION_NAME,
-            embedding_function=embedding_fn,
-        )
+        col = chroma_client.create_collection(name=COLLECTION_NAME, embedding_function=None)
 
         indexed = 0
         total_chunks = 0
@@ -329,8 +330,10 @@ def reindex_cmd(dry_run):
             nonlocal total_chunks
             if not batch_docs:
                 return
+            embeddings = embedding_backend.embed_documents(list(batch_docs))
             col.add(
                 documents=list(batch_docs),
+                embeddings=embeddings,
                 ids=list(batch_ids),
                 metadatas=list(batch_metas),
             )

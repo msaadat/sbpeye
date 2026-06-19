@@ -62,6 +62,8 @@ cd frontend && npm run build
 
 FastAPI serves the built SPA from `frontend/dist/` at `http://localhost:8000`.
 
+The `chroma_db/` directory is generated locally and is not tracked in git. If it is missing in a fresh clone, the app will still start; run `sbpeye reindex` after syncing circulars to rebuild the vector store.
+
 ## AI Configuration
 
 AI settings can be provided through the app's settings page or environment variables.
@@ -76,6 +78,10 @@ Environment variables:
 - `AI_PROVIDER`
 - `AI_BASE_URL`
 - `AI_API_KEY`
+- `EMBEDDING_PROVIDER` (`fastembed` by default, or `lmstudio`)
+- `EMBEDDING_MODEL` (defaults to `BAAI/bge-base-en-v1.5`)
+- `EMBEDDING_BASE_URL` (defaults to `http://localhost:1234/v1`)
+- `EMBEDDING_API_KEY` (defaults to `lm-studio`)
 - `AI_MODEL`
 - `AI_CHAT_MODEL`
 

@@ -6,7 +6,7 @@ from rank_bm25 import BM25Okapi
 from sqlalchemy.orm import Session
 
 from .models import Circular
-from .database import collection
+from .database import collection, embedding_backend
 
 logger = logging.getLogger(__name__)
 
@@ -599,8 +599,9 @@ class SearchEngine:
         # 3. Vector search (use original query — embeddings handle semantics)
         vector_ranks: dict[str, int] = {}
         try:
+            query_embeddings = embedding_backend.embed_queries([query])
             results = collection.query(
-                query_texts=[query],
+                query_embeddings=query_embeddings,
                 n_results=self.CANDIDATE_COUNT,
             )
             raw_ids = results["ids"][0] if results["ids"] else []

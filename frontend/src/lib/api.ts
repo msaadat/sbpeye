@@ -135,6 +135,10 @@ export interface SettingsPayload {
   ai_model?: string
   ai_chat_model?: string
   ai_max_context_tokens?: number
+  embedding_provider: string
+  embedding_model: string
+  embedding_base_url: string
+  embedding_api_key: string
 }
 
 export interface ChatSession {
@@ -240,7 +244,10 @@ export async function getSbpNews(): Promise<SbpNewsResponse> {
   return requestJson<SbpNewsResponse>('/sbp_news')
 }
 
-export async function getCircularSearch(filters: SearchFilters = {}): Promise<PaginatedResponse<CircularSummary>> {
+export async function getCircularSearch(
+  filters: SearchFilters = {},
+  signal?: AbortSignal,
+): Promise<PaginatedResponse<CircularSummary>> {
   const {
     q = '',
     start_year,
@@ -254,6 +261,7 @@ export async function getCircularSearch(filters: SearchFilters = {}): Promise<Pa
 
   return requestJson<PaginatedResponse<CircularSummary>>(
     `/circulars/search${toQueryString({ q, start_year, end_year, department, sort_by, tag, page, per_page })}`,
+    { signal },
   )
 }
 
@@ -331,6 +339,12 @@ export async function saveSettings(payload: SettingsPayload): Promise<{ message:
 
 export async function testSettingsConnection(): Promise<Record<string, unknown>> {
   return requestJson<Record<string, unknown>>('/settings/test', {
+    method: 'POST',
+  })
+}
+
+export async function testEmbeddingConnection(): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>('/settings/embeddings/test', {
     method: 'POST',
   })
 }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useToast } from 'primevue/usetoast'
 import Button from 'primevue/button'
@@ -47,6 +47,7 @@ const tag = ref<string | null>(null)
 const startYear = ref<number | null>(null)
 const endYear = ref<number | null>(null)
 const sortBy = ref('relevance')
+let searchController: AbortController | undefined
 
 const selectedCircularId = computed(() => typeof route.params.id === 'string' ? route.params.id : '')
 const totalPages = computed(() => Math.max(1, Math.ceil(totalRecords.value / perPage.value)))
@@ -134,20 +135,31 @@ async function loadOptions() {
 
 async function loadCirculars(resetPage = false) {
   if (resetPage) page.value = 1
+  searchController?.abort()
+  const controller = new AbortController()
+  searchController = controller
+  const timeout = window.setTimeout(() => controller.abort('timeout'), 30_000)
   loading.value = true
   errorMessage.value = ''
   try {
-    const response = await getCircularSearch(filters.value)
+    const response = await getCircularSearch(filters.value, controller.signal)
+    if (controller !== searchController) return
     rows.value = response.items
     totalRecords.value = response.total
     page.value = response.page
     perPage.value = response.per_page
     await syncRoute()
   } catch (error) {
+    if (controller !== searchController) return
     rows.value = []
     totalRecords.value = 0
-    errorMessage.value = error instanceof Error ? error.message : 'Unable to load circulars.'
-  } finally { loading.value = false }
+    errorMessage.value = controller.signal.aborted
+      ? 'Search timed out. Refine the query and try again.'
+      : error instanceof Error ? error.message : 'Unable to load circulars.'
+  } finally {
+    window.clearTimeout(timeout)
+    if (controller === searchController) loading.value = false
+  }
 }
 
 function clearFilters() {
@@ -208,6 +220,8 @@ onMounted(() => {
   void loadOptions()
   void loadCirculars()
 })
+
+onBeforeUnmount(() => searchController?.abort())
 </script>
 
 <template>

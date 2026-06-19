@@ -13,3 +13,6 @@ wheels/
 frontend/node_modules/
 frontend/dist/
 src/sbpeye/static/spa/assets/
+
+# Local vector index
+/chroma_db/

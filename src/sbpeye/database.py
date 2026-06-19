@@ -1,10 +1,14 @@
+import chromadb
+from pathlib import Path
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-import chromadb
-from chromadb.utils import embedding_functions
+
+from .embeddings import EmbeddingConfig, create_embedding_backend
 
 SQLALCHEMY_DATABASE_URL = "sqlite:///./sbpeye.db"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+CHROMA_DB_DIR = PROJECT_ROOT / "chroma_db"
 
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
@@ -20,21 +24,19 @@ def get_db():
     finally:
         db.close()
 
-EMBEDDING_MODEL = "BAAI/bge-base-en-v1.5"
+embedding_config = EmbeddingConfig.from_database(engine)
+embedding_backend = create_embedding_backend(embedding_config)
 
-embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
-    model_name=EMBEDDING_MODEL
-)
-
-chroma_client = chromadb.PersistentClient(path="./chroma_db")
+chroma_client = chromadb.PersistentClient(path=str(CHROMA_DB_DIR))
 
 try:
-    collection = chroma_client.get_or_create_collection(
-        name="circulars",
-        embedding_function=embedding_fn,
-    )
+    collection = chroma_client.get_or_create_collection(name="circulars", embedding_function=None)
 except ValueError:
-    collection = chroma_client.get_collection(name="circulars")
+    collection = chroma_client.get_collection(name="circulars", embedding_function=None)
+
+
+def has_vector_store_data() -> bool:
+    return (CHROMA_DB_DIR / "chroma.sqlite3").exists()
 
 
 def _ensure_columns():

@@ -9,6 +9,8 @@ dependencies = [
     "chromadb>=1.5.9",
     "click>=8.1.0",
     "fastapi>=0.136.3",
+    "fastembed>=0.7.4",
+    "onnxruntime>=1.26.0",
     "jinja2>=3.1.6",
     "openai>=2.38.0",
     "openpyxl>=3.1.5",
@@ -18,7 +20,6 @@ dependencies = [
     "python-multipart>=0.0.29",
     "rank-bm25>=0.2.2",
     "requests>=2.34.2",
-    "sentence-transformers>=5.5.1",
     "sqlalchemy>=2.0.50",
     "uvicorn>=0.48.0",
 ]

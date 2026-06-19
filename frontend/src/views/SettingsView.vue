@@ -8,13 +8,14 @@ import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
 import Password from 'primevue/password'
 import Select from 'primevue/select'
-import { getSettings, saveSettings, testSettingsConnection } from '@/lib/api'
+import { getSettings, saveSettings, testEmbeddingConnection, testSettingsConnection } from '@/lib/api'
 
 const toast = useToast()
 
 const loading = ref(true)
 const saving = ref(false)
 const testing = ref(false)
+const testingEmbeddings = ref(false)
 const loadError = ref('')
 
 const provider = ref('lmstudio')
@@ -23,11 +24,19 @@ const apiKey = ref('lm-studio')
 const model = ref('local-model')
 const chatModel = ref('')
 const maxContextTokens = ref(4000)
+const embeddingProvider = ref('fastembed')
+const embeddingModel = ref('BAAI/bge-base-en-v1.5')
+const embeddingBaseUrl = ref('http://localhost:1234/v1')
+const embeddingApiKey = ref('lm-studio')
 
 const providerOptions = [
   { name: 'LM Studio (Local)', value: 'lmstudio' },
   { name: 'OpenAI', value: 'openai' },
   { name: 'Google Gemini', value: 'google' },
+]
+const embeddingProviderOptions = [
+  { name: 'FastEmbed (Local)', value: 'fastembed' },
+  { name: 'LM Studio', value: 'lmstudio' },
 ]
 
 async function loadSettings() {
@@ -41,6 +50,10 @@ async function loadSettings() {
     model.value = settings.model
     chatModel.value = settings.chat_model || ''
     maxContextTokens.value = settings.max_context_tokens
+    embeddingProvider.value = settings.embedding_provider
+    embeddingModel.value = settings.embedding_model
+    embeddingBaseUrl.value = settings.embedding_base_url
+    embeddingApiKey.value = settings.embedding_api_key
   } catch (err) {
     loadError.value = err instanceof Error ? err.message : 'Failed to load settings'
   } finally {
@@ -58,6 +71,10 @@ async function handleSave() {
       model: model.value,
       chat_model: chatModel.value,
       max_context_tokens: maxContextTokens.value,
+      embedding_provider: embeddingProvider.value,
+      embedding_model: embeddingModel.value,
+      embedding_base_url: embeddingBaseUrl.value,
+      embedding_api_key: embeddingApiKey.value,
     })
     toast.add({ severity: 'success', summary: 'Saved', detail: result.message, life: 3000 })
   } catch (err) {
@@ -65,6 +82,22 @@ async function handleSave() {
     toast.add({ severity: 'error', summary: 'Save failed', detail: msg, life: 5000 })
   } finally {
     saving.value = false
+  }
+}
+
+async function handleEmbeddingTest() {
+  testingEmbeddings.value = true
+  try {
+    const result = (await testEmbeddingConnection()) as { success?: boolean; error?: string; dimensions?: number }
+    if (result.success) {
+      toast.add({ severity: 'success', summary: 'Embedding test', detail: `Connection successful (${result.dimensions} dimensions)`, life: 3000 })
+    } else {
+      toast.add({ severity: 'error', summary: 'Embedding test', detail: result.error || 'Connection failed', life: 5000 })
+    }
+  } catch (err) {
+    toast.add({ severity: 'error', summary: 'Embedding test', detail: err instanceof Error ? err.message : 'Request failed', life: 5000 })
+  } finally {
+    testingEmbeddings.value = false
   }
 }
 
@@ -177,6 +210,34 @@ onMounted(() => {
             />
           </label>
         </div>
+      </template>
+    </Card>
+
+    <Card>
+      <template #title>Search embeddings</template>
+      <template #content>
+        <div class="settings-grid">
+          <label>
+            <span>Embedding provider</span>
+            <Select v-model="embeddingProvider" :options="embeddingProviderOptions" option-label="name" option-value="value" :disabled="loading" />
+          </label>
+          <label>
+            <span>Embedding model</span>
+            <InputText v-model="embeddingModel" placeholder="BAAI/bge-base-en-v1.5" :disabled="loading" />
+          </label>
+          <label>
+            <span>LM Studio base URL</span>
+            <InputText v-model="embeddingBaseUrl" placeholder="http://localhost:1234/v1" :disabled="loading || embeddingProvider !== 'lmstudio'" />
+          </label>
+          <label>
+            <span>LM Studio API key</span>
+            <Password v-model="embeddingApiKey" :feedback="false" toggle-mask placeholder="lm-studio" :disabled="loading || embeddingProvider !== 'lmstudio'" />
+          </label>
+        </div>
+        <Message severity="warn" :closable="false">
+          Save and restart the server, then run <code>sbpeye reindex</code> after changing the provider or model.
+        </Message>
+        <Button label="Test embeddings" icon="pi pi-bolt" :loading="testingEmbeddings" :disabled="loading || saving" @click="handleEmbeddingTest" />
       </template>
     </Card>
   </section>

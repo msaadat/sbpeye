@@ -190,6 +190,7 @@ cd frontend && npm run typecheck  # TypeScript type checking
 - Dependencies managed with uv (`pyproject.toml`, `uv.lock`)
 - DB sessions are managed via FastAPI dependency injection (`get_db` generator)
 - Database migrations are handled automatically via `_ensure_columns()` in database.py (no Alembic)
+- `chroma_db/` is local runtime data and should not be committed to git.
 - Frontend is a Vue 3 SPA with Vue Router, Pinia stores, and PrimeVue components
 - Dark mode is implemented via PrimeVue's built-in dark mode class switching
 - FastAPI serves the built SPA from `frontend/dist/` at the root route

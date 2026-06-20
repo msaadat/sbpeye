@@ -61,6 +61,14 @@ def _safe_json_list(value: str | None) -> list:
         return []
 
 
+def _normalize_circular_ids(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return list(dict.fromkeys(
+        item.strip() for item in value if isinstance(item, str) and item.strip()
+    ))
+
+
 def _isoformat(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
 
@@ -1028,12 +1036,18 @@ async def get_chat_session(session_id: str, db: Session = Depends(get_db)):
     if not session:
         return JSONResponse({"error": "Session not found"}, status_code=404)
     messages = db.query(ChatMessage).filter(ChatMessage.session_id == session_id).order_by(ChatMessage.created_at).all()
-    circular_ids = set()
-    for m in messages:
-        if m.circular_ids:
-            for cid in json.loads(m.circular_ids):
-                circular_ids.add(cid)
+    if session.circular_ids is not None:
+        circular_ids = _normalize_circular_ids(_safe_json_list(session.circular_ids))
+    else:
+        # Legacy sessions predate authoritative session context. Preserve their
+        # historical selection until the next message stores current UI state.
+        circular_ids = list(dict.fromkeys(
+            cid
+            for message in messages
+            for cid in _normalize_circular_ids(_safe_json_list(message.circular_ids))
+        ))
     circulars = db.query(Circular).filter(Circular.id.in_(circular_ids)).all() if circular_ids else []
+    circular_by_id = {circular.id: circular for circular in circulars}
     return {
         "id": session.id,
         "title": session.title,
@@ -1041,7 +1055,11 @@ async def get_chat_session(session_id: str, db: Session = Depends(get_db)):
             {"id": m.id, "role": m.role, "content": m.content, "created_at": m.created_at.isoformat() if m.created_at else None}
             for m in messages
         ],
-        "circulars": [_circular_summary(c) for c in circulars],
+        "circulars": [
+            _circular_summary(circular_by_id[circular_id])
+            for circular_id in circular_ids
+            if circular_id in circular_by_id
+        ],
     }
 
 
@@ -1056,34 +1074,25 @@ async def delete_chat_session(session_id: str, db: Session = Depends(get_db)):
     return {"success": True}
 
 
-def _build_chat_circulars_context(db: Session, circular_ids: list[str]) -> str:
-    circulars_context = ""
-    if circular_ids:
-        circulars = db.query(Circular).filter(Circular.id.in_(circular_ids)).all()
-        for c in circulars:
-            title = c.title or "Untitled"
-            ref = c.reference or "No reference"
-            content = c.content_text or ""
-            if len(content) > 2000:
-                content = content[:2000] + "..."
-            citation = f"[[circular:{c.id}|{ref}]]"
-            attachment_lines = "\n".join(
-                f"Attachment citation: [[attachment:{item.id}|{item.filename}]]"
-                for item in sorted(c.attachments, key=lambda value: value.filename)
-            )
-            circulars_context += (
-                f"\n---\nCircular citation: {citation}\n[{ref}] {title}\n"
-                f"{content}\n{attachment_lines}\n---\n"
-            )
+def _build_chat_circulars_context(
+    db: Session,
+    circular_ids: list[str],
+    query: str = "",
+    max_context_tokens: int = 4000,
+) -> str:
+    from .chat_retrieval import build_chat_context
 
-    return circulars_context or "No circulars selected for context."
+    context, _ = build_chat_context(
+        db, circular_ids, query, max_context_tokens
+    )
+    return context
 
 
 @app.post("/api/chat")
 async def chat_message(request: Request, db: Session = Depends(get_db)):
     data = await request.json()
     message = data.get("message", "")
-    circular_ids = data.get("circular_ids", [])
+    circular_ids = _normalize_circular_ids(data.get("circular_ids", []))
     session_id = data.get("session_id")
 
     if not message.strip():
@@ -1091,14 +1100,23 @@ async def chat_message(request: Request, db: Session = Depends(get_db)):
 
     if not session_id:
         session_id = str(uuid.uuid4())
-        session = ChatSession(id=session_id, title=message[:80])
+        session = ChatSession(
+            id=session_id,
+            title=message[:80],
+            circular_ids=json.dumps(circular_ids),
+        )
         db.add(session)
     else:
         session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
         if not session:
             session_id = str(uuid.uuid4())
-            session = ChatSession(id=session_id, title=message[:80])
+            session = ChatSession(
+                id=session_id,
+                title=message[:80],
+                circular_ids=json.dumps(circular_ids),
+            )
             db.add(session)
+    session.circular_ids = json.dumps(circular_ids)
 
     user_msg = ChatMessage(
         id=str(uuid.uuid4()),
@@ -1110,13 +1128,20 @@ async def chat_message(request: Request, db: Session = Depends(get_db)):
     db.add(user_msg)
     db.commit()
 
-    circulars_context = _build_chat_circulars_context(db, circular_ids)
     messages = db.query(ChatMessage).filter(ChatMessage.session_id == session_id).order_by(ChatMessage.created_at).all()
     chat_messages = [{"role": m.role, "content": m.content} for m in messages]
 
     try:
         client = get_ai_client(db)
-        response_text = client.chat(chat_messages, db, circulars_context=circulars_context)
+        circulars_context = _build_chat_circulars_context(
+            db, circular_ids, message, client.config.max_context_tokens
+        )
+        response_text = client.chat(
+            chat_messages,
+            db,
+            circulars_context=circulars_context,
+            selected_circular_ids=circular_ids,
+        )
     except Exception as e:
         response_text = f"Error generating response: {str(e)}"
 
@@ -1136,7 +1161,7 @@ async def chat_message(request: Request, db: Session = Depends(get_db)):
 async def chat_message_stream(request: Request, db: Session = Depends(get_db)):
     data = await request.json()
     message = data.get("message", "")
-    circular_ids = data.get("circular_ids", [])
+    circular_ids = _normalize_circular_ids(data.get("circular_ids", []))
     session_id = data.get("session_id")
 
     if not message.strip():
@@ -1144,14 +1169,23 @@ async def chat_message_stream(request: Request, db: Session = Depends(get_db)):
 
     if not session_id:
         session_id = str(uuid.uuid4())
-        session = ChatSession(id=session_id, title=message[:80])
+        session = ChatSession(
+            id=session_id,
+            title=message[:80],
+            circular_ids=json.dumps(circular_ids),
+        )
         db.add(session)
     else:
         session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
         if not session:
             session_id = str(uuid.uuid4())
-            session = ChatSession(id=session_id, title=message[:80])
+            session = ChatSession(
+                id=session_id,
+                title=message[:80],
+                circular_ids=json.dumps(circular_ids),
+            )
             db.add(session)
+    session.circular_ids = json.dumps(circular_ids)
 
     user_msg = ChatMessage(
         id=str(uuid.uuid4()),
@@ -1172,12 +1206,22 @@ async def chat_message_stream(request: Request, db: Session = Depends(get_db)):
         try:
             yield sse("meta", {"session_id": session_id})
 
-            circulars_context = _build_chat_circulars_context(stream_db, circular_ids)
             rows = stream_db.query(ChatMessage).filter(ChatMessage.session_id == session_id).order_by(ChatMessage.created_at).all()
             chat_messages = [{"role": m.role, "content": m.content} for m in rows]
             client = get_ai_client(stream_db)
+            circulars_context = _build_chat_circulars_context(
+                stream_db,
+                circular_ids,
+                message,
+                client.config.max_context_tokens,
+            )
 
-            for chunk in client.stream_chat(chat_messages, stream_db, circulars_context=circulars_context):
+            for chunk in client.stream_chat(
+                chat_messages,
+                stream_db,
+                circulars_context=circulars_context,
+                selected_circular_ids=circular_ids,
+            ):
                 response_parts.append(chunk)
                 yield sse("token", {"content": chunk})
 

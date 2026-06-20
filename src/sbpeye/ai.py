@@ -66,6 +66,21 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "search_selected_documents",
+            "description": "Search passages within the circulars currently selected for this chat, including their attachments. Use this to inspect full text, find exact requirements, or retrieve additional passages. The server enforces the selected-document scope.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "A focused question or search phrase for the selected documents"},
+                    "limit": {"type": "integer", "description": "Number of passages to return (1-10)", "default": 5},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_circulars",
             "description": "Search SBP circulars by keyword, topic, department, or tag. Use this when the user asks for circulars on a specific subject, regulation, or topic. Returns matching circulars with title, date, department, reference, and summary.",
             "parameters": {
@@ -372,10 +387,33 @@ class AIClient:
             relationships[key] = values
         return relationships
 
-    def _execute_tool(self, name: str, arguments: dict, db: Session) -> str:
+    def _execute_tool(
+        self,
+        name: str,
+        arguments: dict,
+        db: Session,
+        selected_circular_ids: list[str] | None = None,
+    ) -> str:
         """Execute a tool by name and return the result as a JSON string.
         IDs are exposed only inside opaque citation tokens that the UI can resolve."""
         try:
+            if name == "search_selected_documents":
+                from .chat_retrieval import ScopedChatRetriever
+
+                if not selected_circular_ids:
+                    return json.dumps({"error": "No circulars are selected for this chat"})
+                query = str(arguments.get("query", "")).strip()
+                if not query:
+                    return json.dumps({"error": "No search query provided"})
+                limit = max(1, min(int(arguments.get("limit", 5)), 10))
+                retriever = ScopedChatRetriever(db, selected_circular_ids)
+                results = retriever.search(
+                    query,
+                    limit=limit,
+                    token_budget=max(1, self.config.max_context_tokens // 4),
+                )
+                return json.dumps({"results": results, "count": len(results)})
+
             if name == "search_circulars":
                 from .search import search_engine
                 from .models import Circular
@@ -500,6 +538,10 @@ IMPORTANT RULES:
 2. Cite an attachment only with the exact [[attachment:ID|label]] token supplied in context or tool results.
 Never expose IDs outside those tokens, alter a token, invent a token, or turn plain-text references into links.
 3. Be precise and highlight regulatory differences when comparing circulars.
+4. Use search_selected_documents when the included passages do not contain enough detail. It can
+search the complete selected circulars and their attachments. Do not claim attachment content is
+unavailable merely because it was not included in the initial context.
+5. Use global circular search tools only when the user explicitly requests broader research.
 
 Pre-selected circulars:
 {circulars_context}"""
@@ -512,8 +554,16 @@ IMPORTANT RULES:
 Never expose IDs outside those tokens, alter a token, invent a token, or turn plain-text references into links.
 3. If you need more details on a circular found in a search, use the get_circular_details tool with the circular reference or title."""
 
-    def chat(self, messages: list[dict[str, str]], db: Session, circulars_context: str | None = None) -> str:
-        system_prompt = self._chat_system_prompt(circulars_context)
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        db: Session,
+        circulars_context: str | None = None,
+        selected_circular_ids: list[str] | None = None,
+    ) -> str:
+        system_prompt = self._chat_system_prompt(
+            circulars_context if selected_circular_ids else None
+        )
         full_messages = [{"role": "system", "content": system_prompt}] + messages
 
         max_iterations = 5
@@ -554,7 +604,9 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
                     args = json.loads(tc.function.arguments)
                 except json.JSONDecodeError:
                     args = {}
-                result = self._execute_tool(tc.function.name, args, db)
+                result = self._execute_tool(
+                    tc.function.name, args, db, selected_circular_ids
+                )
                 full_messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
@@ -569,8 +621,16 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
         )
         return final_response.choices[0].message.content or ""
 
-    def stream_chat(self, messages: list[dict[str, str]], db: Session, circulars_context: str | None = None):
-        system_prompt = self._chat_system_prompt(circulars_context)
+    def stream_chat(
+        self,
+        messages: list[dict[str, str]],
+        db: Session,
+        circulars_context: str | None = None,
+        selected_circular_ids: list[str] | None = None,
+    ):
+        system_prompt = self._chat_system_prompt(
+            circulars_context if selected_circular_ids else None
+        )
         full_messages = [{"role": "system", "content": system_prompt}] + messages
 
         max_iterations = 5
@@ -625,7 +685,9 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
                     args = json.loads(tc["function"]["arguments"])
                 except json.JSONDecodeError:
                     args = {}
-                result = self._execute_tool(tc["function"]["name"], args, db)
+                result = self._execute_tool(
+                    tc["function"]["name"], args, db, selected_circular_ids
+                )
                 full_messages.append({
                     "role": "tool",
                     "tool_call_id": tc["id"],

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useConfirm } from 'primevue/useconfirm'
 import { useToast } from 'primevue/usetoast'
@@ -14,16 +14,21 @@ import Tag from 'primevue/tag'
 import Textarea from 'primevue/textarea'
 import CircularResultContent from '@/components/CircularResultContent.vue'
 import {
+  buildDocumentContentUrl,
   deleteChatSession,
   getChatSession,
   getChatSessions,
   getCircularDetail,
   getCircularSearch,
+  resolveDocument,
   streamChatMessage,
   type ChatMessage,
   type ChatSession,
   type CircularSummary,
+  type ResolvedDocument,
 } from '@/lib/api'
+
+const PdfPreviewDialog = defineAsyncComponent(() => import('@/components/PdfPreviewDialog.vue'))
 
 interface LocalMessage extends ChatMessage {
   pending?: boolean
@@ -47,6 +52,8 @@ const searchLoading = ref(false)
 const sending = ref(false)
 const errorMessage = ref('')
 const messagesEl = ref<HTMLElement | null>(null)
+const attachmentDialogVisible = ref(false)
+const selectedAttachment = ref<ResolvedDocument | null>(null)
 let searchTimer: number | undefined
 
 marked.use({
@@ -98,11 +105,34 @@ function renderMarkdown(content: string): string {
   return template.innerHTML
 }
 
-function handleCitationClick(event: MouseEvent) {
+async function handleCitationClick(event: MouseEvent) {
   const target = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a[data-document-link="true"]') : null
   if (!target) return
   event.preventDefault()
-  void router.push(target.getAttribute('href') || '/')
+  const href = target.getAttribute('href') || '/'
+  if (!href.startsWith('/documents/open')) {
+    void router.push(href)
+    return
+  }
+
+  const id = new URL(href, window.location.origin).searchParams.get('id')
+  if (!id) return
+  try {
+    const document = await resolveDocument({ id })
+    if (document.file_type?.toLowerCase() === 'pdf') {
+      selectedAttachment.value = document
+      attachmentDialogVisible.value = true
+    } else {
+      window.open(buildDocumentContentUrl(document.id), '_blank', 'noopener,noreferrer')
+    }
+  } catch (error) {
+    toast.add({
+      severity: 'error',
+      summary: 'Attachment unavailable',
+      detail: error instanceof Error ? error.message : 'Unable to open the cached attachment.',
+      life: 6000,
+    })
+  }
 }
 
 function messageClass(role: string): string {
@@ -516,4 +546,10 @@ onMounted(async () => {
       </div>
     </div>
   </section>
+  <PdfPreviewDialog
+    v-if="selectedAttachment"
+    v-model:visible="attachmentDialogVisible"
+    :title="selectedAttachment.filename"
+    :document-id="selectedAttachment.id"
+  />
 </template>

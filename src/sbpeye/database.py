@@ -106,5 +106,12 @@ def _ensure_columns():
                         f"ALTER TABLE attachments ADD COLUMN {col_name} {col_type}"
                     ))
 
+        if "chat_sessions" in table_names:
+            existing = {c["name"] for c in insp.get_columns("chat_sessions")}
+            if "circular_ids" not in existing:
+                conn.execute(text(
+                    "ALTER TABLE chat_sessions ADD COLUMN circular_ids TEXT"
+                ))
+
 Base.metadata.create_all(bind=engine)
 _ensure_columns()

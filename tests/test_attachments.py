@@ -55,6 +55,8 @@ def test_detect_attachments_deduplicates_and_skips_urdu():
         <a href="files/rules-u.pdf">Urdu</a>
         <a href="files/report.xlsx#sheet">Report</a>
         <a href="notes.txt">Notes</a>
+        <a href="https://example.com/external.pdf">External</a>
+        <a href="https://user@sbp.org.pk/credentialed.pdf">Credentialed</a>
         """,
         "html.parser",
     )

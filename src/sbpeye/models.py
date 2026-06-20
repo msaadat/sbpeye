@@ -63,6 +63,18 @@ class Attachment(Base):
     circular = relationship("Circular", back_populates="attachments")
 
 
+class CachedDocument(Base):
+    __tablename__ = "cached_documents"
+
+    id = Column(String, primary_key=True)
+    filename = Column(String, nullable=False)
+    original_url = Column(String, nullable=False, unique=True, index=True)
+    local_path = Column(String, nullable=True)
+    file_type = Column(String, nullable=True)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class AIGenerationJob(Base):
     __tablename__ = "ai_generation_jobs"
 

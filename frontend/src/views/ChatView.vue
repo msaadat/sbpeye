@@ -70,9 +70,39 @@ function formatDate(value?: string | null): string {
 }
 
 function renderMarkdown(content: string): string {
-  return DOMPurify.sanitize(marked.parse(content) as string, {
+  const withCitations = content.replace(
+    /\[\[(circular|attachment):([a-zA-Z0-9-]+)\|([^\]\n]+)\]\]/g,
+    (_match, kind: string, id: string, label: string) => {
+      const href = kind === 'circular'
+        ? `/circulars/${encodeURIComponent(id)}`
+        : `/documents/open?id=${encodeURIComponent(id)}`
+      const icon = kind === 'circular' ? 'pi-file' : 'pi-paperclip'
+      const safeLabel = label.replace(/[&<>"']/g, (character) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+      }[character] || character))
+      return `<a href="${href}" class="document-pill chat-citation-pill" data-document-link="true"><i class="pi ${icon}"></i><span>${safeLabel}</span></a>`
+    },
+  )
+  const sanitized = DOMPurify.sanitize(marked.parse(withCitations) as string, {
     USE_PROFILES: { html: true },
   })
+  const template = document.createElement('template')
+  template.innerHTML = sanitized
+  template.content.querySelectorAll<HTMLAnchorElement>('a[href]').forEach((anchor) => {
+    const href = anchor.getAttribute('href') || ''
+    if (href.startsWith('/circulars/') || href.startsWith('/documents/')) {
+      anchor.classList.add('document-pill', 'chat-citation-pill')
+      anchor.dataset.documentLink = 'true'
+    }
+  })
+  return template.innerHTML
+}
+
+function handleCitationClick(event: MouseEvent) {
+  const target = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a[data-document-link="true"]') : null
+  if (!target) return
+  event.preventDefault()
+  void router.push(target.getAttribute('href') || '/')
 }
 
 function messageClass(role: string): string {
@@ -451,6 +481,7 @@ onMounted(async () => {
                   v-if="message.role === 'assistant'"
                   class="markdown-body"
                   v-html="renderMarkdown(message.content)"
+                  @click="handleCitationClick"
                 />
                 <p v-else>{{ message.content }}</p>
               </article>

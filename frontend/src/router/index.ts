@@ -13,6 +13,11 @@ const router = createRouter({
       component: () => import('@/views/CircularsView.vue'),
     },
     {
+      path: '/circulars/open',
+      name: 'circular-open',
+      component: () => import('@/views/CircularUrlView.vue'),
+    },
+    {
       path: '/circulars/:id',
       name: 'circular-detail',
       component: () => import('@/views/CircularsView.vue'),
@@ -21,6 +26,11 @@ const router = createRouter({
       path: '/chat',
       name: 'chat',
       component: () => import('@/views/ChatView.vue'),
+    },
+    {
+      path: '/documents/open',
+      name: 'document-open',
+      component: () => import('@/views/DocumentView.vue'),
     },
     {
       path: '/ecodata',

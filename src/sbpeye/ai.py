@@ -374,8 +374,7 @@ class AIClient:
 
     def _execute_tool(self, name: str, arguments: dict, db: Session) -> str:
         """Execute a tool by name and return the result as a JSON string.
-        All tool responses intentionally omit internal circular IDs to prevent the LLM
-        from exposing them to the user."""
+        IDs are exposed only inside opaque citation tokens that the UI can resolve."""
         try:
             if name == "search_circulars":
                 from .search import search_engine
@@ -401,6 +400,7 @@ class AIClient:
                         "status": c.status or "active",
                         "tags": json.loads(c.tags) if c.tags else [],
                         "url": c.url,
+                        "citation": f"[[circular:{c.id}|{c.reference or c.title}]]",
                     })
                 return json.dumps({"results": out, "count": len(out)})
 
@@ -423,6 +423,7 @@ class AIClient:
                         "status": c.status or "active",
                         "tags": json.loads(c.tags) if c.tags else [],
                         "url": c.url,
+                        "citation": f"[[circular:{c.id}|{c.reference or c.title}]]",
                     })
                 return json.dumps({"results": out, "count": len(out)})
 
@@ -454,6 +455,11 @@ class AIClient:
                     "compliance_checklist": json.loads(c.compliance_checklist) if c.compliance_checklist else [],
                     "status": c.status or "active",
                     "content_preview": (c.content_text or "")[:2000],
+                    "citation": f"[[circular:{c.id}|{c.reference or c.title}]]",
+                    "attachment_citations": [
+                        f"[[attachment:{item.id}|{item.filename}]]"
+                        for item in c.attachments
+                    ],
                 })
 
             elif name == "get_circulars_by_tag":
@@ -474,6 +480,7 @@ class AIClient:
                         "status": c.status or "active",
                         "tags": json.loads(c.tags) if c.tags else [],
                         "url": c.url,
+                        "citation": f"[[circular:{c.id}|{c.reference or c.title}]]",
                     })
                 return json.dumps({"results": out, "count": len(out)})
 
@@ -489,9 +496,9 @@ You have been provided with pre-selected circulars as context below. Answer prim
 but you also have tools to search the database if the user asks about circulars not covered here.
 
 IMPORTANT RULES:
-1. NEVER cite internal circular IDs in your responses. Always use the circular reference (e.g., "BPRD Circular No. 12 of 2023") or title.
-2. When referring to a specific circular, use its reference number and title — never UUIDs or database IDs. In addition, when citing a circular, always format it as a Markdown link using its viewURL: /view_circular?cir={{url}})
-Never fabricate URLs — only use urls from tool results.
+1. Cite a circular only with the exact [[circular:ID|label]] token supplied in context or tool results.
+2. Cite an attachment only with the exact [[attachment:ID|label]] token supplied in context or tool results.
+Never expose IDs outside those tokens, alter a token, invent a token, or turn plain-text references into links.
 3. Be precise and highlight regulatory differences when comparing circulars.
 
 Pre-selected circulars:
@@ -500,9 +507,9 @@ Pre-selected circulars:
 Use your tools to search and retrieve relevant circulars from the database before answering.
 
 IMPORTANT RULES:
-1. NEVER cite internal circular IDs in your responses. Always use the circular reference (e.g., "BPRD Circular No. 12 of 2023") or title.
-2. When referring to a specific circular, use its reference number and title — never UUIDs or database IDs. In addition, when citing a circular, always format it as a Markdown link using its viewURL: /view_circular?cir={{url}})
-Never fabricate URLs — only use urls from tool results.
+1. Cite a circular only with an exact [[circular:ID|label]] token returned by a tool.
+2. Cite an attachment only with an exact [[attachment:ID|label]] token returned by a tool.
+Never expose IDs outside those tokens, alter a token, invent a token, or turn plain-text references into links.
 3. If you need more details on a circular found in a search, use the get_circular_details tool with the circular reference or title."""
 
     def chat(self, messages: list[dict[str, str]], db: Session, circulars_context: str | None = None) -> str:

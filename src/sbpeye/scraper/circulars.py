@@ -9,9 +9,10 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 from ..models import Attachment, Circular, CircularRelationship
 from ..database import PROJECT_ROOT, collection, embedding_backend
+from ..link_routing import normalize_sbp_url
 from ..search import prepare_chunks
 import uuid
-from urllib.parse import unquote, urldefrag, urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 BASE_URL = "https://www.sbp.org.pk"
 HEADERS = {
@@ -56,10 +57,20 @@ DEPARTMENT_INDEX_PAGES = {
 EPD_INDEX = "https://www.sbp.org.pk/epd/index.htm"
 
 
-def _ensure_https(url: str) -> str:
-    if url.startswith("http://"):
-        return "https://" + url[7:]
-    return url
+def _get_sbp(url: str, **kwargs):
+    """Fetch an SBP URL while validating every redirect target."""
+    current_url = normalize_sbp_url(url)
+    for _ in range(6):
+        response = requests.get(current_url, allow_redirects=False, **kwargs)
+        status_code = getattr(response, "status_code", 200)
+        if status_code not in {301, 302, 303, 307, 308}:
+            return response
+        location = getattr(response, "headers", {}).get("location")
+        response.close()
+        if not location:
+            raise ValueError("SBP returned a redirect without a destination.")
+        current_url = normalize_sbp_url(urljoin(current_url, location))
+    raise ValueError("SBP document fetch exceeded the redirect limit.")
 
 
 def fetch_page(url: str) -> BeautifulSoup:
@@ -78,7 +89,7 @@ def fetch_page_cached(url: str, force: bool = False) -> bytes:
     if cache_file.exists() and not force:
         return cache_file.read_bytes()
 
-    response = requests.get(url, headers=HEADERS, timeout=50)
+    response = _get_sbp(url, headers=HEADERS, timeout=50)
     response.raise_for_status()
     temp_file = cache_file.with_suffix(".html.part")
     temp_file.write_bytes(response.content)
@@ -96,7 +107,10 @@ def detect_attachments(soup: BeautifulSoup, base_url: str) -> list[dict]:
         if not href:
             continue
 
-        absolute_url = _ensure_https(urldefrag(urljoin(base_url, href)).url)
+        try:
+            absolute_url = normalize_sbp_url(urljoin(base_url, href))
+        except ValueError:
+            continue
         parsed = urlparse(absolute_url)
         extension = Path(parsed.path).suffix.lower()
         if extension not in ATTACHMENT_EXTENSIONS:
@@ -141,7 +155,7 @@ def download_attachment(
     temp_path = destination.with_name(f"{destination.name}.part")
     response = None
     try:
-        response = requests.get(
+        response = _get_sbp(
             att_info["url"], headers=HEADERS, timeout=60, stream=True
         )
         response.raise_for_status()
@@ -355,11 +369,17 @@ def discover_year_pages(dept_url: str, verbose: bool = False) -> list[dict]:
 
         # Year links are typically just "2025", "2024", etc.
         if re.match(r"^\d{4}$", text):
-            year_url = _ensure_https(urljoin(dept_url, href))
+            try:
+                year_url = normalize_sbp_url(urljoin(dept_url, href))
+            except ValueError:
+                continue
             year_pages.append({"year": text, "url": year_url})
         # Some departments also have range links like "1981-1990" pointing to PDFs
         elif re.match(r"^\d{4}-\d{4}$", text) and not href.endswith(".pdf"):
-            year_url = _ensure_https(urljoin(dept_url, href))
+            try:
+                year_url = normalize_sbp_url(urljoin(dept_url, href))
+            except ValueError:
+                continue
             year_pages.append({"year": text, "url": year_url})
 
     if verbose:
@@ -424,7 +444,10 @@ def discover_circulars_on_year_page(
                 continue
             if href.startswith("#") or "javascript:" in href_lower:
                 continue
-            full_url = _ensure_https(urljoin(year_url, href))
+            try:
+                full_url = normalize_sbp_url(urljoin(year_url, href))
+            except ValueError:
+                continue
             if full_url in seen_urls:
                 continue
             seen_urls.add(full_url)
@@ -458,7 +481,10 @@ def discover_circulars_on_year_page(
 
             href_lower = href.lower()
             if href_lower.endswith((".htm", ".html")):
-                full_url = _ensure_https(urljoin(year_url, href))
+                try:
+                    full_url = normalize_sbp_url(urljoin(year_url, href))
+                except ValueError:
+                    continue
                 if full_url not in seen_urls:
                     seen_urls.add(full_url)
                     circulars.append({

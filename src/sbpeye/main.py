@@ -13,13 +13,27 @@ import json
 import uuid
 
 from .database import PROJECT_ROOT, engine, Base, get_db, SessionLocal, has_vector_store_data
-from .models import AIGenerationJob, SyncStatus, Circular, CircularRelationship, EcoDataSeries, EcoDataEntry, Settings, ChatSession, ChatMessage
+from .models import AIGenerationJob, Attachment, CachedDocument, SyncStatus, Circular, CircularRelationship, EcoDataSeries, EcoDataEntry, Settings, ChatSession, ChatMessage
 from .search import search_engine
 from .ai import AIConfig, get_ai_client
 from .circular_ai import GENERATION_ACTIONS, generation_job_payload, run_generation_job
 from .embeddings import EmbeddingConfig, create_embedding_backend
+from .link_routing import (
+    DOCUMENT_EXTENSIONS,
+    attachment_info as _attachment_info,
+    is_allowed_sbp_url as _is_allowed_sbp_url,
+    normalize_sbp_url as _normalize_sbp_url,
+    rewrite_document_links as _rewrite_document_links,
+)
 
-from .scraper.circulars import HEADERS, download_attachment, fetch_page_cached
+from .scraper.circulars import (
+    HEADERS,
+    attachment_id,
+    download_attachment,
+    fetch_page_cached,
+    process_attachment,
+    process_circular,
+)
 from .scraper.ecodata import scrape_ecodata
 from .scraper.clean_html import clean_sbp_html
 from .scraper.ecodata_index import scrape_ecodata_index
@@ -96,16 +110,23 @@ def _settings_payload(config: AIConfig, embedding: EmbeddingConfig) -> dict:
     }
 
 
-def _is_allowed_sbp_url(url: str | None) -> bool:
-    if not url:
-        return False
-    parsed = urlparse(url)
-    return parsed.scheme in ("http", "https") and parsed.netloc.lower() in ALLOWED_DOMAINS
+def _lazy_index_circular(circular_id: str) -> None:
+    db = SessionLocal()
+    try:
+        circular = db.query(Circular).filter(Circular.id == circular_id).first()
+        if not circular:
+            return
+        process_circular(
+            db,
+            title=circular.title,
+            url=circular.url,
+            department=circular.department or "Discovered from link",
+            reference=circular.reference or "",
+            include_attachments=True,
+        )
+    finally:
+        db.close()
 
-
-
-
-ALLOWED_DOMAINS = {"www.sbp.org.pk", "sbp.org.pk"}
 
 SBP_BASE = "https://www.sbp.org.pk"
 
@@ -143,6 +164,11 @@ async def circulars_spa():
 
 @app.get("/circulars/{path:path}")
 async def circulars_spa_fallback(path: str):
+    return spa_index_response()
+
+
+@app.get("/documents/{path:path}")
+async def documents_spa_fallback(path: str):
     return spa_index_response()
 
 
@@ -360,6 +386,87 @@ async def get_circular_by_url(url: str, db: Session = Depends(get_db)):
     return _circular_summary(c)
 
 
+@app.post("/api/circulars/open")
+async def open_circular_by_url(
+    url: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    try:
+        url = _normalize_sbp_url(url)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    circular = db.query(Circular).filter(func.lower(Circular.url) == url.lower()).first()
+    if circular:
+        return _circular_summary(circular)
+
+    if Path(urlparse(url).path).suffix.lower() in DOCUMENT_EXTENSIONS:
+        return JSONResponse({"error": "Document URLs must be opened through the document route."}, status_code=400)
+
+    try:
+        raw_html = fetch_page_cached(url)
+        soup = BeautifulSoup(raw_html, "html.parser")
+        content_text = soup.get_text(" ", strip=True)
+        if not content_text:
+            raise ValueError("The SBP page did not contain readable content.")
+        heading = soup.find(["h1", "h2"])
+        title_tag = soup.find("title")
+        title = (
+            heading.get_text(" ", strip=True) if heading else ""
+        ) or (
+            title_tag.get_text(" ", strip=True) if title_tag else ""
+        ) or Path(urlparse(url).path).name or "SBP circular"
+        circular = Circular(
+            id=str(uuid.uuid5(uuid.NAMESPACE_URL, url)),
+            title=_re.sub(r"\s+", " ", title)[:500],
+            department="Discovered from link",
+            date=datetime.now(),
+            url=url,
+            content_text=content_text,
+            status="active",
+        )
+        db.add(circular)
+        db.commit()
+        db.refresh(circular)
+    except Exception as exc:
+        db.rollback()
+        return JSONResponse({"error": str(exc), "original_url": url}, status_code=502)
+
+    background_tasks.add_task(_lazy_index_circular, circular.id)
+    return _circular_summary(circular)
+
+
+@app.post("/api/circulars/{circular_id}/refresh")
+async def refresh_circular(
+    circular_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    circular = db.query(Circular).filter(Circular.id == circular_id).first()
+    if not circular:
+        return JSONResponse({"error": "Circular not found"}, status_code=404)
+    try:
+        raw_html = fetch_page_cached(circular.url, force=True)
+        if circular.url.lower().split("?", 1)[0].endswith(".pdf"):
+            if not raw_html.startswith(b"%PDF"):
+                raise ValueError("The refreshed SBP source is not a PDF.")
+            return _circular_summary(circular)
+        soup = BeautifulSoup(raw_html, "html.parser")
+        content_text = soup.get_text(" ", strip=True)
+        if not content_text:
+            raise ValueError("The refreshed SBP page did not contain readable content.")
+        circular.content_text = content_text
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        return JSONResponse(
+            {"error": str(exc), "original_url": circular.url}, status_code=502
+        )
+    background_tasks.add_task(_lazy_index_circular, circular.id)
+    return _circular_summary(circular)
+
+
 @app.get("/api/circulars/{circular_id}/source")
 async def get_circular_source(circular_id: str, db: Session = Depends(get_db)):
     c = db.query(Circular).filter(Circular.id == circular_id).first()
@@ -369,28 +476,46 @@ async def get_circular_source(circular_id: str, db: Session = Depends(get_db)):
         return JSONResponse({"error": "Only SBP (sbp.org.pk) circulars are supported."}, status_code=400)
 
     if c.url.lower().split("?", 1)[0].endswith(".pdf"):
+        try:
+            fetch_page_cached(c.url)
+        except Exception as exc:
+            return JSONResponse({"error": str(exc), "type": "pdf", "url": c.url}, status_code=502)
         return {
             "type": "pdf",
-            "url": c.url,
+            "url": f"/api/circulars/{c.id}/document",
+            "original_url": c.url,
             "content": None,
-            "preview_url": f"/api/pdf_preview?url={urlencode({'': c.url})[1:]}",
         }
 
     try:
-        resp = http_requests.get(c.url, headers=HEADERS, timeout=50)
-        resp.raise_for_status()
-
-        if resp.encoding and resp.encoding.lower() in ("iso-8859-1", "windows-1252"):
-            if resp.apparent_encoding:
-                resp.encoding = resp.apparent_encoding
-
+        raw_html = fetch_page_cached(c.url)
         return {
             "type": "html",
             "url": c.url,
-            "content": clean_sbp_html(resp.content, base_url=c.url),
+            "content": _rewrite_document_links(
+                clean_sbp_html(raw_html, base_url=c.url), c, db
+            ),
         }
     except Exception as e:
         return JSONResponse({"error": str(e), "type": "html", "url": c.url, "content": ""}, status_code=502)
+
+
+@app.get("/api/circulars/{circular_id}/document")
+async def circular_document(circular_id: str, db: Session = Depends(get_db)):
+    circular = db.query(Circular).filter(Circular.id == circular_id).first()
+    if not circular or not circular.url.lower().split("?", 1)[0].endswith(".pdf"):
+        return JSONResponse({"error": "Circular PDF not found."}, status_code=404)
+    try:
+        content = fetch_page_cached(circular.url)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    if not content.startswith(b"%PDF"):
+        return JSONResponse({"error": "The cached source is not a PDF."}, status_code=502)
+    return StreamingResponse(
+        iter([content]),
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'inline; filename="circular.pdf"', "Cache-Control": "private, max-age=3600"},
+    )
 
 
 @app.get("/api/circulars/{circular_id}")
@@ -448,6 +573,7 @@ async def get_circular_detail(circular_id: str, db: Session = Depends(get_db)):
                 "is_scanned": attachment.extraction_status == "scanned",
                 "is_vectorized": bool(attachment.is_vectorized),
                 "has_text": bool(attachment.content_text),
+                "local_url": f"/documents/open?{urlencode({'id': attachment.id})}",
             }
             for attachment in sorted(c.attachments, key=lambda item: item.filename)
         ],
@@ -630,15 +756,135 @@ async def get_sbp_news(db: Session = Depends(get_db)):
         return {"press_releases": [], "whats_new": [], "error": str(e)}
 
 
+def _document_payload(attachment: Attachment | CachedDocument) -> dict:
+    local_path = PROJECT_ROOT / attachment.local_path if attachment.local_path else None
+    return {
+        "id": attachment.id,
+        "circular_id": getattr(attachment, "circular_id", None),
+        "filename": attachment.filename,
+        "file_type": attachment.file_type,
+        "original_url": attachment.original_url,
+        "cached": bool(local_path and local_path.is_file()),
+        "content_url": f"/api/documents/{attachment.id}/content",
+        "extraction_status": getattr(attachment, "extraction_status", None),
+        "error": getattr(attachment, "extraction_error", None) or getattr(attachment, "error", None),
+    }
+
+
+@app.post("/api/documents/resolve")
+async def resolve_document(
+    id: str | None = None,
+    url: str | None = None,
+    circular_id: str | None = None,
+    refresh: bool = False,
+    db: Session = Depends(get_db),
+):
+    attachment = db.query(Attachment).filter(Attachment.id == id).first() if id else None
+    standalone = db.query(CachedDocument).filter(CachedDocument.id == id).first() if id and not attachment else None
+    if standalone:
+        info = {
+            "url": standalone.original_url,
+            "filename": standalone.filename,
+            "file_type": standalone.file_type,
+        }
+        local_path = PROJECT_ROOT / standalone.local_path if standalone.local_path else None
+        if refresh or not local_path or not local_path.is_file():
+            path, _, error = download_attachment("standalone", info, force=refresh)
+            standalone.local_path = str(path.relative_to(PROJECT_ROOT)) if path else None
+            standalone.error = error
+            db.commit()
+        payload = _document_payload(standalone)
+        if not payload["cached"]:
+            return JSONResponse(payload, status_code=502)
+        return payload
+
+    normalized_url = None
+    if not attachment and url:
+        try:
+            normalized_url = _normalize_sbp_url(url)
+            info = _attachment_info(normalized_url)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        query = db.query(Attachment).filter(func.lower(Attachment.original_url) == normalized_url.lower())
+        if circular_id:
+            query = query.filter(Attachment.circular_id == circular_id)
+        attachment = query.first()
+    else:
+        info = None
+
+    if attachment:
+        circular = attachment.circular
+        info = {
+            "url": attachment.original_url,
+            "filename": attachment.filename,
+            "file_type": attachment.file_type,
+        }
+    else:
+        circular = db.query(Circular).filter(Circular.id == circular_id).first() if circular_id else None
+
+    if not attachment and not circular:
+        cached_document = db.query(CachedDocument).filter(
+            func.lower(CachedDocument.original_url) == normalized_url.lower()
+        ).first()
+        if not cached_document:
+            cached_document = CachedDocument(
+                id=attachment_id("standalone", normalized_url),
+                filename=info["filename"],
+                original_url=normalized_url,
+                file_type=info["file_type"],
+            )
+            db.add(cached_document)
+            db.commit()
+        local_path = PROJECT_ROOT / cached_document.local_path if cached_document.local_path else None
+        if refresh or not local_path or not local_path.is_file():
+            path, _, error = download_attachment("standalone", info, force=refresh)
+            cached_document.local_path = str(path.relative_to(PROJECT_ROOT)) if path else None
+            cached_document.error = error
+            db.commit()
+        payload = _document_payload(cached_document)
+        if not payload["cached"]:
+            return JSONResponse(payload, status_code=502)
+        return payload
+
+    local_path = PROJECT_ROOT / attachment.local_path if attachment and attachment.local_path else None
+    if refresh or not attachment or not local_path or not local_path.is_file():
+        attachment = process_attachment(db, circular, info, force_download=refresh)
+
+    payload = _document_payload(attachment)
+    if not payload["cached"]:
+        return JSONResponse(payload, status_code=502)
+    return payload
+
+
+@app.get("/api/documents/{attachment_id}/content")
+async def document_content(attachment_id: str, db: Session = Depends(get_db)):
+    attachment = db.query(Attachment).filter(Attachment.id == attachment_id).first()
+    if not attachment:
+        attachment = db.query(CachedDocument).filter(CachedDocument.id == attachment_id).first()
+    if not attachment or not attachment.local_path:
+        return JSONResponse({"error": "Cached document not found."}, status_code=404)
+    path = (PROJECT_ROOT / attachment.local_path).resolve()
+    attachments_root = (PROJECT_ROOT / "attachments").resolve()
+    if attachments_root not in path.parents or not path.is_file():
+        return JSONResponse({"error": "Cached document not found."}, status_code=404)
+    disposition = "inline" if attachment.file_type == "pdf" else "attachment"
+    media_type = "application/pdf" if attachment.file_type == "pdf" else "application/octet-stream"
+    return FileResponse(
+        path,
+        media_type=media_type,
+        filename=Path(attachment.filename).name,
+        content_disposition_type=disposition,
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
+
+
 @app.get("/api/pdf_preview")
 async def pdf_preview(url: str):
     import io
     import base64
     import pdfplumber
 
-    parsed = urlparse(url)
-    domain = parsed.netloc.lower()
-    if domain not in ALLOWED_DOMAINS:
+    if not _is_allowed_sbp_url(url):
         return {"error": "Only SBP PDFs are supported."}
 
     try:
@@ -820,7 +1066,15 @@ def _build_chat_circulars_context(db: Session, circular_ids: list[str]) -> str:
             content = c.content_text or ""
             if len(content) > 2000:
                 content = content[:2000] + "..."
-            circulars_context += f"\n---\n[{ref}] {title}\n{content}\n---\n"
+            citation = f"[[circular:{c.id}|{ref}]]"
+            attachment_lines = "\n".join(
+                f"Attachment citation: [[attachment:{item.id}|{item.filename}]]"
+                for item in sorted(c.attachments, key=lambda value: value.filename)
+            )
+            circulars_context += (
+                f"\n---\nCircular citation: {citation}\n[{ref}] {title}\n"
+                f"{content}\n{attachment_lines}\n---\n"
+            )
 
     return circulars_context or "No circulars selected for context."
 

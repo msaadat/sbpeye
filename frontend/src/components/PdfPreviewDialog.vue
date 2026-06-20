@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, shallowRef, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import Button from 'primevue/button'
 import Dialog from 'primevue/dialog'
 import Message from 'primevue/message'
@@ -12,7 +12,7 @@ import {
   type RenderTask,
 } from 'pdfjs-dist'
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.mjs?url'
-import { buildPdfProxyUrl, getPdfPreview, type PdfPreviewResponse } from '@/lib/api'
+import { buildDocumentContentUrl, buildPdfProxyUrl, getPdfPreview, type PdfPreviewResponse } from '@/lib/api'
 
 GlobalWorkerOptions.workerSrc = pdfWorkerUrl
 
@@ -20,6 +20,7 @@ const props = defineProps<{
   visible: boolean
   title?: string
   url?: string | null
+  documentId?: string | null
 }>()
 
 const emit = defineEmits<{
@@ -37,13 +38,18 @@ const errorMessage = ref('')
 const pageNumber = ref(1)
 const pageCount = ref(0)
 const scale = ref(1.25)
+let mounted = false
+let loadEpoch = 0
 
 const dialogVisible = computed({
   get: () => props.visible,
   set: (value: boolean) => emit('update:visible', value),
 })
 
-const pdfProxyUrl = computed(() => (props.url ? buildPdfProxyUrl(props.url) : ''))
+const pdfProxyUrl = computed(() => props.documentId
+  ? buildDocumentContentUrl(props.documentId)
+  : props.url?.startsWith('/api/') ? props.url
+  : props.url ? buildPdfProxyUrl(props.url) : '')
 
 const pageLabel = computed(() => {
   if (!pageCount.value) {
@@ -95,7 +101,7 @@ async function closeDocument() {
   documentRef.value = null
 }
 
-async function renderPage() {
+async function renderPage(epoch = loadEpoch) {
   const canvas = canvasRef.value
   const document = documentRef.value
   if (!canvas || !document) {
@@ -103,11 +109,13 @@ async function renderPage() {
   }
 
   await cancelRender()
+  if (epoch !== loadEpoch) return
   rendering.value = true
   errorMessage.value = ''
 
   try {
     const page = await document.getPage(pageNumber.value)
+    if (epoch !== loadEpoch) return
     const viewport = page.getViewport({ scale: scale.value })
     const context = canvas.getContext('2d')
 
@@ -128,27 +136,32 @@ async function renderPage() {
     renderTaskRef.value = task
     await task.promise
   } catch (error) {
-    if (!(error instanceof Error) || error.name !== 'RenderingCancelledException') {
+    if (epoch === loadEpoch && (!(error instanceof Error) || error.name !== 'RenderingCancelledException')) {
       errorMessage.value = error instanceof Error ? error.message : 'Unable to render this PDF page.'
     }
   } finally {
-    renderTaskRef.value = null
-    rendering.value = false
+    if (epoch === loadEpoch) {
+      renderTaskRef.value = null
+      rendering.value = false
+    }
   }
 }
 
 async function loadPdf() {
-  if (!props.url) {
+  const epoch = ++loadEpoch
+  if (!props.url && !props.documentId) {
     errorMessage.value = 'No PDF URL was provided.'
     return
   }
 
   await closeDocument()
+  if (epoch !== loadEpoch) return
   resetState()
   loading.value = true
 
-  const previewPromise = getPdfPreview(props.url)
+  const previewPromise = props.documentId || props.url?.startsWith('/api/') ? Promise.resolve() : getPdfPreview(props.url!)
     .then((value) => {
+      if (epoch !== loadEpoch) return
       preview.value = value
       if (value.pages && !pageCount.value) {
         pageCount.value = value.pages
@@ -164,16 +177,29 @@ async function loadPdf() {
     loadingTaskRef.value = loadingTask
 
     const document = await loadingTask.promise
+    if (epoch !== loadEpoch) {
+      await loadingTask.destroy()
+      return
+    }
     documentRef.value = document
     pageCount.value = document.numPages
     await nextTick()
-    await renderPage()
+    await renderPage(epoch)
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : 'Unable to open this PDF.'
+    if (epoch === loadEpoch) {
+      errorMessage.value = error instanceof Error ? error.message : 'Unable to open this PDF.'
+    }
   } finally {
     await previewPromise
-    loading.value = false
+    if (epoch === loadEpoch) loading.value = false
   }
+}
+
+async function deactivatePdf() {
+  loadEpoch += 1
+  loading.value = false
+  rendering.value = false
+  await closeDocument()
 }
 
 function previousPage() {
@@ -204,26 +230,31 @@ function zoomIn() {
   void renderPage()
 }
 
-watch(
-  () => props.visible,
-  (visible) => {
-    if (visible) {
-      void loadPdf()
-      return
-    }
-
-    void closeDocument()
-  },
-)
+onMounted(() => {
+  mounted = true
+  if (props.visible) {
+    void loadPdf()
+  }
+})
 
 watch(
-  () => props.url,
-  () => {
-    if (props.visible) {
+  () => [props.visible, props.url, props.documentId] as const,
+  ([visible, url, documentId], previous) => {
+    if (!mounted) return
+    const [wasVisible, oldUrl, oldDocumentId] = previous
+    if (!visible) {
+      void deactivatePdf()
+    } else if (!wasVisible || url !== oldUrl || documentId !== oldDocumentId) {
       void loadPdf()
     }
   },
+  { flush: 'post' },
 )
+
+onBeforeUnmount(() => {
+  mounted = false
+  void deactivatePdf()
+})
 </script>
 
 <template>
@@ -275,12 +306,12 @@ watch(
             @click="zoomIn"
           />
           <Button
-            v-if="url"
+            v-if="url || documentId"
             as="a"
-            :href="url"
+            :href="documentId ? buildDocumentContentUrl(documentId) : url!"
             target="_blank"
             rel="noreferrer"
-            label="Open source"
+            label="Open local file"
             icon="pi pi-external-link"
             size="small"
             outlined

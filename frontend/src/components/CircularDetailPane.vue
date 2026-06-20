@@ -9,12 +9,15 @@ import ProgressSpinner from 'primevue/progressspinner'
 import Tag from 'primevue/tag'
 import {
   getAIGenerationJob,
+  buildDocumentContentUrl,
   getCircularDetail,
   getCircularSource,
+  refreshCircular as refreshCircularSource,
   startCircularGeneration,
   type AIGenerationJob,
   type ApiError,
   type CircularDetail,
+  type CircularAttachment,
   type ComplianceChecklistItem,
   type GenerationAction,
   type GenerationFeature,
@@ -24,6 +27,8 @@ import {
 } from '@/lib/api'
 
 const PdfPreviewDialog = defineAsyncComponent(() => import('@/components/PdfPreviewDialog.vue'))
+
+type PreviewAttachment = Pick<CircularAttachment, 'id' | 'filename' | 'file_type'>
 
 const props = defineProps<{ id: string }>()
 const emit = defineEmits<{ close: [] }>()
@@ -36,7 +41,10 @@ const loading = ref(false)
 const sourceLoading = ref(false)
 const errorMessage = ref('')
 const sourceError = ref('')
+const refreshingSource = ref(false)
 const pdfDialogVisible = ref(false)
+const attachmentDialogVisible = ref(false)
+const selectedAttachment = ref<PreviewAttachment | null>(null)
 const summaryExpanded = ref(false)
 const checklistExpanded = ref(false)
 const generationPopover = ref<InstanceType<typeof Popover> | null>(null)
@@ -84,6 +92,37 @@ function unresolvedReference(relation: CircularRelationship, direction: 'outgoin
 function openRelationship(id?: string | null) {
   if (!id) return
   void router.push({ path: `/circulars/${id}`, query: router.currentRoute.value.query })
+}
+
+function openAttachment(attachment: PreviewAttachment) {
+  if (attachment.file_type?.toLowerCase() === 'pdf') {
+    selectedAttachment.value = attachment
+    attachmentDialogVisible.value = true
+    return
+  }
+  window.open(buildDocumentContentUrl(attachment.id), '_blank', 'noopener,noreferrer')
+}
+
+function handleSourceClick(event: MouseEvent) {
+  const target = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a[data-document-link="true"]') : null
+  if (!target) return
+  event.preventDefault()
+  const href = target.getAttribute('href') || '/'
+  if (href.startsWith('/documents/open')) {
+    const id = new URL(href, window.location.origin).searchParams.get('id')
+    const attachment = circular.value?.attachments.find((item) => item.id === id)
+    if (attachment) {
+      openAttachment(attachment)
+    } else if (id) {
+      openAttachment({
+        id,
+        filename: target.textContent?.trim() || 'Attachment',
+        file_type: target.dataset.documentKind?.toLowerCase() || null,
+      })
+    }
+    return
+  }
+  void router.push(href)
 }
 
 function handoffToChat() {
@@ -196,6 +235,19 @@ async function loadCircular() {
   }
 }
 
+async function refreshFromSbp() {
+  refreshingSource.value = true
+  try {
+    await refreshCircularSource(props.id)
+    await loadCircular()
+    toast.add({ severity: 'success', summary: 'Circular refreshed', detail: 'The local copy was updated from SBP.', life: 3500 })
+  } catch (error) {
+    toast.add({ severity: 'error', summary: 'Refresh failed', detail: error instanceof Error ? error.message : 'Unable to refresh the circular.', life: 6000 })
+  } finally {
+    refreshingSource.value = false
+  }
+}
+
 onMounted(loadCircular)
 watch(() => props.id, loadCircular)
 onBeforeUnmount(stopPolling)
@@ -238,7 +290,7 @@ onBeforeUnmount(stopPolling)
               @click="generationPopover?.toggle($event)"
             />
             <Button v-if="isPdf" icon="pi pi-file-pdf" text rounded severity="danger" aria-label="Preview PDF" title="Preview PDF" @click="pdfDialogVisible = true" />
-            <Button v-if="circular.url" as="a" :href="circular.url" target="_blank" rel="noreferrer" icon="pi pi-external-link" text rounded severity="secondary" aria-label="Open source" title="Open source" />
+            <Button icon="pi pi-refresh" text rounded severity="secondary" :loading="refreshingSource" aria-label="Refresh from SBP" title="Refresh local copy from SBP" @click="refreshFromSbp" />
             <Button icon="pi pi-comments" text rounded severity="contrast" aria-label="Open in chat" title="Open in chat" @click="handoffToChat" />
           </div>
         </div>
@@ -337,12 +389,28 @@ onBeforeUnmount(stopPolling)
         </div>
       </section>
 
+      <section v-if="circular.attachments.length" class="detail-section">
+        <h2>Documents</h2>
+        <div class="document-pills">
+          <button
+            v-for="attachment in circular.attachments"
+            :key="attachment.id"
+            type="button"
+            class="document-pill"
+            @click="openAttachment(attachment)"
+          >
+            <i :class="attachment.file_type === 'pdf' ? 'pi pi-file-pdf' : 'pi pi-file'" />
+            <span>{{ attachment.filename }}</span>
+          </button>
+        </div>
+      </section>
+
       <section v-if="sourceLoading || sourceError || (source?.type === 'html' && source.content) || isPdf" class="detail-section source-section">
         <h2>Source content</h2>
         <Message v-if="sourceError" severity="warn" :closable="false">{{ sourceError }}</Message>
         <div v-if="sourceLoading" class="preview-loading compact-loading"><ProgressSpinner /><span>Loading source</span></div>
         <div v-else-if="source?.type === 'html' && source.content" class="source-frame">
-          <div class="sbp-source-content" v-html="source.content" />
+          <div class="sbp-source-content" v-html="source.content" @click="handleSourceClick" />
         </div>
         <button v-else-if="isPdf" type="button" class="pdf-source-compact" @click="pdfDialogVisible = true">
           <i class="pi pi-file-pdf" /><span><strong>PDF source</strong><small>Open the document preview</small></span><i class="pi pi-angle-right" />
@@ -351,5 +419,11 @@ onBeforeUnmount(stopPolling)
     </div>
 
     <PdfPreviewDialog v-model:visible="pdfDialogVisible" :title="circular?.title || 'Circular'" :url="sourceUrl" />
+    <PdfPreviewDialog
+      v-if="selectedAttachment"
+      v-model:visible="attachmentDialogVisible"
+      :title="selectedAttachment.filename"
+      :document-id="selectedAttachment.id"
+    />
   </aside>
 </template>

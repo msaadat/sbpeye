@@ -105,9 +105,35 @@ export interface AIGenerationJob {
 }
 
 export interface CircularDetail extends CircularSummary {
+  attachments: CircularAttachment[]
+  attachment_count: number
   compliance_checklist: Array<ComplianceChecklistItem | string>
   relationships: CircularRelationshipsResponse
   generation: CircularGenerationState
+}
+
+export interface CircularAttachment {
+  id: string
+  filename: string
+  original_url: string
+  file_type?: string | null
+  extraction_status?: string | null
+  is_scanned: boolean
+  is_vectorized: boolean
+  has_text: boolean
+  local_url: string
+}
+
+export interface ResolvedDocument {
+  id: string
+  circular_id: string
+  filename: string
+  file_type?: string | null
+  original_url: string
+  cached: boolean
+  content_url: string
+  extraction_status?: string | null
+  error?: string | null
 }
 
 export interface CircularSourceContent {
@@ -115,6 +141,7 @@ export interface CircularSourceContent {
   url: string
   content?: string | null
   preview_url?: string | null
+  original_url?: string | null
   error?: string
 }
 
@@ -316,6 +343,25 @@ export async function getCircularSource(id: string): Promise<CircularSourceConte
 
 export async function getCircularByUrl(url: string): Promise<CircularSummary> {
   return requestJson<CircularSummary>(`/circulars/by_url${toQueryString({ url })}`)
+}
+
+export async function openCircularByUrl(url: string): Promise<CircularSummary> {
+  return requestJson<CircularSummary>(`/circulars/open${toQueryString({ url })}`, { method: 'POST' })
+}
+
+export async function refreshCircular(id: string): Promise<CircularSummary> {
+  return requestJson<CircularSummary>(`/circulars/${encodeURIComponent(id)}/refresh`, { method: 'POST' })
+}
+
+export async function resolveDocument(
+  params: { id?: string; url?: string; circular_id?: string },
+  refresh = false,
+): Promise<ResolvedDocument> {
+  return requestJson<ResolvedDocument>(`/documents/resolve${toQueryString({ ...params, refresh })}`, { method: 'POST' })
+}
+
+export function buildDocumentContentUrl(id: string): string {
+  return `${API_BASE}/documents/${encodeURIComponent(id)}/content`
 }
 
 export async function getCircularTags(): Promise<TagCount[]> {

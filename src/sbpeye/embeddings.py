@@ -1,6 +1,7 @@
 import os
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 import numpy as np
@@ -26,6 +27,17 @@ class EmbeddingConfig:
             model=os.getenv("EMBEDDING_MODEL", DEFAULT_FASTEMBED_MODEL).strip(),
             base_url=os.getenv("EMBEDDING_BASE_URL", DEFAULT_LM_STUDIO_URL).strip(),
             api_key=os.getenv("EMBEDDING_API_KEY", "lm-studio").strip(),
+        )
+
+    @classmethod
+    def _project_root(cls) -> Path:
+        return Path(__file__).resolve().parents[2]
+
+    @classmethod
+    def cache_dir(cls) -> str:
+        return os.getenv(
+            "FASTEMBED_CACHE_PATH",
+            str(cls._project_root() / "cache" / "models"),
         )
 
     @classmethod
@@ -98,7 +110,7 @@ class FastEmbedBackend:
         # Prefer native GPU backends before broader accelerators, then CPU fallback.
         return [
             "CUDAExecutionProvider",
-            "ROCmExecutionProvider",
+            "MIGraphXExecutionProvider",
             "DmlExecutionProvider",
             "OpenVINOExecutionProvider",
             "CoreMLExecutionProvider",
@@ -109,7 +121,7 @@ class FastEmbedBackend:
     def _display_backend(provider: str) -> str:
         labels = {
             "CUDAExecutionProvider": "CUDA",
-            "ROCmExecutionProvider": "ROCm",
+            "MIGraphXExecutionProvider": "AMD MigraphX",
             "DmlExecutionProvider": "DML",
             "OpenVINOExecutionProvider": "OpenVINO",
             "CoreMLExecutionProvider": "CoreML",
@@ -149,10 +161,14 @@ class FastEmbedBackend:
                     try:
                         self._model = TextEmbedding(
                             model_name=self.config.model,
+                            cache_dir=EmbeddingConfig.cache_dir(),
                             providers=selected_providers,
                         )
                     except Exception:
-                        self._model = TextEmbedding(model_name=self.config.model)
+                        self._model = TextEmbedding(
+                            model_name=self.config.model,
+                            cache_dir=EmbeddingConfig.cache_dir(),
+                        )
                         print("[FastEmbed] Backend: AUTO")
                     else:
                         active_provider = selected_providers[0] if selected_providers else ""

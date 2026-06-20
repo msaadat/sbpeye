@@ -2,19 +2,26 @@ import requests
 from bs4 import BeautifulSoup
 import re
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from pathlib import Path
 from sqlalchemy.orm import Session
-from ..models import Circular, CircularRelationship
-from ..database import collection
+from ..models import Attachment, Circular, CircularRelationship
+from ..database import PROJECT_ROOT, collection, embedding_backend
 from ..search import prepare_chunks
 import uuid
-from urllib.parse import urljoin
+from urllib.parse import unquote, urldefrag, urljoin, urlparse
 
 BASE_URL = "https://www.sbp.org.pk"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
+HTML_CACHE_DIR = PROJECT_ROOT / "cache" / "html"
+ATTACHMENTS_DIR = PROJECT_ROOT / "attachments"
+ATTACHMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx"}
+_CHROMA_WRITE_LOCK = threading.Lock()
 
 # Map from department index URL path to a human-readable department name.
 # Scraped from the cir.asp page links [31]-[56].
@@ -60,6 +67,248 @@ def fetch_page(url: str) -> BeautifulSoup:
     resp = requests.get(url, headers=HEADERS, timeout=50)
     resp.raise_for_status()
     return BeautifulSoup(resp.content, "html.parser")
+
+
+def fetch_page_cached(url: str, force: bool = False) -> bytes:
+    """Return circular HTML from its deterministic disk cache or the network."""
+    HTML_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    circular_id = str(uuid.uuid5(uuid.NAMESPACE_URL, url))
+    cache_file = HTML_CACHE_DIR / f"{circular_id}.html"
+
+    if cache_file.exists() and not force:
+        return cache_file.read_bytes()
+
+    response = requests.get(url, headers=HEADERS, timeout=50)
+    response.raise_for_status()
+    temp_file = cache_file.with_suffix(".html.part")
+    temp_file.write_bytes(response.content)
+    temp_file.replace(cache_file)
+    return response.content
+
+
+def detect_attachments(soup: BeautifulSoup, base_url: str) -> list[dict]:
+    """Return unique attachment links found in circular HTML."""
+    found: list[dict] = []
+    seen_urls: set[str] = set()
+
+    for anchor in soup.find_all("a", href=True):
+        href = anchor.get("href", "").strip()
+        if not href:
+            continue
+
+        absolute_url = _ensure_https(urldefrag(urljoin(base_url, href)).url)
+        parsed = urlparse(absolute_url)
+        extension = Path(parsed.path).suffix.lower()
+        if extension not in ATTACHMENT_EXTENSIONS:
+            continue
+        if parsed.path.lower().endswith("-u.pdf"):
+            continue
+        if absolute_url in seen_urls:
+            continue
+        seen_urls.add(absolute_url)
+
+        filename = unquote(Path(parsed.path).name) or f"attachment{extension}"
+        found.append({
+            "url": absolute_url,
+            "filename": filename,
+            "file_type": extension.lstrip("."),
+        })
+
+    return found
+
+
+def attachment_id(circular_id: str, original_url: str) -> str:
+    return str(
+        uuid.uuid5(uuid.NAMESPACE_URL, f"{circular_id}:{original_url}")
+    )
+
+
+def download_attachment(
+    circular_id: str,
+    att_info: dict,
+    force: bool = False,
+) -> tuple[Path | None, bool, str | None]:
+    """Stream an attachment into the local cache and atomically publish it."""
+    att_id = attachment_id(circular_id, att_info["url"])
+    extension = f".{att_info['file_type']}" if att_info.get("file_type") else ""
+    destination_dir = ATTACHMENTS_DIR / circular_id
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    destination = destination_dir / f"{att_id}{extension}"
+
+    if destination.exists() and not force:
+        return destination, False, None
+
+    temp_path = destination.with_name(f"{destination.name}.part")
+    response = None
+    try:
+        response = requests.get(
+            att_info["url"], headers=HEADERS, timeout=60, stream=True
+        )
+        response.raise_for_status()
+        with temp_path.open("wb") as output:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    output.write(chunk)
+        temp_path.replace(destination)
+        return destination, True, None
+    except Exception as exc:
+        temp_path.unlink(missing_ok=True)
+        logging.warning("Failed to download attachment %s: %s", att_info["url"], exc)
+        return None, False, str(exc)
+    finally:
+        if response is not None:
+            response.close()
+
+
+def extract_pdf_text(pdf_path: Path) -> tuple[str, str, str | None]:
+    """Extract PDF text and classify image-only and failed documents."""
+    try:
+        import pdfplumber
+
+        pages_text: list[str] = []
+        with pdfplumber.open(str(pdf_path)) as pdf:
+            for page in pdf.pages:
+                pages_text.append(page.extract_text() or "")
+
+        full_text = "\n\n".join(pages_text)
+        average_chars = len(full_text) / max(len(pages_text), 1)
+        status = "scanned" if average_chars < 50 else "extracted"
+        return full_text, status, None
+    except Exception as exc:
+        logging.warning("pdfplumber failed on %s: %s", pdf_path, exc)
+        return "", "error", str(exc)
+
+
+def extract_xlsx_text(xlsx_path: Path) -> tuple[str, str | None]:
+    """Extract sheet names and header rows from an XLSX workbook."""
+    try:
+        import openpyxl
+
+        workbook = openpyxl.load_workbook(
+            str(xlsx_path), read_only=True, data_only=True
+        )
+        parts: list[str] = []
+        try:
+            for sheet_name in workbook.sheetnames:
+                worksheet = workbook[sheet_name]
+                parts.append(f"Sheet: {sheet_name}")
+                row = next(
+                    worksheet.iter_rows(min_row=1, max_row=1, values_only=True),
+                    None,
+                )
+                if row:
+                    headers = [str(cell) for cell in row if cell is not None]
+                    if headers:
+                        parts.append("Headers: " + ", ".join(headers))
+        finally:
+            workbook.close()
+        return "\n".join(parts), None
+    except Exception as exc:
+        logging.warning("openpyxl failed on %s: %s", xlsx_path, exc)
+        return "", str(exc)
+
+
+def process_attachment(
+    db: Session,
+    circular: Circular,
+    att_info: dict,
+    force_download: bool = False,
+    verbose: bool = False,
+) -> Attachment:
+    """Download, extract, and persist one attachment idempotently."""
+    att_id = attachment_id(circular.id, att_info["url"])
+    attachment = db.query(Attachment).filter(Attachment.id == att_id).first()
+    if attachment is None:
+        attachment = Attachment(
+            id=att_id,
+            circular_id=circular.id,
+            filename=att_info["filename"],
+            original_url=att_info["url"],
+            file_type=att_info["file_type"],
+            extraction_status="pending",
+            is_vectorized=0,
+        )
+        db.add(attachment)
+        db.commit()
+
+    cached_path = (
+        PROJECT_ROOT / attachment.local_path if attachment.local_path else None
+    )
+    complete_statuses = {"extracted", "scanned", "unsupported"}
+    if (
+        not force_download
+        and attachment.extraction_status in complete_statuses
+        and cached_path is not None
+        and cached_path.exists()
+    ):
+        if verbose:
+            print(f"    [ATT] Already processed: {attachment.filename}")
+        return attachment
+
+    local_path, downloaded, download_error = download_attachment(
+        circular.id, att_info, force=force_download
+    )
+    if local_path is None:
+        attachment.extraction_status = "error"
+        attachment.extraction_error = download_error
+        db.commit()
+        return attachment
+
+    attachment.local_path = str(local_path.relative_to(PROJECT_ROOT))
+    attachment.filename = att_info["filename"]
+    attachment.original_url = att_info["url"]
+    attachment.file_type = att_info["file_type"]
+    attachment.extraction_error = None
+
+    if verbose:
+        state = "Downloaded" if downloaded else "Cached"
+        print(f"    [ATT] {state}: {attachment.filename}")
+
+    if attachment.file_type == "pdf":
+        text, status, error = extract_pdf_text(local_path)
+        attachment.content_text = text or None
+        attachment.extraction_status = status
+        attachment.extraction_error = error
+    elif attachment.file_type == "xlsx":
+        text, error = extract_xlsx_text(local_path)
+        attachment.content_text = text or None
+        attachment.extraction_status = "error" if error else "extracted"
+        attachment.extraction_error = error
+    else:
+        attachment.content_text = None
+        attachment.extraction_status = "unsupported"
+
+    attachment.is_vectorized = 0
+    db.commit()
+    return attachment
+
+
+def fetch_attachments_for_circular(
+    db: Session,
+    circular: Circular,
+    force_fetch: bool = False,
+    force_download: bool = False,
+    verbose: bool = False,
+) -> list[Attachment]:
+    raw_html = fetch_page_cached(circular.url, force=force_fetch)
+    soup = BeautifulSoup(raw_html, "html.parser")
+    detected = detect_attachments(soup, circular.url)
+    if verbose:
+        print(f"  [ATT] Detected {len(detected)} attachment(s)")
+
+    processed = [
+        process_attachment(
+            db,
+            circular,
+            info,
+            force_download=force_download,
+            verbose=verbose,
+        )
+        for info in detected
+    ]
+    circular.attachments_scanned_at = datetime.utcnow()
+    db.commit()
+    return processed
 
 
 def discover_departments(verbose: bool = False) -> list[dict]:
@@ -234,6 +483,10 @@ def scrape_circulars(
     limit: int = 0,
     skip_llm: bool = True,
     verbose: bool = False,
+    force_fetch: bool = False,
+    force_download: bool = False,
+    include_attachments: bool = True,
+    workers: int = 4,
 ):
     """
     Main entry point: discovers and processes circulars one by one.
@@ -258,7 +511,7 @@ def scrape_circulars(
             print(f"Filtered to {len(all_depts)} departments")
 
     seen_urls = set()
-    processed = 0
+    pending: list[dict] = []
     skipped = 0
 
     for dept in all_depts:
@@ -281,34 +534,66 @@ def scrape_circulars(
                 seen_urls.add(circ_info["url"])
 
 
-                if db.query(Circular).filter(Circular.url == circ_info["url"]).first():
+                existing = db.query(Circular).filter(
+                    Circular.url == circ_info["url"]
+                ).first()
+                if existing and not force_fetch and not force_download:
                     skipped += 1
                     print(f"Circular {circ_info['url']} already exists. Skipping")
                     continue
 
-                processed += 1
-                if limit > 0 and processed > limit:
-                    print(f"\nLimit of {limit} reached. Stopping.")
-                    print(f"Processed: {processed}, Skipped (existing): {skipped}")
-                    return
+                pending.append(circ_info)
+                if limit > 0 and len(pending) >= limit:
+                    break
+            if limit > 0 and len(pending) >= limit:
+                break
+        if limit > 0 and len(pending) >= limit:
+            break
 
-                print(f"[{processed}] {circ_info['department']} / {circ_info['date']} - {circ_info['title']}")
-                try:
-                    process_circular(
-                        db,
-                        title=circ_info["title"],
-                        url=circ_info["url"],
-                        department=circ_info["department"],
-                        reference=circ_info.get("reference", ""),
-                        listing_date=circ_info.get("date", ""),
-                        year=circ_info.get("year", ""),
-                        skip_llm=skip_llm,
-                        verbose=verbose,
-                    )
-                except Exception as e:
-                    print(f"  [ERROR] {e}")
+    worker_count = max(1, workers)
+    print(f"Processing {len(pending)} circular(s) with {worker_count} worker(s)")
 
-    print(f"\nScrape complete. Processed: {processed}, Skipped (existing): {skipped}")
+    def process_one(circ_info: dict) -> None:
+        from ..database import SessionLocal
+
+        worker_db = SessionLocal()
+        try:
+            process_circular(
+                worker_db,
+                title=circ_info["title"],
+                url=circ_info["url"],
+                department=circ_info["department"],
+                reference=circ_info.get("reference", ""),
+                listing_date=circ_info.get("date", ""),
+                year=circ_info.get("year", ""),
+                skip_llm=skip_llm,
+                verbose=verbose,
+                force_fetch=force_fetch,
+                force_download=force_download,
+                include_attachments=include_attachments,
+            )
+        finally:
+            worker_db.close()
+
+    errors = 0
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {
+            executor.submit(process_one, item): (index, item)
+            for index, item in enumerate(pending, start=1)
+        }
+        for future in as_completed(futures):
+            index, item = futures[future]
+            try:
+                future.result()
+                print(f"[{index}/{len(pending)}] {item['title']}")
+            except Exception as exc:
+                errors += 1
+                print(f"  [ERROR] {item['url']}: {exc}")
+
+    print(
+        f"\nScrape complete. Processed: {len(pending) - errors}, "
+        f"errors: {errors}, skipped (existing): {skipped}"
+    )
 
 
 def process_circular(
@@ -321,13 +606,17 @@ def process_circular(
     year: str = "",
     skip_llm: bool = True,
     verbose: bool = False,
+    force_fetch: bool = False,
+    force_download: bool = False,
+    include_attachments: bool = True,
 ):
-    """Download and store a single circular."""
+    """Download and idempotently store a circular and its attachments."""
     if verbose:
         print(f"  Fetching: {url}")
 
-    resp = requests.get(url, headers=HEADERS, timeout=50)
-    soup = BeautifulSoup(resp.content, "html.parser")
+    circular_id = str(uuid.uuid5(uuid.NAMESPACE_URL, url))
+    raw_html = fetch_page_cached(url, force=force_fetch)
+    soup = BeautifulSoup(raw_html, "html.parser")
     content_text = soup.get_text(separator=" ", strip=True)
 
     if not content_text:
@@ -335,8 +624,7 @@ def process_circular(
             print(f"  [SKIP] No content")
         return
 
-    circular_id = str(uuid.uuid5(uuid.NAMESPACE_URL, url))
-
+    existing = db.query(Circular).filter(Circular.id == circular_id).first()
     circular_date = None
     if listing_date:
         circular_date = _parse_listing_date(listing_date, year)
@@ -345,58 +633,163 @@ def process_circular(
         print(f"  [WARN] Could not parse listing date: '{listing_date}' with year '{year}' for circular {url}")
         circular_date = _extract_date(content_text)
         print(f"  [WARN] Alternate listing date: '{circular_date}'  for circular {url}")
-        
-    if circular_date is None: 
+
+    if circular_date is None and existing is None:
         print(f"  [WARN] Could not extract date from content for circular {url}")
-        exit(1)
-    
+        circular_date = datetime.now()
+
     reference = re.sub(r"\s+", " ", reference)
     title = re.sub(r"\s+", " ", title)
 
-    circular = Circular(
-        id=circular_id,
-        reference=reference or None,
-        title=title,
-        department=department,
-        date=circular_date or datetime.now(),
-        url=url,
-        content_text=content_text,
-    )
-    db.add(circular)
+    if existing is None:
+        circular = Circular(id=circular_id)
+        db.add(circular)
+    else:
+        circular = existing
+    circular.reference = reference or circular.reference
+    circular.title = title
+    circular.department = department
+    circular.date = circular_date or circular.date or datetime.now()
+    circular.url = url
+    circular.content_text = content_text
     db.commit()
 
     if verbose:
         print(f"  [DB] Saved ({len(content_text)} chars, dept={department})")
 
-    # Create Vector Embeddings in ChromaDB (chunked)
+    if include_attachments:
+        detected = detect_attachments(soup, url)
+        if verbose:
+            print(f"  [ATT] Detected {len(detected)} attachment(s)")
+        for info in detected:
+            process_attachment(
+                db,
+                circular,
+                info,
+                force_download=force_download,
+                verbose=verbose,
+            )
+        circular.attachments_scanned_at = datetime.utcnow()
+        db.commit()
+
+    _index_circular(circular, verbose=verbose)
+    return circular
+
+
+def _delete_document_chunks(
+    *, circular_id: str | None = None, attachment_id_value: str | None = None
+) -> None:
+    if attachment_id_value:
+        result = collection.get(
+            where={"attachment_id": attachment_id_value}, include=["metadatas"]
+        )
+        ids = result.get("ids", [])
+    elif circular_id:
+        result = collection.get(
+            where={"circular_id": circular_id}, include=["metadatas"]
+        )
+        ids = [
+            item_id
+            for item_id, metadata in zip(
+                result.get("ids", []), result.get("metadatas", [])
+            )
+            if not (metadata or {}).get("attachment_id")
+        ]
+    else:
+        ids = []
+    if ids:
+        collection.delete(ids=ids)
+
+
+def _index_circular(circular: Circular, verbose: bool = False) -> None:
+    """Replace one circular's Chroma chunks without touching attachments."""
     try:
-        chunks = prepare_chunks(title, content_text)
-        chunk_ids = [f"{circular_id}__chunk_{i}" for i in range(len(chunks))]
+        chunks = prepare_chunks(circular.title, circular.content_text or "")
+        chunk_ids = [f"{circular.id}__chunk_{i}" for i in range(len(chunks))]
         chunk_metas = [
             {
-                "circular_id": circular_id,
-                "title": title,
-                "url": url,
-                "department": department,
+                "circular_id": circular.id,
+                "doc_type": "circular",
+                "title": circular.title,
+                "url": circular.url,
+                "department": circular.department,
                 "chunk_index": i,
             }
             for i in range(len(chunks))
         ]
-        from sbpeye.database import embedding_backend
-
         embeddings = embedding_backend.embed_documents(chunks)
-        collection.add(
-            documents=chunks,
-            embeddings=embeddings,
-            metadatas=chunk_metas,
-            ids=chunk_ids,
-        )
+        with _CHROMA_WRITE_LOCK:
+            _delete_document_chunks(circular_id=circular.id)
+            collection.add(
+                documents=chunks,
+                embeddings=embeddings,
+                metadatas=chunk_metas,
+                ids=chunk_ids,
+            )
         if verbose:
             print(f"  [CHROMA] Indexed ({len(chunks)} chunk(s))")
     except Exception as e:
-        logging.exception("ChromaDB indexing failed for %s", url)
+        logging.exception("ChromaDB indexing failed for %s", circular.url)
         if verbose:
             print(f"  [CHROMA] Error: {e}")
+
+
+def vectorize_attachment(
+    db: Session, attachment: Attachment, verbose: bool = False
+) -> bool:
+    """Replace the vector chunks for one extracted attachment."""
+    if not attachment.content_text or not attachment.content_text.strip():
+        return False
+
+    try:
+        chunks = prepare_chunks(attachment.filename, attachment.content_text)
+        chunk_ids = [f"{attachment.id}__chunk_{i}" for i in range(len(chunks))]
+        metadata = [
+            {
+                "circular_id": attachment.circular_id,
+                "attachment_id": attachment.id,
+                "doc_type": "attachment",
+                "title": attachment.filename,
+                "filename": attachment.filename,
+                "url": attachment.original_url,
+                "department": attachment.circular.department or "",
+                "chunk_index": index,
+            }
+            for index in range(len(chunks))
+        ]
+        embeddings = embedding_backend.embed_documents(chunks)
+        _delete_document_chunks(attachment_id_value=attachment.id)
+        collection.add(
+            documents=chunks,
+            embeddings=embeddings,
+            metadatas=metadata,
+            ids=chunk_ids,
+        )
+        attachment.is_vectorized = 1
+        db.commit()
+        if verbose:
+            print(
+                f"  [CHROMA] Indexed attachment: {attachment.filename} "
+                f"({len(chunks)} chunks)"
+            )
+        return True
+    except Exception:
+        attachment.is_vectorized = 0
+        db.commit()
+        logging.exception("ChromaDB indexing failed for attachment %s", attachment.id)
+        return False
+
+
+def vectorize_attachments(
+    db: Session, circular: Circular, verbose: bool = False
+) -> int:
+    indexed = 0
+    for attachment in circular.attachments:
+        if attachment.is_vectorized:
+            continue
+        if vectorize_attachment(db, attachment, verbose=verbose):
+            indexed += 1
+    return indexed
 
 
 def _extract_date(text: str) -> datetime | None:

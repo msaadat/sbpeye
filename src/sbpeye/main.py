@@ -12,14 +12,14 @@ import os
 import json
 import uuid
 
-from .database import engine, Base, get_db, SessionLocal, has_vector_store_data
+from .database import PROJECT_ROOT, engine, Base, get_db, SessionLocal, has_vector_store_data
 from .models import AIGenerationJob, SyncStatus, Circular, CircularRelationship, EcoDataSeries, EcoDataEntry, Settings, ChatSession, ChatMessage
 from .search import search_engine
 from .ai import AIConfig, get_ai_client
 from .circular_ai import GENERATION_ACTIONS, generation_job_payload, run_generation_job
 from .embeddings import EmbeddingConfig, create_embedding_backend
 
-from .scraper.circulars import HEADERS
+from .scraper.circulars import HEADERS, download_attachment, fetch_page_cached
 from .scraper.ecodata import scrape_ecodata
 from .scraper.clean_html import clean_sbp_html
 from .scraper.ecodata_index import scrape_ecodata_index
@@ -51,7 +51,13 @@ def _isoformat(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
 
 
-def _circular_summary(circular: Circular, snippet: str | None = None) -> dict:
+def _circular_summary(
+    circular: Circular,
+    snippet: str | None = None,
+    match_source: str = "circular",
+    attachment_id: str | None = None,
+    attachment_filename: str | None = None,
+) -> dict:
     return {
         "id": circular.id,
         "title": circular.title,
@@ -63,6 +69,9 @@ def _circular_summary(circular: Circular, snippet: str | None = None) -> dict:
         "tags": _safe_json_list(circular.tags),
         "status": circular.status or "active",
         "snippet": snippet or "",
+        "match_source": match_source,
+        "attachment_id": attachment_id,
+        "attachment_filename": attachment_filename,
     }
 
 
@@ -276,7 +285,16 @@ def search_circulars(
     )
     total_pages = max(1, (total + per_page - 1) // per_page)
     return {
-        "items": [_circular_summary(r["circular"], r.get("snippet")) for r in results],
+        "items": [
+            _circular_summary(
+                r["circular"],
+                r.get("snippet"),
+                r.get("match_source", "circular"),
+                r.get("attachment_id"),
+                r.get("attachment_filename"),
+            )
+            for r in results
+        ],
         "total": total,
         "page": page,
         "per_page": per_page,
@@ -420,6 +438,20 @@ async def get_circular_detail(circular_id: str, db: Session = Depends(get_db)):
         "tags": _safe_json_list(c.tags),
         "compliance_checklist": _safe_json_list(c.compliance_checklist),
         "status": c.status or "active",
+        "attachments": [
+            {
+                "id": attachment.id,
+                "filename": attachment.filename,
+                "original_url": attachment.original_url,
+                "file_type": attachment.file_type,
+                "extraction_status": attachment.extraction_status,
+                "is_scanned": attachment.extraction_status == "scanned",
+                "is_vectorized": bool(attachment.is_vectorized),
+                "has_text": bool(attachment.content_text),
+            }
+            for attachment in sorted(c.attachments, key=lambda item: item.filename)
+        ],
+        "attachment_count": len(c.attachments),
         "relationships": {
             "outgoing": [rel_dict(r) for r in outgoing],
             "incoming": [rel_dict(r) for r in incoming],
@@ -981,37 +1013,57 @@ async def batch_download(
             if not c.url:
                 continue
                 
-            try:
-                resp = http_requests.get(c.url, headers=HEADERS, timeout=20)
-                resp.raise_for_status()
-            except Exception as e:
-                print(f"Failed to fetch {c.url}: {e}")
-                continue
-                
             # Safely create a file name
             safe_ref = (c.reference or c.id).replace("/", "_").replace("\\", "_")
             if c.url.lower().endswith(".pdf"):
-                zip_file.writestr(f"{safe_ref}.pdf", resp.content)
+                try:
+                    resp = http_requests.get(c.url, headers=HEADERS, timeout=20)
+                    resp.raise_for_status()
+                    zip_file.writestr(f"{safe_ref}.pdf", resp.content)
+                except Exception as e:
+                    print(f"Failed to fetch {c.url}: {e}")
             else:
-                # It's an HTML circular. Save the HTML.
-                zip_file.writestr(f"{safe_ref}.html", resp.content)
-                
-                # Fetch attachments
-                soup = BeautifulSoup(resp.content, "html.parser")
-                for a in soup.find_all("a", href=True):
-                    href = a.get("href", "").strip()
-                    if href.lower().endswith((".pdf", ".doc", ".docx", ".xls", ".xlsx")):
-                        abs_url = urljoin(c.url, href)
-                        try:
-                            att_resp = http_requests.get(abs_url, headers=HEADERS, timeout=20)
-                            att_resp.raise_for_status()
-                            att_filename = abs_url.split("/")[-1].split("?")[0]
-                            if not att_filename:
-                                att_filename = "attachment.file"
-                            # Add to a subfolder for this circular
-                            zip_file.writestr(f"{safe_ref}_attachments/{att_filename}", att_resp.content)
-                        except Exception as e:
-                            print(f"Failed to fetch attachment {abs_url}: {e}")
+                try:
+                    html = fetch_page_cached(c.url)
+                    zip_file.writestr(f"{safe_ref}.html", html)
+                except Exception as e:
+                    print(f"Failed to fetch {c.url}: {e}")
+                    continue
+
+                used_names: set[str] = set()
+                for attachment in c.attachments:
+                    local_path = (
+                        PROJECT_ROOT / attachment.local_path
+                        if attachment.local_path
+                        else None
+                    )
+                    if local_path is None or not local_path.exists():
+                        local_path, _, error = download_attachment(
+                            c.id,
+                            {
+                                "url": attachment.original_url,
+                                "filename": attachment.filename,
+                                "file_type": attachment.file_type,
+                            },
+                        )
+                        if local_path is None:
+                            print(
+                                f"Failed to fetch attachment "
+                                f"{attachment.original_url}: {error}"
+                            )
+                            continue
+                        attachment.local_path = str(local_path.relative_to(PROJECT_ROOT))
+                        db.commit()
+
+                    safe_name = Path(attachment.filename).name or attachment.id
+                    if safe_name in used_names:
+                        path = Path(safe_name)
+                        safe_name = f"{path.stem}_{attachment.id[:8]}{path.suffix}"
+                    used_names.add(safe_name)
+                    zip_file.writestr(
+                        f"{safe_ref}_attachments/{safe_name}",
+                        local_path.read_bytes(),
+                    )
             time.sleep(0.5) # Be gentle to SBP servers
             
     zip_buffer.seek(0)

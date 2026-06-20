@@ -16,3 +16,7 @@ src/sbpeye/static/spa/assets/
 
 # Local vector index
 /chroma_db/
+
+# Scraper caches
+/cache/
+/attachments/

@@ -3,7 +3,7 @@ import logging
 import threading
 from datetime import datetime
 from rank_bm25 import BM25Okapi
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from .models import Circular
 from .database import collection, embedding_backend
@@ -374,7 +374,9 @@ class SearchEngine:
             if not self._dirty and self._bm25 is not None:
                 return
 
-            circulars = db.query(Circular).all()
+            circulars = db.query(Circular).options(
+                joinedload(Circular.attachments)
+            ).all()
             self._ids = []
             self._id_to_idx = {}
             self._corpus_tokens = []
@@ -385,6 +387,11 @@ class SearchEngine:
             for i, c in enumerate(circulars):
                 title_tokens = tokenize(c.title or "")
                 body_tokens = tokenize(c.content_text or "")
+                attachment_tokens = [
+                    token
+                    for attachment in c.attachments
+                    for token in tokenize(attachment.content_text or "")
+                ]
                 ref_tokens = tokenize(c.reference or "")
 
                 # Preserve both padded and unpadded number forms from the reference
@@ -396,7 +403,12 @@ class SearchEngine:
                         extra_ref_tokens.append(tok.zfill(2))
 
                 # Boost title 3×, reference 5× (was 2×) so reference queries rank first
-                boosted = title_tokens * 3 + (ref_tokens + extra_ref_tokens) * 5 + body_tokens
+                boosted = (
+                    title_tokens * 3
+                    + (ref_tokens + extra_ref_tokens) * 5
+                    + body_tokens
+                    + attachment_tokens
+                )
 
                 self._ids.append(c.id)
                 self._id_to_idx[c.id] = i
@@ -534,6 +546,51 @@ class SearchEngine:
 
         return snippet
 
+    def _best_snippet_source(
+        self,
+        circular: Circular,
+        query_tokens: set[str],
+        preferred_attachment_id: str | None = None,
+    ) -> tuple[str, str, str | None, str | None]:
+        """Return snippet and source metadata for the strongest matching document."""
+        if preferred_attachment_id:
+            preferred = next(
+                (
+                    item
+                    for item in circular.attachments
+                    if item.id == preferred_attachment_id and item.content_text
+                ),
+                None,
+            )
+            if preferred:
+                return (
+                    self._generate_snippet(preferred.content_text, query_tokens),
+                    "attachment",
+                    preferred.id,
+                    preferred.filename,
+                )
+
+        candidates: list[tuple[str, str, str | None, str | None]] = [
+            (circular.content_text or "", "circular", None, None)
+        ]
+        candidates.extend(
+            (item.content_text or "", "attachment", item.id, item.filename)
+            for item in circular.attachments
+            if item.content_text
+        )
+
+        def score(candidate: tuple[str, str, str | None, str | None]) -> int:
+            candidate_tokens = tokenize(candidate[0])
+            return sum(token in query_tokens for token in candidate_tokens)
+
+        text, source, attachment_id, filename = max(candidates, key=score)
+        return (
+            self._generate_snippet(text, query_tokens),
+            source,
+            attachment_id,
+            filename,
+        )
+
     # ------------------------------------------------------------------
     # Main search
     # ------------------------------------------------------------------
@@ -598,6 +655,7 @@ class SearchEngine:
 
         # 3. Vector search (use original query — embeddings handle semantics)
         vector_ranks: dict[str, int] = {}
+        vector_sources: dict[str, str] = {}
         try:
             query_embeddings = embedding_backend.embed_queries([query])
             results = collection.query(
@@ -616,6 +674,8 @@ class SearchEngine:
                 circular_id = meta.get("circular_id", vid)
                 if circular_id not in vector_ranks:
                     vector_ranks[circular_id] = rank_counter
+                    if meta.get("doc_type") == "attachment" and meta.get("attachment_id"):
+                        vector_sources[circular_id] = meta["attachment_id"]
                     rank_counter += 1
         except Exception:
             logger.exception(
@@ -671,7 +731,10 @@ class SearchEngine:
 
         # 5. Sort and retrieve
         circulars = (
-            db.query(Circular).filter(Circular.id.in_(all_candidate_ids)).all()
+            db.query(Circular)
+            .options(joinedload(Circular.attachments))
+            .filter(Circular.id.in_(all_candidate_ids))
+            .all()
         )
         id_to_circular = {c.id: c for c in circulars}
 
@@ -700,10 +763,18 @@ class SearchEngine:
         for cid in sorted_ids:
             c = id_to_circular.get(cid)
             if c:
-                snippet = self._generate_snippet(
-                    c.content_text or "", snippet_tokens,
+                snippet, source, attachment_id, filename = self._best_snippet_source(
+                    c,
+                    snippet_tokens,
+                    preferred_attachment_id=vector_sources.get(cid),
                 )
-                ordered.append({"circular": c, "snippet": snippet})
+                ordered.append({
+                    "circular": c,
+                    "snippet": snippet,
+                    "match_source": source,
+                    "attachment_id": attachment_id,
+                    "attachment_filename": filename,
+                })
 
         return ordered, total
 

@@ -21,9 +21,13 @@ class Circular(Base):
     tags_generated_at = Column(DateTime, nullable=True)
     checklist_generated_at = Column(DateTime, nullable=True)
     relationships_generated_at = Column(DateTime, nullable=True)
+    attachments_scanned_at = Column(DateTime, nullable=True)
 
     amends = relationship("CircularRelationship", foreign_keys="[CircularRelationship.source_id]", back_populates="source")
     amended_by = relationship("CircularRelationship", foreign_keys="[CircularRelationship.target_id]", back_populates="target")
+    attachments = relationship(
+        "Attachment", back_populates="circular", cascade="all, delete-orphan"
+    )
 
 class CircularRelationship(Base):
     __tablename__ = "circular_relationships"
@@ -37,6 +41,26 @@ class CircularRelationship(Base):
 
     source = relationship("Circular", foreign_keys=[source_id], back_populates="amends")
     target = relationship("Circular", foreign_keys=[target_id], back_populates="amended_by")
+
+
+class Attachment(Base):
+    __tablename__ = "attachments"
+
+    id = Column(String, primary_key=True)
+    circular_id = Column(
+        String, ForeignKey("circulars.id"), nullable=False, index=True
+    )
+    filename = Column(String, nullable=False)
+    original_url = Column(String, nullable=False)
+    local_path = Column(String, nullable=True)
+    file_type = Column(String, nullable=True)
+    content_text = Column(Text, nullable=True)
+    extraction_status = Column(String, nullable=False, default="pending")
+    extraction_error = Column(Text, nullable=True)
+    is_vectorized = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    circular = relationship("Circular", back_populates="attachments")
 
 
 class AIGenerationJob(Base):

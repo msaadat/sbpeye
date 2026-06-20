@@ -54,6 +54,7 @@ def _ensure_columns():
                 ("tags_generated_at", "DATETIME"),
                 ("checklist_generated_at", "DATETIME"),
                 ("relationships_generated_at", "DATETIME"),
+                ("attachments_scanned_at", "DATETIME"),
             ]
             for col_name, col_type in new_columns:
                 if col_name not in existing:
@@ -90,6 +91,20 @@ def _ensure_columns():
             for col_name, col_type in new_columns:
                 if col_name not in existing:
                     conn.execute(text(f"ALTER TABLE circular_relationships ADD COLUMN {col_name} {col_type}"))
+
+        if "attachments" in table_names:
+            existing = {c["name"] for c in insp.get_columns("attachments")}
+            new_columns = [
+                ("extraction_status", "VARCHAR DEFAULT 'pending'"),
+                ("extraction_error", "TEXT"),
+                ("is_vectorized", "INTEGER DEFAULT 0"),
+                ("created_at", "DATETIME"),
+            ]
+            for col_name, col_type in new_columns:
+                if col_name not in existing:
+                    conn.execute(text(
+                        f"ALTER TABLE attachments ADD COLUMN {col_name} {col_type}"
+                    ))
 
 Base.metadata.create_all(bind=engine)
 _ensure_columns()

@@ -2,13 +2,14 @@ import click
 import sys
 import time
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-from sbpeye.database import engine, Base, SessionLocal
-from sbpeye.models import Circular, CircularRelationship
+from sbpeye.database import PROJECT_ROOT, engine, Base, SessionLocal
+from sbpeye.models import Attachment, Circular, CircularRelationship
 from sbpeye.ai import get_ai_client
 
 
@@ -29,8 +30,12 @@ def circulars():
 @click.option("--year", "-y", multiple=True, help="Filter by year (e.g., 2025, 2024)")
 @click.option("--limit", "-l", type=int, default=0, help="Max circulars to process (0=unlimited)")
 @click.option("--skip-llm", is_flag=True, help="Skip LLM relationship extraction")
+@click.option("--force-fetch", is_flag=True, help="Re-fetch circular HTML and update existing rows")
+@click.option("--force-download", is_flag=True, help="Re-download attachment files")
+@click.option("--no-attachments", is_flag=True, help="Skip attachment discovery and download")
+@click.option("--workers", type=click.IntRange(1), default=1, show_default=True, help="Concurrent circular downloads")
 @click.option("--verbose", "-v", is_flag=True, help="Print extra details")
-def sync(dept, year, limit, skip_llm, verbose):
+def sync(dept, year, limit, skip_llm, force_fetch, force_download, no_attachments, workers, verbose):
     """Scrape circulars from SBP website."""
     from sbpeye.scraper.circulars import scrape_circulars
 
@@ -43,6 +48,10 @@ def sync(dept, year, limit, skip_llm, verbose):
             limit=limit,
             skip_llm=skip_llm,
             verbose=verbose,
+            force_fetch=force_fetch,
+            force_download=force_download,
+            include_attachments=not no_attachments,
+            workers=workers,
         )
     finally:
         db.close()
@@ -79,6 +88,144 @@ def process_url(url, dept, skip_llm, verbose):
         db.close()
 
     _show_stats()
+
+
+@cli.group()
+def attachments():
+    """Fetch and vectorize circular attachments."""
+    pass
+
+
+@attachments.command("fetch")
+@click.option("--dept", "-d", multiple=True, help="Filter by department substring")
+@click.option("--limit", "-l", type=int, default=0, help="Max circulars to scan (0=unlimited)")
+@click.option("--rescan", is_flag=True, help="Include previously scanned circulars")
+@click.option("--force-fetch", is_flag=True, help="Re-fetch circular HTML")
+@click.option("--force-download", is_flag=True, help="Re-download attachment files")
+@click.option("--delay", type=float, default=0.5, help="Delay between circulars")
+@click.option("--workers", type=click.IntRange(1), default=4, show_default=True, help="Concurrent circular downloads")
+@click.option("--verbose", "-v", is_flag=True, help="Print per-attachment progress")
+def attachments_fetch(dept, limit, rescan, force_fetch, force_download, delay, workers, verbose):
+    """Discover and download attachments for existing circulars."""
+    from sbpeye.scraper.circulars import fetch_attachments_for_circular
+
+    db = SessionLocal()
+    try:
+        query = db.query(Circular)
+        query = _dept_filter(query, dept)
+        circular_items = query.order_by(Circular.date.desc()).all()
+        if not rescan and not force_fetch and not force_download:
+            circular_items = [
+                circular
+                for circular in circular_items
+                if circular.attachments_scanned_at is None
+                or any(
+                    attachment.extraction_status in {"pending", "error"}
+                    or not attachment.local_path
+                    or not (PROJECT_ROOT / attachment.local_path).exists()
+                    for attachment in circular.attachments
+                )
+            ]
+        if limit > 0:
+            circular_items = circular_items[:limit]
+
+        circular_ids = [circular.id for circular in circular_items]
+        print(
+            f"Scanning {len(circular_ids)} circulars with {workers} worker(s)..."
+        )
+
+        def fetch_one(circular_id):
+            worker_db = SessionLocal()
+            try:
+                circular = worker_db.get(Circular, circular_id)
+                processed = fetch_attachments_for_circular(
+                    worker_db,
+                    circular,
+                    force_fetch=force_fetch,
+                    force_download=force_download,
+                    verbose=verbose,
+                )
+                result = len(processed), circular.reference or circular.title[:50]
+                if delay > 0:
+                    time.sleep(delay)
+                return result
+            finally:
+                worker_db.close()
+
+        found = 0
+        errors = 0
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(fetch_one, circular_id): index
+                for index, circular_id in enumerate(circular_ids, start=1)
+            }
+            for future in as_completed(futures):
+                index = futures[future]
+                try:
+                    count, label = future.result()
+                    found += count
+                    print(
+                        f"  [{index}/{len(circular_ids)}] {label}: "
+                        f"{count} attachment(s)"
+                    )
+                except Exception as exc:
+                    errors += 1
+                    print(f"  [ERROR] circular #{index}: {exc}")
+        print(f"Attachment scan complete: {found} found, {errors} errors")
+    finally:
+        db.close()
+
+
+def _run_attachment_vectorize(
+    db, dept=(), limit=0, verbose=False, attachment_id=None
+):
+    from sbpeye.scraper.circulars import vectorize_attachment
+
+    query = db.query(Attachment).join(Circular).filter(
+        Attachment.content_text.is_not(None),
+        Attachment.content_text != "",
+    )
+    if attachment_id:
+        query = query.filter(Attachment.id == attachment_id)
+    else:
+        query = query.filter(Attachment.is_vectorized == 0)
+    if dept:
+        from sqlalchemy import or_
+
+        query = query.filter(
+            or_(*[Circular.department.ilike(f"%{item}%") for item in dept])
+        )
+    attachment_items = query.order_by(Attachment.created_at).all()
+    if limit > 0:
+        attachment_items = attachment_items[:limit]
+
+    print(f"Vectorizing {len(attachment_items)} attachments...")
+    indexed = sum(
+        vectorize_attachment(db, item, verbose=verbose)
+        for item in attachment_items
+    )
+    print(f"Vectorized {indexed}/{len(attachment_items)} attachments")
+    return indexed
+
+
+@attachments.command("vectorize")
+@click.option("--id", "attachment_id", help="Vectorize one attachment by exact ID")
+@click.option("--dept", "-d", multiple=True, help="Filter by department substring")
+@click.option("--limit", "-l", type=int, default=0, help="Max attachments (0=unlimited)")
+@click.option("--verbose", "-v", is_flag=True, help="Print per-attachment progress")
+def attachments_vectorize(attachment_id, dept, limit, verbose):
+    """Index extracted attachment text into ChromaDB."""
+    db = SessionLocal()
+    try:
+        _run_attachment_vectorize(
+            db,
+            dept=dept,
+            limit=limit,
+            verbose=verbose,
+            attachment_id=attachment_id,
+        )
+    finally:
+        db.close()
 
 
 @circulars.command()
@@ -191,17 +338,19 @@ def status(verbose):
 @click.option("--year", "-y", multiple=True, help="Filter by year")
 @click.option("--limit", "-l", type=int, default=0, help="Max circulars per task (0=unlimited)")
 @click.option("--skip-llm", is_flag=True, help="Skip LLM tasks (only sync circulars)")
+@click.option("--no-attachment-vectorize", is_flag=True, help="Leave attachment text unindexed")
 @click.option("--verbose", "-v", is_flag=True, help="Print extra details")
 @click.option("--delay", type=float, default=1.0, help="Delay between API calls in seconds")
-def run_all(dept, year, limit, skip_llm, verbose, delay):
-    """Run full pipeline: sync -> summarize -> tags -> checklist -> relationships -> status."""
+@click.option("--workers", type=click.IntRange(1), default=4, show_default=True, help="Concurrent circular downloads")
+def run_all(dept, year, limit, skip_llm, no_attachment_vectorize, verbose, delay, workers):
+    """Run the complete circular and attachment processing pipeline."""
     from sbpeye.scraper.circulars import scrape_circulars
 
     print("=" * 60)
     print("SBPEye Full Pipeline")
     print("=" * 60)
 
-    print("\n[1/6] Syncing circulars...")
+    print("\n[1/7] Syncing circulars...")
     db = SessionLocal()
     try:
         scrape_circulars(
@@ -211,9 +360,20 @@ def run_all(dept, year, limit, skip_llm, verbose, delay):
             limit=limit,
             skip_llm=True,
             verbose=verbose,
+            workers=workers,
         )
     finally:
         db.close()
+
+    if not no_attachment_vectorize:
+        print("\n[2/7] Vectorizing attachments...")
+        db = SessionLocal()
+        try:
+            _run_attachment_vectorize(
+                db, dept=dept, limit=limit, verbose=verbose
+            )
+        finally:
+            db.close()
 
     if skip_llm:
         print("\nSkipping LLM tasks (--skip-llm).")
@@ -226,15 +386,15 @@ def run_all(dept, year, limit, skip_llm, verbose, delay):
         ("Tags", _run_tags),
         ("Checklist", _run_checklist),
         ("Relationships", _run_relationships),
-    ], start=2):
-        print(f"\n[{step}/6] {task_name}...")
+    ], start=3):
+        print(f"\n[{step}/7] {task_name}...")
         db = SessionLocal()
         try:
             task_fn(db, client, None, dept, year, limit, False, verbose, delay)
         finally:
             db.close()
 
-    print(f"\n[6/6] Computing statuses...")
+    print(f"\n[7/7] Computing statuses...")
     ctx = click.Context(status)
     ctx.params = {"verbose": verbose}
     with ctx:
@@ -286,7 +446,7 @@ def stats_cmd():
 @cli.command("reindex")
 @click.option("--dry-run", is_flag=True, help="Show what would be indexed without writing")
 def reindex_cmd(dry_run):
-    """Re-index all circulars into ChromaDB."""
+    """Re-index all circulars and extracted attachments into ChromaDB."""
     from sbpeye.database import chroma_client, embedding_backend, embedding_config
     from sbpeye.search import prepare_chunks
 
@@ -304,7 +464,15 @@ def reindex_cmd(dry_run):
             for c in circulars:
                 chunks = prepare_chunks(c.title or "", c.content_text or "")
                 total_chunks += len(chunks)
-            print(f"Would create {total_chunks} chunks (avg {total_chunks/total:.1f} per circular)")
+                for attachment in c.attachments:
+                    if attachment.content_text and attachment.content_text.strip():
+                        total_chunks += len(prepare_chunks(
+                            attachment.filename, attachment.content_text
+                        ))
+            print(
+                f"Would create {total_chunks} chunks "
+                f"(avg {total_chunks/max(total, 1):.1f} per circular)"
+            )
             return
 
         print(f"Embedding backend: {embedding_config.provider} ({embedding_config.model})")
@@ -322,6 +490,7 @@ def reindex_cmd(dry_run):
         indexed = 0
         total_chunks = 0
         errors = 0
+        indexed_attachments = 0
 
         batch_docs: list[str] = []
         batch_ids: list[str] = []
@@ -352,11 +521,35 @@ def reindex_cmd(dry_run):
                     batch_ids.append(f"{c.id}__chunk_{ci}")
                     batch_metas.append({
                         "circular_id": c.id,
+                        "doc_type": "circular",
                         "title": c.title or "",
                         "url": c.url or "",
                         "department": c.department or "",
                         "chunk_index": ci,
                     })
+
+                for attachment in c.attachments:
+                    if not attachment.content_text or not attachment.content_text.strip():
+                        attachment.is_vectorized = 0
+                        continue
+                    attachment_chunks = prepare_chunks(
+                        attachment.filename, attachment.content_text
+                    )
+                    for ci, chunk in enumerate(attachment_chunks):
+                        batch_docs.append(chunk)
+                        batch_ids.append(f"{attachment.id}__chunk_{ci}")
+                        batch_metas.append({
+                            "circular_id": c.id,
+                            "attachment_id": attachment.id,
+                            "doc_type": "attachment",
+                            "title": attachment.filename,
+                            "filename": attachment.filename,
+                            "url": attachment.original_url,
+                            "department": c.department or "",
+                            "chunk_index": ci,
+                        })
+                    attachment.is_vectorized = 1
+                    indexed_attachments += 1
 
                 if len(batch_docs) >= BATCH_SIZE:
                     flush_batch()
@@ -371,9 +564,11 @@ def reindex_cmd(dry_run):
                 print(f"  [ERROR] {c.id}: {e}")
 
         flush_batch()
+        db.commit()
 
         print(f"\nRe-indexing complete:")
         print(f"  Circulars indexed: {indexed}")
+        print(f"  Attachments indexed: {indexed_attachments}")
         print(f"  Total chunks:      {total_chunks}")
         print(f"  Avg chunks/doc:    {total_chunks/max(indexed,1):.1f}")
         print(f"  Errors:            {errors}")

@@ -14,7 +14,7 @@ from sbpeye.checklist import (
     prepare_reference_chunks,
     segment_document,
 )
-from sbpeye.scraper.clean_html import extract_sbp_text
+from sbpeye.scraper.clean_html import clean_sbp_html, extract_sbp_text
 from sbpeye.scraper.circulars import _clean_pdf_pages
 
 
@@ -54,6 +54,28 @@ def test_html_extraction_removes_known_sbp_navigation_footer():
     """)
 
     assert text == "1. Banks shall report."
+
+
+def test_clean_html_removes_back_to_circular_and_home_row():
+    cleaned = clean_sbp_html(b"""
+        <html><body>
+          <table>
+            <tr><td><p>1. Banks shall report monthly to the State Bank of Pakistan and retain supporting records for inspection by supervisors and internal audit teams.</p></td></tr>
+            <tr><td><p>2. The submission must include transaction summaries, exception reports, account-level reconciliations, evidence of management review, and any remediation steps taken after control failures so the circular body remains substantially longer than the navigation footer.</p></td></tr>
+            <tr>
+              <td>
+                <a href="../../circulars/index.asp"><strong>Back to Circular Page</strong></a>
+                <strong>/</strong>
+                <a href="../index.htm"><strong>Home Page</strong></a>
+              </td>
+            </tr>
+          </table>
+        </body></html>
+    """)
+
+    assert "Back to Circular Page" not in cleaned
+    assert "Home Page" not in cleaned
+    assert "Banks shall report monthly" in cleaned
 
 
 def test_pdf_page_cleaning_removes_repeated_furniture_and_dehyphenates():

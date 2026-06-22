@@ -19,6 +19,50 @@ _TEXT_BLOCKS = {
     "ol", "p", "pre", "section", "table", "tbody", "thead", "tfoot", "tr", "ul",
 }
 
+_ROW_NAV_PATTERNS = {
+    "back to circular page",
+    "back to main circular page",
+    "home page",
+    "back to home page",
+}
+
+
+def _normalize_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value.replace("\xa0", " ")).strip().lower()
+
+
+def _is_navigation_row(row: Tag) -> bool:
+    row_text = _normalize_text(row.get_text(" ", strip=True))
+    if not row_text or len(row_text) > 160:
+        return False
+
+    if any(pattern in row_text for pattern in _ROW_NAV_PATTERNS):
+        return True
+
+    links = row.find_all("a")
+    if not links or len(links) > 4:
+        return False
+
+    link_texts = {_normalize_text(link.get_text(" ", strip=True)) for link in links}
+    link_hrefs = {link.get("href", "").strip().lower() for link in links}
+
+    has_home_link = (
+        any(text in {"home", "home page"} for text in link_texts)
+        or any(href.endswith(("/index.asp", "/index.htm", "/index.html")) for href in link_hrefs)
+    )
+    has_circular_link = (
+        any("circular page" in text for text in link_texts)
+        or any("circulars/index" in href for href in link_hrefs)
+    )
+    return has_home_link and has_circular_link
+
+
+def _is_navigation_link_group(tag: Tag) -> bool:
+    text = _normalize_text(tag.get_text(" ", strip=True))
+    if not text or len(text) > 120:
+        return False
+    return "home page" in text and "circular page" in text
+
 
 def extract_sbp_text(html_content: bytes) -> str:
     """Extract readable text while preserving structural block boundaries."""
@@ -140,17 +184,25 @@ def clean_sbp_html(html_content: bytes, base_url: str = "") -> str:
             table.decompose()
             continue
         for tr in table.find_all("tr"):
-            row_text = tr.get_text(strip=True).lower()
+            row_text = _normalize_text(tr.get_text(" ", strip=True))
             if not row_text:
                 tr.decompose()
                 continue
-            # if len(row_text) < 100 and any(p in row_text for p in NAV_PATTERNS):
-            #     tr.decompose()
-            #     continue
+            if _is_navigation_row(tr):
+                tr.decompose()
+                continue
             imgs = tr.find_all("img")
             cells = tr.find_all(["td", "th"])
             if imgs and all(not td.get_text(strip=True) for td in cells):
                 tr.decompose()
+
+    for table in body.find_all("table"):
+        if not table.get_text(strip=True):
+            table.decompose()
+
+    for tag in body.find_all(["font", "span", "div", "p"]):
+        if _is_navigation_link_group(tag):
+            tag.decompose()
 
     for font in soup.find_all("font"):
         font.unwrap()

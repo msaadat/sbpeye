@@ -8,6 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+.env.local
 
 # Frontend
 frontend/node_modules/

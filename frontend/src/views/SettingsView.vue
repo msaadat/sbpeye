@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useToast } from 'primevue/usetoast'
 import Button from 'primevue/button'
 import Card from 'primevue/card'
@@ -9,6 +9,13 @@ import Message from 'primevue/message'
 import Password from 'primevue/password'
 import Select from 'primevue/select'
 import { getSettings, saveSettings, testEmbeddingConnection, testSettingsConnection } from '@/lib/api'
+
+type ProviderOption = {
+  name: string
+  value: string
+  baseUrl: string
+  apiKeyEnvVar: string
+}
 
 const toast = useToast()
 
@@ -20,24 +27,76 @@ const loadError = ref('')
 
 const provider = ref('lmstudio')
 const baseUrl = ref('http://localhost:1234/v1')
-const apiKey = ref('lm-studio')
+const apiKey = ref('')
+const apiKeyConfigured = ref(false)
+const apiKeyEnvVar = ref('AI_API_KEY')
+const clearApiKey = ref(false)
 const model = ref('local-model')
 const chatModel = ref('')
 const maxContextTokens = ref(4000)
+
 const embeddingProvider = ref('fastembed')
 const embeddingModel = ref('BAAI/bge-base-en-v1.5')
 const embeddingBaseUrl = ref('http://localhost:1234/v1')
-const embeddingApiKey = ref('lm-studio')
+const embeddingApiKey = ref('')
+const embeddingApiKeyConfigured = ref(false)
+const embeddingApiKeyEnvVar = ref('EMBEDDING_API_KEY')
+const clearEmbeddingApiKey = ref(false)
+const managedEnvFile = ref('.env.local')
 
-const providerOptions = [
-  { name: 'LM Studio (Local)', value: 'lmstudio' },
-  { name: 'OpenAI', value: 'openai' },
-  { name: 'Google Gemini', value: 'google' },
+const providerOptions: ProviderOption[] = [
+  { name: 'LM Studio (Local)', value: 'lmstudio', baseUrl: 'http://localhost:1234/v1', apiKeyEnvVar: 'AI_API_KEY' },
+  { name: 'OpenAI', value: 'openai', baseUrl: 'https://api.openai.com/v1', apiKeyEnvVar: 'OPENAI_API_KEY' },
+  { name: 'Google Gemini', value: 'google', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/', apiKeyEnvVar: 'GEMINI_API_KEY' },
+  { name: 'Groq', value: 'groq', baseUrl: 'https://api.groq.com/openai/v1', apiKeyEnvVar: 'GROQ_API_KEY' },
+  { name: 'OpenRouter', value: 'openrouter', baseUrl: 'https://openrouter.ai/api/v1', apiKeyEnvVar: 'OPENROUTER_API_KEY' },
+  { name: 'Custom OpenAI-Compatible', value: 'custom', baseUrl: 'http://localhost:1234/v1', apiKeyEnvVar: 'AI_API_KEY' },
 ]
+
 const embeddingProviderOptions = [
   { name: 'FastEmbed (Local)', value: 'fastembed' },
   { name: 'LM Studio', value: 'lmstudio' },
 ]
+
+const providerMeta = Object.fromEntries(providerOptions.map((option) => [option.value, option])) as Record<string, ProviderOption>
+
+const selectedProviderMeta = computed(() => providerMeta[provider.value] ?? providerMeta.custom)
+const externalProvider = computed(() => provider.value !== 'lmstudio')
+const embeddingNeedsApiKey = computed(() => embeddingProvider.value !== 'fastembed')
+
+watch(provider, (next, previous) => {
+  const nextMeta = providerMeta[next] ?? providerMeta.custom
+  const previousMeta = providerMeta[previous] ?? providerMeta.custom
+
+  if (!baseUrl.value || baseUrl.value === previousMeta.baseUrl) {
+    baseUrl.value = nextMeta.baseUrl
+  }
+
+  apiKeyEnvVar.value = nextMeta.apiKeyEnvVar
+  apiKeyConfigured.value = false
+  apiKey.value = ''
+  clearApiKey.value = false
+})
+
+watch(embeddingProvider, (next) => {
+  embeddingApiKeyConfigured.value = false
+  if (next === 'fastembed') {
+    clearEmbeddingApiKey.value = false
+    embeddingApiKey.value = ''
+  }
+})
+
+watch(apiKey, (value) => {
+  if (value.trim()) {
+    clearApiKey.value = false
+  }
+})
+
+watch(embeddingApiKey, (value) => {
+  if (value.trim()) {
+    clearEmbeddingApiKey.value = false
+  }
+})
 
 async function loadSettings() {
   loading.value = true
@@ -46,14 +105,21 @@ async function loadSettings() {
     const settings = await getSettings()
     provider.value = settings.provider
     baseUrl.value = settings.base_url
-    apiKey.value = settings.api_key
+    apiKey.value = ''
+    apiKeyConfigured.value = !!settings.api_key_configured
+    apiKeyEnvVar.value = settings.api_key_env_var || selectedProviderMeta.value.apiKeyEnvVar
+    clearApiKey.value = false
     model.value = settings.model
     chatModel.value = settings.chat_model || ''
     maxContextTokens.value = settings.max_context_tokens
     embeddingProvider.value = settings.embedding_provider
     embeddingModel.value = settings.embedding_model
     embeddingBaseUrl.value = settings.embedding_base_url
-    embeddingApiKey.value = settings.embedding_api_key
+    embeddingApiKey.value = ''
+    embeddingApiKeyConfigured.value = !!settings.embedding_api_key_configured
+    embeddingApiKeyEnvVar.value = settings.embedding_api_key_env_var || 'EMBEDDING_API_KEY'
+    clearEmbeddingApiKey.value = false
+    managedEnvFile.value = settings.managed_env_file || '.env.local'
   } catch (err) {
     loadError.value = err instanceof Error ? err.message : 'Failed to load settings'
   } finally {
@@ -68,6 +134,7 @@ async function handleSave() {
       provider: provider.value,
       base_url: baseUrl.value,
       api_key: apiKey.value,
+      clear_api_key: clearApiKey.value,
       model: model.value,
       chat_model: chatModel.value,
       max_context_tokens: maxContextTokens.value,
@@ -75,7 +142,20 @@ async function handleSave() {
       embedding_model: embeddingModel.value,
       embedding_base_url: embeddingBaseUrl.value,
       embedding_api_key: embeddingApiKey.value,
+      clear_embedding_api_key: clearEmbeddingApiKey.value,
     })
+
+    apiKey.value = ''
+    apiKeyConfigured.value = !!result.settings.api_key_configured
+    apiKeyEnvVar.value = result.settings.api_key_env_var || selectedProviderMeta.value.apiKeyEnvVar
+    clearApiKey.value = false
+    maxContextTokens.value = result.settings.max_context_tokens
+    embeddingApiKey.value = ''
+    embeddingApiKeyConfigured.value = !!result.settings.embedding_api_key_configured
+    embeddingApiKeyEnvVar.value = result.settings.embedding_api_key_env_var || 'EMBEDDING_API_KEY'
+    clearEmbeddingApiKey.value = false
+    managedEnvFile.value = result.settings.managed_env_file || '.env.local'
+
     toast.add({ severity: 'success', summary: 'Saved', detail: result.message, life: 3000 })
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error'
@@ -116,6 +196,16 @@ async function handleTest() {
   } finally {
     testing.value = false
   }
+}
+
+function markApiKeyForRemoval() {
+  clearApiKey.value = true
+  apiKey.value = ''
+}
+
+function markEmbeddingKeyForRemoval() {
+  clearEmbeddingApiKey.value = true
+  embeddingApiKey.value = ''
 }
 
 onMounted(() => {
@@ -170,7 +260,7 @@ onMounted(() => {
             <span>Base URL</span>
             <InputText
               v-model="baseUrl"
-              placeholder="http://localhost:1234/v1"
+              :placeholder="selectedProviderMeta.baseUrl"
               :disabled="loading"
             />
           </label>
@@ -180,7 +270,7 @@ onMounted(() => {
               v-model="apiKey"
               :feedback="false"
               toggle-mask
-              placeholder="sk-... or lm-studio"
+              :placeholder="externalProvider ? 'Enter a new token to replace the saved one' : 'Optional for LM Studio'"
               :disabled="loading"
             />
           </label>
@@ -188,7 +278,7 @@ onMounted(() => {
             <span>Default model</span>
             <InputText
               v-model="model"
-              placeholder="gpt-4o-mini, gemini-1.5-flash, local-model"
+              placeholder="Enter the provider model ID"
               :disabled="loading"
             />
           </label>
@@ -201,7 +291,7 @@ onMounted(() => {
             />
           </label>
           <label>
-            <span>Max context tokens</span>
+            <span>Max context tokens (auto-detected when available)</span>
             <InputNumber
               v-model="maxContextTokens"
               :min="500"
@@ -209,6 +299,22 @@ onMounted(() => {
               :disabled="loading"
             />
           </label>
+        </div>
+        <Message severity="secondary" :closable="false">
+          Token env var: <code>{{ apiKeyEnvVar }}</code>. <span v-if="apiKeyConfigured && !clearApiKey">A token is currently saved. Leave the field blank to keep it.</span><span v-else-if="clearApiKey">The saved token will be removed on the next save.</span><span v-else>No token is currently saved for this provider.</span>
+        </Message>
+        <Message severity="success" :closable="false">
+          Saved LLM provider, URL, model, and token changes apply to the next request. No server restart is required.
+        </Message>
+        <div class="button-row">
+          <Button
+            v-if="apiKeyConfigured && !clearApiKey"
+            label="Remove saved token"
+            severity="secondary"
+            text
+            :disabled="loading || saving"
+            @click="markApiKeyForRemoval"
+          />
         </div>
       </template>
     </Card>
@@ -226,18 +332,37 @@ onMounted(() => {
             <InputText v-model="embeddingModel" placeholder="BAAI/bge-base-en-v1.5" :disabled="loading" />
           </label>
           <label>
-            <span>LM Studio base URL</span>
+            <span>Embedding base URL</span>
             <InputText v-model="embeddingBaseUrl" placeholder="http://localhost:1234/v1" :disabled="loading || embeddingProvider !== 'lmstudio'" />
           </label>
           <label>
-            <span>LM Studio API key</span>
-            <Password v-model="embeddingApiKey" :feedback="false" toggle-mask placeholder="lm-studio" :disabled="loading || embeddingProvider !== 'lmstudio'" />
+            <span>Embedding API key</span>
+            <Password
+              v-model="embeddingApiKey"
+              :feedback="false"
+              toggle-mask
+              :placeholder="embeddingNeedsApiKey ? 'Enter a new token to replace the saved one' : 'Not used by FastEmbed'"
+              :disabled="loading || !embeddingNeedsApiKey"
+            />
           </label>
         </div>
-        <Message severity="warn" :closable="false">
-          Save and restart the server, then run <code>sbpeye reindex</code> after changing the provider or model.
+        <Message severity="secondary" :closable="false">
+          Embedding token env var: <code>{{ embeddingApiKeyEnvVar }}</code>. <span v-if="embeddingProvider === 'fastembed'">FastEmbed does not use an API key.</span><span v-else-if="embeddingApiKeyConfigured && !clearEmbeddingApiKey">A token is currently saved. Leave the field blank to keep it.</span><span v-else-if="clearEmbeddingApiKey">The saved embedding token will be removed on the next save.</span><span v-else>No embedding token is currently saved.</span>
         </Message>
-        <Button label="Test embeddings" icon="pi pi-bolt" :loading="testingEmbeddings" :disabled="loading || saving" @click="handleEmbeddingTest" />
+        <Message severity="warn" :closable="false">
+          Run <code>sbpeye reindex</code> after changing the embedding provider or model so stored vectors remain compatible. No server restart is required.
+        </Message>
+        <div class="button-row">
+          <Button
+            v-if="embeddingProvider !== 'fastembed' && embeddingApiKeyConfigured && !clearEmbeddingApiKey"
+            label="Remove saved embedding token"
+            severity="secondary"
+            text
+            :disabled="loading || saving"
+            @click="markEmbeddingKeyForRemoval"
+          />
+          <Button label="Test embeddings" icon="pi pi-bolt" :loading="testingEmbeddings" :disabled="loading || saving" @click="handleEmbeddingTest" />
+        </div>
       </template>
     </Card>
   </section>

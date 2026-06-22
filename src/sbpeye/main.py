@@ -16,10 +16,11 @@ import uuid
 from .database import PROJECT_ROOT, engine, Base, get_db, SessionLocal, has_vector_store_data
 from .models import AIGenerationJob, Attachment, CachedDocument, SyncStatus, Circular, CircularRelationship, EcoDataSeries, EcoDataEntry, Settings, ChatSession, ChatMessage
 from .search import search_engine
-from .ai import AIConfig, get_ai_client
+from .ai import AIClient, AIConfig, get_ai_client, get_provider_api_key, get_provider_definition, normalize_provider
 from .circular_ai import GENERATION_ACTIONS, generation_job_payload, run_generation_job
 from .checklist_export import build_checklist_workbook
 from .embeddings import EmbeddingConfig, create_embedding_backend
+from .env import managed_env_path, set_managed_env_value, unset_managed_env_value
 from .link_routing import (
     DOCUMENT_EXTENSIONS,
     attachment_info as _attachment_info,
@@ -114,24 +115,71 @@ def _circular_summary(
 
 
 def _settings_payload(config: AIConfig, embedding: EmbeddingConfig) -> dict:
+    ai_secret = AIConfig.secret_state(config.provider)
+    embedding_secret = EmbeddingConfig.secret_state(embedding.provider)
     return {
         "provider": config.provider,
         "base_url": config.base_url,
-        "api_key": config.api_key,
+        "api_key": "",
+        "api_key_configured": ai_secret["api_key_configured"],
+        "api_key_env_var": ai_secret["api_key_env_var"],
         "model": config.model,
         "chat_model": config.chat_model,
         "max_context_tokens": config.max_context_tokens,
         "ai_provider": config.provider,
         "ai_base_url": config.base_url,
-        "ai_api_key": config.api_key,
+        "ai_api_key": "",
         "ai_model": config.model,
         "ai_chat_model": config.chat_model,
         "ai_max_context_tokens": config.max_context_tokens,
         "embedding_provider": embedding.provider,
         "embedding_model": embedding.model,
         "embedding_base_url": embedding.base_url,
-        "embedding_api_key": embedding.api_key,
+        "embedding_api_key": "",
+        "embedding_api_key_configured": embedding_secret["api_key_configured"],
+        "embedding_api_key_env_var": embedding_secret["api_key_env_var"],
+        "managed_env_file": str(managed_env_path().name),
     }
+
+
+def _delete_setting_key(db: Session, key: str) -> bool:
+    row = db.query(Settings).filter(Settings.key == key).first()
+    if not row:
+        return False
+    db.delete(row)
+    return True
+
+
+def _purge_legacy_secret_settings(db: Session) -> bool:
+    changed = False
+    for key in ("ai_api_key", "embedding_api_key"):
+        changed = _delete_setting_key(db, key) or changed
+    if changed:
+        db.commit()
+    return changed
+
+
+def _save_ai_secret(provider: str, api_key: str | None, clear_secret: bool) -> None:
+    definition = get_provider_definition(provider)
+    secret_state = AIConfig.secret_state(provider)
+    target_env_var = definition.api_key_env_vars[0]
+    if clear_secret:
+        unset_managed_env_value(str(secret_state["api_key_env_var"]))
+        return
+    if api_key is None or not api_key.strip():
+        return
+    set_managed_env_value(target_env_var, api_key.strip())
+
+
+def _save_embedding_secret(api_key: str | None, clear_secret: bool) -> None:
+    target_env_var = "EMBEDDING_API_KEY"
+    secret_state = EmbeddingConfig.secret_state()
+    if clear_secret:
+        unset_managed_env_value(str(secret_state["api_key_env_var"]))
+        return
+    if api_key is None or not api_key.strip():
+        return
+    set_managed_env_value(target_env_var, api_key.strip())
 
 
 def _lazy_index_circular(circular_id: str) -> None:
@@ -175,6 +223,11 @@ def fail_interrupted_ai_jobs() -> None:
 @asynccontextmanager
 async def app_lifespan(_app: FastAPI):
     fail_interrupted_ai_jobs()
+    db = SessionLocal()
+    try:
+        _purge_legacy_secret_settings(db)
+    finally:
+        db.close()
     yield
 
 
@@ -1036,6 +1089,7 @@ async def settings_page():
 
 @app.get("/api/settings")
 async def get_settings(db: Session = Depends(get_db)):
+    _purge_legacy_secret_settings(db)
     config = AIConfig.from_db(db) or AIConfig.from_env()
     embedding = EmbeddingConfig.from_db(db)
     return _settings_payload(config, embedding)
@@ -1044,25 +1098,56 @@ async def get_settings(db: Session = Depends(get_db)):
 @app.post("/api/settings")
 async def save_settings(request: Request, db: Session = Depends(get_db)):
     data = await request.json()
+    provider = normalize_provider(data.get("provider", data.get("ai_provider", "lmstudio")))
+    provider_definition = get_provider_definition(provider)
     config = AIConfig(
-        provider=data.get("provider", data.get("ai_provider", "lmstudio")),
-        base_url=data.get("base_url", data.get("ai_base_url", "http://localhost:1234/v1")),
-        api_key=data.get("api_key", data.get("ai_api_key", "lm-studio")),
+        provider=provider,
+        base_url=(
+            data.get("base_url")
+            or data.get("ai_base_url")
+            or provider_definition.default_base_url
+        ),
+        api_key="",
         model=data.get("model", data.get("ai_model", "local-model")),
         chat_model=data.get("chat_model", data.get("ai_chat_model", "")),
         max_context_tokens=int(data.get("max_context_tokens", data.get("ai_max_context_tokens", 4000))),
     )
+    _save_ai_secret(
+        provider=provider,
+        api_key=data.get("api_key", data.get("ai_api_key")),
+        clear_secret=bool(data.get("clear_api_key")),
+    )
+    config.api_key, _ = get_provider_api_key(provider)
+    detected_context_window = AIClient(config).detect_context_window()
+    if detected_context_window is not None:
+        config.max_context_tokens = detected_context_window
     config.save_to_db(db)
     embedding = EmbeddingConfig(
         provider=data.get("embedding_provider", "fastembed"),
         model=data.get("embedding_model", "BAAI/bge-base-en-v1.5"),
         base_url=data.get("embedding_base_url", "http://localhost:1234/v1"),
-        api_key=data.get("embedding_api_key", "lm-studio"),
+        api_key="",
     )
     embedding.save_to_db(db)
+    _save_embedding_secret(
+        api_key=data.get("embedding_api_key"),
+        clear_secret=bool(data.get("clear_embedding_api_key")),
+    )
+    _purge_legacy_secret_settings(db)
+    config = AIConfig.from_db(db) or AIConfig.from_env()
+    embedding = EmbeddingConfig.from_db(db)
+    context_message = (
+        f" Provider context window detected: {detected_context_window:,} tokens."
+        if detected_context_window is not None
+        else " Provider context metadata was unavailable; the configured token limit was retained."
+    )
     return {
-        "message": "Settings saved. Restart the server and run sbpeye reindex after changing the embedding backend or model.",
+        "message": (
+            "Settings saved. LLM provider changes apply immediately."
+            f"{context_message} Run sbpeye reindex after changing the embedding provider or model."
+        ),
         "settings": _settings_payload(config, embedding),
+        "context_window_detected": detected_context_window is not None,
     }
 
 
@@ -1354,16 +1439,16 @@ async def export_search_csv(
         sort_by=sort_by,
         tag=tag,
     )
-    
+
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["Circular Ref", "Title", "Department", "Date", "Url"])
-    
+
     for r in results:
         c = r["circular"]
         date_str = c.date.strftime('%Y-%m-%d') if c.date else 'N/A'
         writer.writerow([c.reference, c.title, c.department, date_str, c.url])
-        
+
     output.seek(0)
     return StreamingResponse(
         iter([output.getvalue()]),
@@ -1378,12 +1463,12 @@ async def batch_download(
 ):
     circulars = db.query(Circular).filter(Circular.id.in_(circular_ids)).all()
     zip_buffer = io.BytesIO()
-    
+
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
         for c in circulars:
             if not c.url:
                 continue
-                
+
             # Safely create a file name
             safe_ref = (c.reference or c.id).replace("/", "_").replace("\\", "_")
             if c.url.lower().endswith(".pdf"):
@@ -1436,7 +1521,7 @@ async def batch_download(
                         local_path.read_bytes(),
                     )
             time.sleep(0.5) # Be gentle to SBP servers
-            
+
     zip_buffer.seek(0)
     return StreamingResponse(
         iter([zip_buffer.getvalue()]),

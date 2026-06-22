@@ -12,6 +12,10 @@ from openai import BadRequestError, OpenAI
 from sqlalchemy.orm import Session
 
 from .checklist import compact_required_checklist
+from .env import load_app_env, resolve_env_value
+
+
+load_app_env()
 
 
 TAG_TAXONOMY = [
@@ -146,6 +150,77 @@ TOOLS = [
     }
 ]
 
+
+@dataclass(frozen=True)
+class ProviderDefinition:
+    value: str
+    label: str
+    default_base_url: str
+    api_key_env_vars: tuple[str, ...]
+    default_api_key: str = ""
+
+
+PROVIDER_DEFINITIONS = {
+    "lmstudio": ProviderDefinition(
+        value="lmstudio",
+        label="LM Studio (Local)",
+        default_base_url="http://localhost:1234/v1",
+        api_key_env_vars=("AI_API_KEY",),
+        default_api_key="lm-studio",
+    ),
+    "openai": ProviderDefinition(
+        value="openai",
+        label="OpenAI",
+        default_base_url="https://api.openai.com/v1",
+        api_key_env_vars=("OPENAI_API_KEY", "AI_API_KEY"),
+    ),
+    "google": ProviderDefinition(
+        value="google",
+        label="Google Gemini",
+        default_base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        api_key_env_vars=("GEMINI_API_KEY", "GOOGLE_API_KEY", "AI_API_KEY"),
+    ),
+    "groq": ProviderDefinition(
+        value="groq",
+        label="Groq",
+        default_base_url="https://api.groq.com/openai/v1",
+        api_key_env_vars=("GROQ_API_KEY", "AI_API_KEY"),
+    ),
+    "openrouter": ProviderDefinition(
+        value="openrouter",
+        label="OpenRouter",
+        default_base_url="https://openrouter.ai/api/v1",
+        api_key_env_vars=("OPENROUTER_API_KEY", "AI_API_KEY"),
+    ),
+    "custom": ProviderDefinition(
+        value="custom",
+        label="Custom OpenAI-Compatible",
+        default_base_url="http://localhost:1234/v1",
+        api_key_env_vars=("AI_API_KEY",),
+    ),
+}
+
+
+def normalize_provider(provider: str | None) -> str:
+    value = (provider or "lmstudio").strip().lower()
+    aliases = {
+        "gemini": "google",
+        "lm_studio": "lmstudio",
+    }
+    return aliases.get(value, value if value in PROVIDER_DEFINITIONS else "custom")
+
+
+def get_provider_definition(provider: str | None) -> ProviderDefinition:
+    return PROVIDER_DEFINITIONS[normalize_provider(provider)]
+
+
+def get_provider_api_key(provider: str | None) -> tuple[str, str | None]:
+    definition = get_provider_definition(provider)
+    return resolve_env_value(
+        *definition.api_key_env_vars,
+        default=definition.default_api_key,
+    )
+
 @dataclass
 class AIConfig:
     provider: str = "lmstudio"
@@ -161,10 +236,13 @@ class AIConfig:
 
     @staticmethod
     def from_env() -> "AIConfig":
+        provider = normalize_provider(os.getenv("AI_PROVIDER", "lmstudio"))
+        definition = get_provider_definition(provider)
+        api_key, _ = get_provider_api_key(provider)
         return AIConfig(
-            provider=os.getenv("AI_PROVIDER", "lmstudio"),
-            base_url=os.getenv("AI_BASE_URL", "http://localhost:1234/v1"),
-            api_key=os.getenv("AI_API_KEY", "lm-studio"),
+            provider=provider,
+            base_url=os.getenv("AI_BASE_URL", definition.default_base_url),
+            api_key=api_key,
             model=os.getenv("AI_MODEL", "local-model"),
             chat_model=os.getenv("AI_CHAT_MODEL", ""),
             max_context_tokens=int(os.getenv("AI_MAX_CONTEXT_TOKENS", "4000")),
@@ -180,13 +258,16 @@ class AIConfig:
             kv = {r.key: r.value for r in rows}
             if "ai_provider" not in kv:
                 return None
+            provider = normalize_provider(kv.get("ai_provider", "lmstudio"))
+            env_config = AIConfig.from_env()
+            api_key, _ = get_provider_api_key(provider)
             return AIConfig(
-                provider=kv.get("ai_provider", "lmstudio"),
-                base_url=kv.get("ai_base_url", "http://localhost:1234/v1"),
-                api_key=kv.get("ai_api_key", "lm-studio"),
-                model=kv.get("ai_model", "local-model"),
+                provider=provider,
+                base_url=kv.get("ai_base_url", get_provider_definition(provider).default_base_url),
+                api_key=api_key,
+                model=kv.get("ai_model", env_config.model),
                 chat_model=kv.get("ai_chat_model", ""),
-                max_context_tokens=int(kv.get("ai_max_context_tokens", "4000")),
+                max_context_tokens=int(kv.get("ai_max_context_tokens", str(env_config.max_context_tokens))),
             )
         except Exception:
             return None
@@ -194,9 +275,8 @@ class AIConfig:
     def save_to_db(self, db):
         from .models import Settings
         for key, value in [
-            ("ai_provider", self.provider),
+            ("ai_provider", normalize_provider(self.provider)),
             ("ai_base_url", self.base_url),
-            ("ai_api_key", self.api_key),
             ("ai_model", self.model),
             ("ai_chat_model", self.chat_model),
             ("ai_max_context_tokens", str(self.max_context_tokens)),
@@ -208,6 +288,17 @@ class AIConfig:
                 db.add(Settings(key=key, value=value))
         db.commit()
 
+    @classmethod
+    def secret_state(cls, provider: str | None) -> dict[str, str | bool]:
+        normalized = normalize_provider(provider)
+        definition = get_provider_definition(normalized)
+        api_key, env_var = get_provider_api_key(normalized)
+        return {
+            "provider": normalized,
+            "api_key_configured": bool(env_var and api_key),
+            "api_key_env_var": env_var or definition.api_key_env_vars[0],
+        }
+
 
 class AIClient:
     def __init__(self, config: AIConfig | None = None):
@@ -217,15 +308,46 @@ class AIClient:
         self._client = self._create_client()
 
     def _create_client(self) -> OpenAI:
-        if self.config.provider == "google":
-            return OpenAI(
-                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-                api_key=self.config.api_key,
-            )
-        return OpenAI(
-            base_url=self.config.base_url,
-            api_key=self.config.api_key,
-        )
+        kwargs: dict[str, Any] = {
+            "base_url": self.config.base_url,
+            "api_key": self.config.api_key,
+        }
+        if self.config.provider == "openrouter":
+            kwargs["default_headers"] = {"X-Title": "SBPEye"}
+        return OpenAI(**kwargs)
+
+    @staticmethod
+    def _model_metadata(model: Any) -> dict[str, Any]:
+        if isinstance(model, dict):
+            return model
+        if hasattr(model, "model_dump"):
+            return model.model_dump()
+        return {}
+
+    def detect_context_window(self) -> int | None:
+        """Return the smallest provider-reported window used by this config."""
+        if self.config.provider in {"openai", "google"}:
+            return None
+        try:
+            response = self._client.with_options(timeout=5.0, max_retries=0).models.list()
+        except Exception:
+            return None
+
+        windows: dict[str, int] = {}
+        for model in response.data:
+            metadata = self._model_metadata(model)
+            model_id = str(metadata.get("id") or getattr(model, "id", ""))
+            for key in ("context_window", "context_length", "max_context_length"):
+                value = metadata.get(key)
+                if isinstance(value, int) and value > 0:
+                    windows[model_id] = value
+                    break
+
+        model_ids = {self.config.model, self.config.effective_chat_model}
+        detected = [windows.get(model_id) for model_id in model_ids]
+        if any(value is None for value in detected):
+            return None
+        return min(value for value in detected if value is not None)
 
     def _complete(
         self,

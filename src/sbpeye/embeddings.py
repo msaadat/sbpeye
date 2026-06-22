@@ -8,6 +8,11 @@ import numpy as np
 from openai import OpenAI
 from sqlalchemy import text
 
+from .env import load_app_env, resolve_env_value
+
+
+load_app_env()
+
 
 DEFAULT_FASTEMBED_MODEL = "BAAI/bge-base-en-v1.5"
 DEFAULT_LM_STUDIO_URL = "http://localhost:1234/v1"
@@ -22,11 +27,12 @@ class EmbeddingConfig:
 
     @classmethod
     def from_env(cls) -> "EmbeddingConfig":
+        api_key, _ = resolve_env_value("EMBEDDING_API_KEY", default="lm-studio")
         return cls(
             provider=os.getenv("EMBEDDING_PROVIDER", "fastembed").strip().lower(),
             model=os.getenv("EMBEDDING_MODEL", DEFAULT_FASTEMBED_MODEL).strip(),
             base_url=os.getenv("EMBEDDING_BASE_URL", DEFAULT_LM_STUDIO_URL).strip(),
-            api_key=os.getenv("EMBEDDING_API_KEY", "lm-studio").strip(),
+            api_key=api_key.strip(),
         )
 
     @classmethod
@@ -51,7 +57,7 @@ class EmbeddingConfig:
             provider=values.get("embedding_provider", config.provider).strip().lower(),
             model=values.get("embedding_model", config.model).strip(),
             base_url=values.get("embedding_base_url", config.base_url).strip(),
-            api_key=values.get("embedding_api_key", config.api_key).strip(),
+            api_key=config.api_key,
         )
 
     def save_to_db(self, db) -> None:
@@ -61,7 +67,6 @@ class EmbeddingConfig:
             "embedding_provider": self.provider,
             "embedding_model": self.model,
             "embedding_base_url": self.base_url,
-            "embedding_api_key": self.api_key,
         }
         for key, value in values.items():
             row = db.query(Settings).filter(Settings.key == key).first()
@@ -87,8 +92,17 @@ class EmbeddingConfig:
             provider=values.get("embedding_provider", config.provider).strip().lower(),
             model=values.get("embedding_model", config.model).strip(),
             base_url=values.get("embedding_base_url", config.base_url).strip(),
-            api_key=values.get("embedding_api_key", config.api_key).strip(),
+            api_key=config.api_key,
         )
+
+    @classmethod
+    def secret_state(cls, provider: str | None = None) -> dict[str, str | bool]:
+        normalized_provider = (provider or "fastembed").strip().lower()
+        api_key, env_var = resolve_env_value("EMBEDDING_API_KEY", default="")
+        return {
+            "api_key_configured": normalized_provider != "fastembed" and bool(api_key),
+            "api_key_env_var": env_var or "EMBEDDING_API_KEY",
+        }
 
 
 class EmbeddingBackend(Protocol):

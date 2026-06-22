@@ -252,6 +252,9 @@ export interface SettingsPayload {
   provider: string
   base_url: string
   api_key: string
+  api_key_configured?: boolean
+  api_key_env_var?: string
+  clear_api_key?: boolean
   model: string
   chat_model: string
   max_context_tokens: number
@@ -265,6 +268,10 @@ export interface SettingsPayload {
   embedding_model: string
   embedding_base_url: string
   embedding_api_key: string
+  embedding_api_key_configured?: boolean
+  embedding_api_key_env_var?: string
+  clear_embedding_api_key?: boolean
+  managed_env_file?: string
 }
 
 export interface ChatSession {
@@ -486,8 +493,8 @@ export async function getSettings(): Promise<SettingsPayload> {
   return requestJson<SettingsPayload>('/settings')
 }
 
-export async function saveSettings(payload: SettingsPayload): Promise<{ message: string; settings: SettingsPayload }> {
-  return requestJson<{ message: string; settings: SettingsPayload }>('/settings', {
+export async function saveSettings(payload: SettingsPayload): Promise<{ message: string; settings: SettingsPayload; context_window_detected: boolean }> {
+  return requestJson<{ message: string; settings: SettingsPayload; context_window_detected: boolean }>('/settings', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

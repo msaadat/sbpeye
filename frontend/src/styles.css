@@ -1530,12 +1530,10 @@ a {
   color: #aee0cc;
 }
 
-.checklist-pill i {
-  color: var(--sbp-green);
-}
-
-.checklist-pill i.action-required {
-  color: var(--p-orange-500);
+.result-reference-location {
+  color: var(--sbp-green-strong);
+  font-size: 0.68rem;
+  font-weight: 600;
 }
 
 .relationship-pill {

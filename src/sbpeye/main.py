@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, extract
 from urllib.parse import urljoin, urlparse, urlencode
 from pathlib import Path
+from contextlib import asynccontextmanager
 import requests as http_requests
 from bs4 import BeautifulSoup
 import re as _re
@@ -17,6 +18,7 @@ from .models import AIGenerationJob, Attachment, CachedDocument, SyncStatus, Cir
 from .search import search_engine
 from .ai import AIConfig, get_ai_client
 from .circular_ai import GENERATION_ACTIONS, generation_job_payload, run_generation_job
+from .checklist_export import build_checklist_workbook
 from .embeddings import EmbeddingConfig, create_embedding_backend
 from .link_routing import (
     DOCUMENT_EXTENSIONS,
@@ -35,7 +37,7 @@ from .scraper.circulars import (
     process_circular,
 )
 from .scraper.ecodata import scrape_ecodata
-from .scraper.clean_html import clean_sbp_html
+from .scraper.clean_html import clean_sbp_html, extract_sbp_text
 from .scraper.ecodata_index import scrape_ecodata_index
 from .scraper.pdf_summarizer import summarize_pdf, is_summarizable
 from datetime import datetime, timedelta
@@ -61,6 +63,16 @@ def _safe_json_list(value: str | None) -> list:
         return []
 
 
+def _safe_json_object(value: str | None) -> dict | None:
+    if not value:
+        return None
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, dict) else None
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
 def _normalize_circular_ids(value) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -79,6 +91,8 @@ def _circular_summary(
     match_source: str = "circular",
     attachment_id: str | None = None,
     attachment_filename: str | None = None,
+    source_ref: str | None = None,
+    source_page: int | None = None,
 ) -> dict:
     return {
         "id": circular.id,
@@ -94,6 +108,8 @@ def _circular_summary(
         "match_source": match_source,
         "attachment_id": attachment_id,
         "attachment_filename": attachment_filename,
+        "source_ref": source_ref,
+        "source_page": source_page,
     }
 
 
@@ -139,10 +155,37 @@ def _lazy_index_circular(circular_id: str) -> None:
 SBP_BASE = "https://www.sbp.org.pk"
 
 
+def fail_interrupted_ai_jobs() -> None:
+    """Release jobs left active when the previous server process stopped."""
+    db = SessionLocal()
+    try:
+        interrupted = db.query(AIGenerationJob).filter(
+            AIGenerationJob.status.in_(("queued", "running"))
+        ).all()
+        for job in interrupted:
+            job.status = "failed"
+            job.error = "Generation was interrupted by a server restart."
+            job.completed_at = datetime.utcnow()
+        if interrupted:
+            db.commit()
+    finally:
+        db.close()
+
+
+@asynccontextmanager
+async def app_lifespan(_app: FastAPI):
+    fail_interrupted_ai_jobs()
+    yield
+
+
 # Create all tables
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="SBPEye", description="Independent SBP Circulars & EcoData Indexer")
+app = FastAPI(
+    title="SBPEye",
+    description="Independent SBP Circulars & EcoData Indexer",
+    lifespan=app_lifespan,
+)
 
 # Setup SPA static files
 os.makedirs("src/sbpeye/static", exist_ok=True)
@@ -326,6 +369,8 @@ def search_circulars(
                 r.get("match_source", "circular"),
                 r.get("attachment_id"),
                 r.get("attachment_filename"),
+                r.get("source_ref"),
+                r.get("source_page"),
             )
             for r in results
         ],
@@ -415,7 +460,7 @@ async def open_circular_by_url(
     try:
         raw_html = fetch_page_cached(url)
         soup = BeautifulSoup(raw_html, "html.parser")
-        content_text = soup.get_text(" ", strip=True)
+        content_text = extract_sbp_text(raw_html)
         if not content_text:
             raise ValueError("The SBP page did not contain readable content.")
         heading = soup.find(["h1", "h2"])
@@ -461,10 +506,13 @@ async def refresh_circular(
                 raise ValueError("The refreshed SBP source is not a PDF.")
             return _circular_summary(circular)
         soup = BeautifulSoup(raw_html, "html.parser")
-        content_text = soup.get_text(" ", strip=True)
+        content_text = extract_sbp_text(raw_html)
         if not content_text:
             raise ValueError("The refreshed SBP page did not contain readable content.")
-        circular.content_text = content_text
+        if content_text != circular.content_text:
+            circular.content_text = content_text
+            circular.compliance_checklist = None
+            circular.checklist_generated_at = None
         db.commit()
     except Exception as exc:
         db.rollback()
@@ -569,7 +617,7 @@ async def get_circular_detail(circular_id: str, db: Session = Depends(get_db)):
         "url": c.url,
         "summary": c.summary,
         "tags": _safe_json_list(c.tags),
-        "compliance_checklist": _safe_json_list(c.compliance_checklist),
+        "compliance_checklist": _safe_json_object(c.compliance_checklist),
         "status": c.status or "active",
         "attachments": [
             {
@@ -599,6 +647,25 @@ async def get_circular_detail(circular_id: str, db: Session = Depends(get_db)):
     }
 
 
+@app.get("/api/circulars/{circular_id}/checklist.xlsx")
+async def export_circular_checklist(circular_id: str, db: Session = Depends(get_db)):
+    circular = db.query(Circular).filter(Circular.id == circular_id).first()
+    if not circular:
+        return JSONResponse({"error": "Circular not found"}, status_code=404)
+
+    checklist = _safe_json_object(circular.compliance_checklist)
+    if not checklist:
+        return JSONResponse({"error": "This circular does not have a generated checklist"}, status_code=404)
+
+    safe_reference = _re.sub(r"[^A-Za-z0-9._-]+", "_", circular.reference or circular.id).strip("._")
+    filename = f"{safe_reference or 'circular'}_checklist.xlsx"
+    return StreamingResponse(
+        build_checklist_workbook(circular, checklist),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @app.post("/api/circulars/{circular_id}/generate")
 async def generate_circular_intelligence(
     circular_id: str,
@@ -623,7 +690,13 @@ async def generate_circular_intelligence(
     circular = db.query(Circular).filter(Circular.id == circular_id).first()
     if not circular:
         return JSONResponse({"error": "Circular not found"}, status_code=404)
-    if not circular.content_text:
+    has_pdf_text = any(
+        (attachment.file_type or "").lower() == "pdf"
+        and attachment.extraction_status == "extracted"
+        and bool(attachment.content_text)
+        for attachment in circular.attachments
+    )
+    if not circular.content_text and not has_pdf_text:
         return JSONResponse(
             {"error": "This circular has no extracted content to analyze."},
             status_code=422,

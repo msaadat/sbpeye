@@ -1,5 +1,7 @@
 from datetime import datetime
 from pathlib import Path
+import json
+import re
 import uuid
 
 from bs4 import BeautifulSoup
@@ -274,6 +276,124 @@ def test_vectorize_attachment_writes_source_metadata(monkeypatch):
     assert collection.added["embeddings"]
     assert collection.added["metadatas"][0]["doc_type"] == "attachment"
     assert collection.added["metadatas"][0]["attachment_id"] == attachment.id
+
+
+def test_reextract_uses_local_cache_and_optionally_reindexes(monkeypatch, tmp_path):
+    db = make_session()
+    circular = make_circular()
+    circular.compliance_checklist = '{"source_units": []}'
+    attachment_path = tmp_path / "attachments" / "rules.pdf"
+    attachment_path.parent.mkdir(parents=True)
+    attachment_path.write_bytes(b"pdf")
+    circular.attachments = [
+        Attachment(
+            id="attachment-1",
+            circular_id=circular.id,
+            filename="rules.pdf",
+            original_url="https://www.sbp.org.pk/rules.pdf",
+            local_path="attachments/rules.pdf",
+            file_type="pdf",
+            content_text="Old PDF text",
+            extraction_status="extracted",
+            is_vectorized=1,
+        )
+    ]
+    db.add(circular)
+    db.commit()
+
+    html_cache = tmp_path / "html"
+    html_cache.mkdir()
+    cache_name = f"{uuid.uuid5(uuid.NAMESPACE_URL, circular.url)}.html"
+    (html_cache / cache_name).write_bytes(
+        b"<html><body><p>1. Banks shall report.</p></body></html>"
+    )
+    deleted = []
+    indexed = []
+    monkeypatch.setattr(scraper, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(scraper, "HTML_CACHE_DIR", html_cache)
+    monkeypatch.setattr(
+        scraper,
+        "extract_pdf_text",
+        lambda path: ("[[SBPEYE_PAGE:1]]\n2. Banks must retain records.", "extracted", None),
+    )
+    monkeypatch.setattr(
+        scraper,
+        "_delete_document_chunks",
+        lambda **kwargs: deleted.append(kwargs),
+    )
+    monkeypatch.setattr(
+        scraper,
+        "_index_circular",
+        lambda item, verbose=False: indexed.append(item.id),
+    )
+    monkeypatch.setattr(scraper, "vectorize_attachment", lambda *args, **kwargs: True)
+
+    result = scraper.reextract_circular_from_cache(db, circular, reindex=True)
+
+    assert result == {"changed": 2, "errors": 0, "indexed": 1}
+    assert circular.content_text == "1. Banks shall report."
+    assert circular.compliance_checklist is None
+    assert circular.attachments[0].content_text.startswith("[[SBPEYE_PAGE:1]]")
+    assert {tuple(value) for value in deleted} == {
+        ("circular_id",),
+        ("attachment_id_value",),
+    }
+    assert indexed == [circular.id]
+
+
+def test_attachment_checklist_diagnostic_prints_full_verbose_trace(
+    monkeypatch, capsys
+):
+    from sbpeye.ai import AIClient, AIConfig
+    from sbpeye.cli.commands import _run_attachment_checklist
+
+    db = make_session()
+    circular = make_circular()
+    circular.compliance_checklist = '{"existing": true}'
+    circular.attachments = [
+        Attachment(
+            id="attachment-diagnostic",
+            circular_id=circular.id,
+            filename="diagnostic.pdf",
+            original_url="https://www.sbp.org.pk/diagnostic.pdf",
+            file_type="pdf",
+            content_text="[[SBPEYE_PAGE:1]]\n1. Banks shall submit reports.",
+            extraction_status="extracted",
+        )
+    ]
+    db.add(circular)
+    db.commit()
+    client = AIClient(AIConfig())
+
+    def complete(system, user, **kwargs):
+        source_id = re.search(r"\[SOURCE_ID: ([^]]+)]", user).group(1)
+        return json.dumps({"items": [{
+            "requirement": "Banks shall submit reports.",
+            "classification": "required",
+            "source_unit_ids": [source_id],
+        }]})
+
+    monkeypatch.setattr(client, "_complete", complete)
+
+    result = _run_attachment_checklist(
+        db,
+        client,
+        attachment_id="attachment-diagnostic",
+        verbose=True,
+        delay=0,
+    )
+    output = capsys.readouterr().out
+
+    assert output.index("=== 1. RAW CONTENT ===") < output.index("=== 2. DOCLING ITEMS")
+    assert output.index("=== 2. DOCLING ITEMS") < output.index("=== 3. ANALYSIS BLOCKS")
+    assert output.index("=== 3. ANALYSIS BLOCKS") < output.index("=== 4. LLM EXTRACTION ===")
+    assert "--- RAW LLM OUTPUT: Page HTML" in output
+    assert '"classification": "required"' in output
+    assert "--- NORMALIZED BLOCK 1/1 ---" in output
+    assert "=== 5. FINAL CHECKLIST ===" in output
+    assert result["coverage_gaps"] == []
+    assert result["checklist_items"][0]["classification"] == "required"
+    assert circular.compliance_checklist == '{"existing": true}'
 
 
 def test_attachment_vectorize_by_id_reindexes_only_selected(monkeypatch):

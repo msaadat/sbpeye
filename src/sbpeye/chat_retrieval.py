@@ -5,9 +5,10 @@ from rank_bm25 import BM25Okapi
 from sqlalchemy.orm import Session, joinedload
 
 from .database import collection, embedding_backend
+from .checklist import prepare_reference_chunks
 from .documents import build_corpus
 from .models import Circular
-from .search import expand_query_tokens, prepare_chunks, tokenize
+from .search import expand_query_tokens, tokenize
 
 
 logger = logging.getLogger(__name__)
@@ -84,8 +85,8 @@ class ScopedChatRetriever:
         chunks: list[ScopedChunk] = []
         for circular in self.circulars:
             for document in build_corpus(circular):
-                prepared = prepare_chunks(document["doc_label"], document["text"])
-                for index, text in enumerate(prepared):
+                prepared = prepare_reference_chunks(document)
+                for index, item in enumerate(prepared):
                     chunks.append(
                         ScopedChunk(
                             chunk_id=f"{document['doc_id']}__chunk_{index}",
@@ -93,7 +94,7 @@ class ScopedChatRetriever:
                             document_id=document["doc_id"],
                             document_type=document["doc_type"],
                             label=document["doc_label"],
-                            text=text,
+                            text=item["text"],
                             chunk_index=index,
                         )
                     )

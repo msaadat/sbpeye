@@ -90,6 +90,49 @@ def process_url(url, dept, skip_llm, verbose):
     _show_stats()
 
 
+@circulars.command("reextract")
+@click.option("--url", help="Re-extract a single circular by URL")
+@click.option("--dept", "-d", multiple=True, help="Filter by department substring")
+@click.option("--year", "-y", multiple=True, help="Filter by year")
+@click.option("--limit", "-l", type=int, default=0, help="Max circulars (0=unlimited)")
+@click.option("--reindex", is_flag=True, help="Rebuild Chroma chunks after extraction")
+@click.option("--verbose", "-v", is_flag=True, help="Print extraction and indexing details")
+def reextract(url, dept, year, limit, reindex, verbose):
+    """Re-extract circular HTML and PDFs from local cache files."""
+    from sbpeye.scraper.circulars import reextract_circular_from_cache
+
+    db = SessionLocal()
+    try:
+        query = _year_filter(_dept_filter(_url_filter(db.query(Circular), url), dept), year)
+        circular_items = query.order_by(Circular.date.desc()).all()
+        if limit > 0:
+            circular_items = circular_items[:limit]
+        print(f"Re-extracting {len(circular_items)} circulars from local caches...")
+        totals = {"changed": 0, "errors": 0, "indexed": 0}
+        for index, circular in enumerate(circular_items, start=1):
+            result = reextract_circular_from_cache(
+                db,
+                circular,
+                reindex=reindex,
+                verbose=verbose,
+            )
+            for key in totals:
+                totals[key] += result[key]
+            print(
+                f"  [{index}/{len(circular_items)}] "
+                f"{circular.reference or circular.title[:60]}: "
+                f"changed={result['changed']} errors={result['errors']} "
+                f"indexed={result['indexed']}"
+            )
+        print(
+            "Re-extraction complete: "
+            f"changed={totals['changed']}, errors={totals['errors']}, "
+            f"indexed={totals['indexed']}"
+        )
+    finally:
+        db.close()
+
+
 @cli.group()
 def attachments():
     """Fetch and vectorize circular attachments."""
@@ -265,19 +308,29 @@ def tags(url, dept, year, limit, refresh, verbose, delay):
 
 
 @circulars.command()
+@click.option("--id", "attachment_id", help="Run a diagnostic checklist for one PDF attachment ID")
 @click.option("--url", help="Process a single circular by URL")
 @click.option("--dept", "-d", multiple=True, help="Only process circulars in these departments")
 @click.option("--year", "-y", multiple=True, help="Only process circulars from these years")
 @click.option("--limit", "-l", type=int, default=0, help="Max circulars to process (0=unlimited)")
 @click.option("--refresh", is_flag=True, help="Overwrite existing checklists")
-@click.option("--verbose", "-v", is_flag=True, help="Print extra details")
+@click.option("--verbose", "-v", is_flag=True, help="Print source metadata, parsed items, prompts, and each LLM response")
 @click.option("--delay", type=float, default=1.0, help="Delay between API calls in seconds")
-def checklist(url, dept, year, limit, refresh, verbose, delay):
+def checklist(attachment_id, url, dept, year, limit, refresh, verbose, delay):
     """Generate AI compliance checklists for circulars."""
     db = SessionLocal()
     try:
         client = get_ai_client(db)
-        _run_checklist(db, client, url, dept, year, limit, refresh, verbose, delay)
+        if attachment_id:
+            _run_attachment_checklist(
+                db,
+                client,
+                attachment_id=attachment_id,
+                verbose=verbose,
+                delay=delay,
+            )
+        else:
+            _run_checklist(db, client, url, dept, year, limit, refresh, verbose, delay)
     finally:
         db.close()
 
@@ -448,7 +501,7 @@ def stats_cmd():
 def reindex_cmd(dry_run):
     """Re-index all circulars and extracted attachments into ChromaDB."""
     from sbpeye.database import chroma_client, embedding_backend, embedding_config
-    from sbpeye.search import prepare_chunks
+    from sbpeye.checklist import prepare_reference_chunks
 
     COLLECTION_NAME = "circulars"
     BATCH_SIZE = 50
@@ -462,13 +515,23 @@ def reindex_cmd(dry_run):
         if dry_run:
             total_chunks = 0
             for c in circulars:
-                chunks = prepare_chunks(c.title or "", c.content_text or "")
-                total_chunks += len(chunks)
+                circular_document = {
+                    "doc_id": c.id,
+                    "doc_type": "circular",
+                    "doc_label": f"{c.department} - {c.reference or c.title}",
+                    "text": c.content_text or "",
+                    "file_type": "html",
+                }
+                total_chunks += len(prepare_reference_chunks(circular_document))
                 for attachment in c.attachments:
                     if attachment.content_text and attachment.content_text.strip():
-                        total_chunks += len(prepare_chunks(
-                            attachment.filename, attachment.content_text
-                        ))
+                        total_chunks += len(prepare_reference_chunks({
+                            "doc_id": attachment.id,
+                            "doc_type": "attachment",
+                            "doc_label": attachment.filename,
+                            "text": attachment.content_text,
+                            "file_type": attachment.file_type or "",
+                        }))
             print(
                 f"Would create {total_chunks} chunks "
                 f"(avg {total_chunks/max(total, 1):.1f} per circular)"
@@ -514,10 +577,16 @@ def reindex_cmd(dry_run):
 
         for i, c in enumerate(circulars):
             try:
-                chunks = prepare_chunks(c.title or "", c.content_text or "")
+                chunks = prepare_reference_chunks({
+                    "doc_id": c.id,
+                    "doc_type": "circular",
+                    "doc_label": f"{c.department} - {c.reference or c.title}",
+                    "text": c.content_text or "",
+                    "file_type": "html",
+                })
 
                 for ci, chunk in enumerate(chunks):
-                    batch_docs.append(chunk)
+                    batch_docs.append(chunk["text"])
                     batch_ids.append(f"{c.id}__chunk_{ci}")
                     batch_metas.append({
                         "circular_id": c.id,
@@ -526,17 +595,27 @@ def reindex_cmd(dry_run):
                         "url": c.url or "",
                         "department": c.department or "",
                         "chunk_index": ci,
+                        "ref": chunk["ref"],
+                        "unit_id": chunk["unit_id"],
+                        "source_start": chunk["source_start"],
+                        "source_end": chunk["source_end"],
+                        **({"page_start": chunk["page_start"]} if chunk["page_start"] else {}),
+                        **({"page_end": chunk["page_end"]} if chunk["page_end"] else {}),
                     })
 
                 for attachment in c.attachments:
                     if not attachment.content_text or not attachment.content_text.strip():
                         attachment.is_vectorized = 0
                         continue
-                    attachment_chunks = prepare_chunks(
-                        attachment.filename, attachment.content_text
-                    )
+                    attachment_chunks = prepare_reference_chunks({
+                        "doc_id": attachment.id,
+                        "doc_type": "attachment",
+                        "doc_label": attachment.filename,
+                        "text": attachment.content_text,
+                        "file_type": attachment.file_type or "",
+                    })
                     for ci, chunk in enumerate(attachment_chunks):
-                        batch_docs.append(chunk)
+                        batch_docs.append(chunk["text"])
                         batch_ids.append(f"{attachment.id}__chunk_{ci}")
                         batch_metas.append({
                             "circular_id": c.id,
@@ -547,6 +626,12 @@ def reindex_cmd(dry_run):
                             "url": attachment.original_url,
                             "department": c.department or "",
                             "chunk_index": ci,
+                            "ref": chunk["ref"],
+                            "unit_id": chunk["unit_id"],
+                            "source_start": chunk["source_start"],
+                            "source_end": chunk["source_end"],
+                            **({"page_start": chunk["page_start"]} if chunk["page_start"] else {}),
+                            **({"page_end": chunk["page_end"]} if chunk["page_end"] else {}),
                         })
                     attachment.is_vectorized = 1
                     indexed_attachments += 1
@@ -710,7 +795,13 @@ def _run_tags(db, client, url, dept, year, limit, refresh, verbose, delay):
     print(f"Tagging {len(circulars)} circulars...")
     processed = 0
     for c in circulars:
-        if not c.content_text:
+        has_pdf_text = any(
+            (attachment.file_type or "").lower() == "pdf"
+            and attachment.extraction_status == "extracted"
+            and bool(attachment.content_text)
+            for attachment in c.attachments
+        )
+        if not c.content_text and not has_pdf_text:
             continue
         try:
             tag_list = client.generate_tags(c.title, c.content_text)
@@ -730,13 +821,130 @@ def _run_tags(db, client, url, dept, year, limit, refresh, verbose, delay):
     print(f"\nTagged {processed}/{len(circulars)} circulars.")
 
 
+def _diagnostic_trace_printer():
+    llm_section_started = False
+
+    def trace(event, payload):
+        nonlocal llm_section_started
+        if event == "document":
+            document = payload["document"]
+            click.echo("\n=== 1. RAW CONTENT ===")
+            click.echo(f"Document ID: {document['doc_id']}")
+            click.echo(f"Document: {document['doc_label']}")
+            click.echo(f"Type: {document['file_type']}")
+            click.echo("\n" + document["text"])
+            return
+        if event == "parsing":
+            units = payload["units"]
+            click.echo(f"\n=== 2. DOCLING ITEMS ({len(units)} units) ===")
+            for index, unit in enumerate(units, start=1):
+                page = unit.page_start if unit.page_start is not None else "HTML"
+                headings = " > ".join(unit.heading_path) or "None"
+                click.echo(
+                    f"\n--- Segment {index}/{len(units)} ---\n"
+                    f"Unit ID: {unit.unit_id}\n"
+                    f"Reference: {unit.ref}\n"
+                    f"Page: {page}\n"
+                    f"Offsets: {unit.start_offset}-{unit.end_offset}\n"
+                    f"Heading path: {headings}\n"
+                    f"Oversized: {'yes' if unit.oversized else 'no'}\n"
+                    f"Source text:\n{unit.source_text}"
+                )
+            return
+        if event == "analysis_blocks":
+            blocks = payload["blocks"]
+            click.echo(f"\n=== 3. ANALYSIS BLOCKS ({len(blocks)} blocks) ===")
+            for index, block in enumerate(blocks, start=1):
+                click.echo(
+                    f"\n--- Block {index}/{len(blocks)} ---\n"
+                    f"Block ID: {block.block_id}\n"
+                    f"Reference: {block.ref}\n"
+                    f"Type: {block.block_type}\n"
+                    f"Pages: {block.page_start or 'HTML'}-{block.page_end or block.page_start or 'HTML'}\n"
+                    f"Source units: {', '.join(block.source_unit_ids)}"
+                )
+            return
+        if event == "llm_input":
+            if not llm_section_started:
+                click.echo("\n=== 4. LLM EXTRACTION ===")
+                llm_section_started = True
+            block = payload["block"]
+            click.echo(
+                f"\n--- LLM INPUT: {block.ref} ({block.block_id}) ---\n"
+                f"SYSTEM PROMPT:\n{payload['system_prompt']}\n\n"
+                f"USER PROMPT:\n{payload['user_prompt']}"
+            )
+            return
+        if event == "llm_output":
+            block = payload["block"]
+            click.echo(
+                f"\n--- RAW LLM OUTPUT: {block.ref} ({block.block_id}) ---\n"
+                f"{payload['raw_response']}"
+            )
+            return
+        if event == "normalized_block":
+            click.echo(
+                f"\n--- NORMALIZED BLOCK "
+                f"{payload['completed']}/{payload['total']} ---\n"
+                + json.dumps(payload["items"], ensure_ascii=False, indent=2)
+            )
+
+    return trace
+
+
+def _run_attachment_checklist(db, client, attachment_id, verbose, delay):
+    from sbpeye.documents import document_from_attachment
+
+    attachment = db.query(Attachment).filter(Attachment.id == attachment_id).first()
+    if not attachment:
+        raise click.ClickException(f"Attachment not found: {attachment_id}")
+    if (attachment.file_type or "").lower() != "pdf":
+        raise click.ClickException(
+            f"Attachment {attachment_id} is not a PDF ({attachment.file_type or 'unknown'})."
+        )
+    document = document_from_attachment(attachment)
+    has_cached_file = bool(
+        document.get("local_path") and Path(document["local_path"]).is_file()
+    )
+    if not has_cached_file and not document["text"].strip():
+        raise click.ClickException(
+            f"Attachment {attachment_id} has neither a cached PDF nor extracted text."
+        )
+
+    click.echo(
+        f"Diagnostic checklist run for {attachment.filename} ({attachment.id}).\n"
+        "This attachment-only result will not overwrite the circular checklist."
+    )
+    result = client.generate_checklist(
+        attachment.circular,
+        delay=delay,
+        trace_callback=_diagnostic_trace_printer() if verbose else None,
+        documents=[document],
+        gaps=[],
+    )
+    click.echo("\n=== 5. FINAL CHECKLIST ===")
+    click.echo(json.dumps(result, ensure_ascii=False, indent=2))
+    return result
+
+
 def _run_checklist(db, client, url, dept, year, limit, refresh, verbose, delay):
     query = _url_filter(db.query(Circular), url)
     query = _dept_filter(query, dept)
     query = _year_filter(query, year)
-    if not refresh:
-        query = query.filter((Circular.compliance_checklist == None) | (Circular.compliance_checklist == ""))  # noqa: E711
     circulars = query.order_by(Circular.date.desc()).all()
+    if not refresh:
+        def has_current_checklist(circular):
+            try:
+                value = json.loads(circular.compliance_checklist or "null")
+            except json.JSONDecodeError:
+                return False
+            return (
+                isinstance(value, dict)
+                and value.get("schema_version") == 2
+                and isinstance(value.get("checklist_items"), list)
+            )
+
+        circulars = [item for item in circulars if not has_current_checklist(item)]
 
     if url and not circulars:
         print(f"No circular found with URL: {url}")
@@ -748,22 +956,34 @@ def _run_checklist(db, client, url, dept, year, limit, refresh, verbose, delay):
     print(f"Generating checklists for {len(circulars)} circulars...")
     processed = 0
     for c in circulars:
-        if not c.content_text:
+        has_pdf_file = any(
+            (attachment.file_type or "").lower() == "pdf"
+            and bool(attachment.local_path)
+            and (PROJECT_ROOT / attachment.local_path).is_file()
+            for attachment in c.attachments
+        )
+        if not c.content_text and not has_pdf_file:
             continue
         try:
-            checklist = client.generate_checklist(c.title, c.content_text)
+            checklist = client.generate_checklist(c, delay=delay)
             c.compliance_checklist = json.dumps(checklist)
             c.checklist_generated_at = datetime.utcnow()
             db.commit()
             processed += 1
             if verbose:
-                print(f"  [{processed}] {c.title[:60]}: {len(checklist)} items")
+                items = checklist["checklist_items"]
+                required_count = sum(item.get("classification") == "required" for item in items)
+                print(
+                    f"  [{processed}] {c.title[:60]}: "
+                    f"{len(items)} checklist items, "
+                    f"{required_count} required, "
+                    f"status={checklist['status']}"
+                )
             else:
                 print(f"  [{processed}/{len(circulars)}] {c.title[:60]}")
         except Exception as e:
             print(f"  [ERROR] {c.title[:60]}: {e}")
             db.rollback()
-        time.sleep(delay)
 
     print(f"\nGenerated checklists for {processed}/{len(circulars)} circulars.")
 

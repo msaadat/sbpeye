@@ -20,3 +20,6 @@ src/sbpeye/static/spa/
 # Scraper caches
 /cache/
 /attachments/
+
+# Local analysis and rendered QA artifacts
+/tmp/

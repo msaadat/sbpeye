@@ -50,7 +50,12 @@ def _recompute_statuses(db: Session) -> None:
         circular.status = status_map.get(circular.id, "active")
 
 
-def _compute_outputs(client, circular: Circular, feature: str) -> dict:
+def _compute_outputs(
+    client,
+    circular: Circular,
+    feature: str,
+    progress_callback=None,
+) -> dict:
     features = GENERATION_FEATURES if feature == "all" else (feature,)
     outputs: dict = {}
     for item in features:
@@ -62,7 +67,10 @@ def _compute_outputs(client, circular: Circular, feature: str) -> dict:
         elif item == "tags":
             outputs[item] = client.generate_tags(circular.title, circular.content_text)
         elif item == "checklist":
-            outputs[item] = client.generate_checklist(circular.title, circular.content_text)
+            outputs[item] = client.generate_checklist(
+                circular,
+                progress_callback=progress_callback,
+            )
         elif item == "relationships":
             outputs[item] = client.extract_relationships(
                 circular.title,
@@ -113,13 +121,31 @@ def run_generation_job(job_id: str) -> None:
         db.commit()
 
         circular = db.query(Circular).filter(Circular.id == job.circular_id).first()
-        if not circular or not circular.content_text:
+        has_pdf_text = circular and any(
+            (attachment.file_type or "").lower() == "pdf"
+            and attachment.extraction_status == "extracted"
+            and bool(attachment.content_text)
+            for attachment in circular.attachments
+        )
+        if not circular or (not circular.content_text and not has_pdf_text):
             raise ValueError("This circular has no extracted content to analyze.")
 
         client = get_ai_client(db)
-        outputs = _compute_outputs(client, circular, job.feature)
+        def update_progress(completed: int, total: int) -> None:
+            job.progress_completed = completed
+            job.progress_total = total
+            db.commit()
+
+        outputs = _compute_outputs(
+            client,
+            circular,
+            job.feature,
+            progress_callback=update_progress,
+        )
         _persist_outputs(db, circular, outputs)
         job.status = "succeeded"
+        if "checklist" in outputs:
+            job.result_status = outputs["checklist"].get("status")
         job.completed_at = datetime.utcnow()
         db.commit()
     except Exception as exc:
@@ -141,6 +167,9 @@ def generation_job_payload(job: AIGenerationJob) -> dict:
         "feature": job.feature,
         "status": job.status,
         "error": job.error,
+        "progress_total": job.progress_total or 0,
+        "progress_completed": job.progress_completed or 0,
+        "result_status": job.result_status,
         "created_at": job.created_at.isoformat() if job.created_at else None,
         "started_at": job.started_at.isoformat() if job.started_at else None,
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,

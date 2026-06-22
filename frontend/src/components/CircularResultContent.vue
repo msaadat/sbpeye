@@ -42,6 +42,9 @@ function statusSeverity(status: string): 'success' | 'info' | 'warn' | 'danger' 
     </span>
     <span v-if="showSnippet && circular.snippet" class="result-snippet" v-html="circular.snippet" />
     <span v-else-if="showSnippet && circular.summary" class="result-snippet">{{ circular.summary }}</span>
+    <span v-if="circular.source_ref" class="result-reference-location">
+      {{ circular.source_ref }}<template v-if="circular.source_page"> · Page {{ circular.source_page }}</template>
+    </span>
     <span v-if="circular.tags?.length" class="result-tags">
       <Tag
         v-for="item in circular.tags.slice(0, maxTags)"

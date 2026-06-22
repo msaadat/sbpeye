@@ -96,6 +96,8 @@ sbpeye circulars sync --dept bprd --year 2025 --limit 10 -v
 sbpeye circulars summarize
 sbpeye circulars tags
 sbpeye circulars checklist
+sbpeye circulars checklist --id ATTACHMENT_ID --verbose --delay 0
+sbpeye circulars reextract --dept bprd --year 2025 --reindex
 sbpeye circulars relationships
 sbpeye circulars status
 sbpeye circulars all --dept bprd --year 2025

@@ -53,6 +53,8 @@ export interface CircularSummary {
   tags: string[]
   status: string
   snippet: string
+  source_ref?: string | null
+  source_page?: number | null
 }
 
 export interface CircularRelationshipTarget {
@@ -78,9 +80,76 @@ export interface CircularRelationshipsResponse {
   incoming: CircularRelationship[]
 }
 
-export interface ComplianceChecklistItem {
-  item: string
-  action_required: boolean
+export interface ChecklistSourceUnit {
+  unit_id: string
+  ref: string
+  doc_id: string
+  doc_type: 'circular' | 'attachment'
+  doc_label: string
+  source_text: string
+  heading_path: string[]
+  page_start?: number | null
+  page_end?: number | null
+  start_offset: number
+  end_offset: number
+  oversized: boolean
+  kind?: 'text' | 'table' | 'form'
+  classification?: 'required' | 'optional' | 'na' | null
+  parse_error?: boolean
+  evaluation_error?: string | null
+}
+
+export interface ChecklistAnalysisBlock {
+  block_id: string
+  ref: string
+  doc_id: string
+  doc_type: 'circular' | 'attachment'
+  doc_label: string
+  block_type: 'regulation' | 'table' | 'form'
+  source_unit_ids: string[]
+  heading_path: string[]
+  page_start?: number | null
+  page_end?: number | null
+}
+
+export interface ChecklistItem {
+  item_id: string
+  requirement: string
+  classification: 'required' | 'optional'
+  actor: string
+  action: string
+  object: string
+  conditions: string
+  deadline: string
+  evidence: string
+  applicability: string
+  ref: string
+  source_refs: string[]
+  source_unit_ids: string[]
+  source_text: string
+  doc_id: string
+  doc_type: 'circular' | 'attachment'
+  doc_label: string
+  page_start?: number | null
+  page_end?: number | null
+}
+
+export interface ChecklistCoverageGap {
+  doc_id: string
+  doc_type: 'circular' | 'attachment'
+  doc_label: string
+  reason: string
+  error?: string | null
+}
+
+export interface ComplianceChecklist {
+  schema_version: 2
+  status: 'completed' | 'completed_with_gaps'
+  generated_at: string
+  coverage_gaps: ChecklistCoverageGap[]
+  checklist_items: ChecklistItem[]
+  source_units: ChecklistSourceUnit[]
+  analysis_blocks: ChecklistAnalysisBlock[]
 }
 
 export type GenerationFeature = 'summary' | 'tags' | 'checklist' | 'relationships'
@@ -99,6 +168,9 @@ export interface AIGenerationJob {
   feature: GenerationAction
   status: 'queued' | 'running' | 'succeeded' | 'failed'
   error?: string | null
+  progress_total: number
+  progress_completed: number
+  result_status?: 'completed' | 'completed_with_gaps' | null
   created_at?: string | null
   started_at?: string | null
   completed_at?: string | null
@@ -107,7 +179,7 @@ export interface AIGenerationJob {
 export interface CircularDetail extends CircularSummary {
   attachments: CircularAttachment[]
   attachment_count: number
-  compliance_checklist: Array<ComplianceChecklistItem | string>
+  compliance_checklist: ComplianceChecklist | null
   relationships: CircularRelationshipsResponse
   generation: CircularGenerationState
 }
@@ -596,6 +668,29 @@ export async function downloadCsvExport(filters: SearchFilters = {}): Promise<vo
   const anchor = document.createElement('a')
   anchor.href = downloadUrl
   anchor.download = 'sbpeye_search_results.csv'
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  URL.revokeObjectURL(downloadUrl)
+}
+
+export async function downloadChecklistExcel(id: string, reference?: string | null): Promise<void> {
+  const response = await fetch(`${API_BASE}/circulars/${encodeURIComponent(id)}/checklist.xlsx`)
+
+  if (!response.ok) {
+    const payload = await readErrorPayload(response)
+    throw Object.assign(new Error(payload?.error || `Checklist export failed with ${response.status}`), {
+      status: response.status,
+      payload,
+    }) as ApiError
+  }
+
+  const blob = await response.blob()
+  const downloadUrl = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = downloadUrl
+  const safeReference = (reference || id).replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^[._]+|[._]+$/g, '')
+  anchor.download = `${safeReference || 'circular'}_checklist.xlsx`
   document.body.appendChild(anchor)
   anchor.click()
   anchor.remove()

@@ -12,13 +12,13 @@ import {
   buildDocumentContentUrl,
   getCircularDetail,
   getCircularSource,
+  downloadChecklistExcel,
   refreshCircular as refreshCircularSource,
   startCircularGeneration,
   type AIGenerationJob,
   type ApiError,
   type CircularDetail,
   type CircularAttachment,
-  type ComplianceChecklistItem,
   type GenerationAction,
   type GenerationFeature,
   type CircularRelationship,
@@ -42,11 +42,11 @@ const sourceLoading = ref(false)
 const errorMessage = ref('')
 const sourceError = ref('')
 const refreshingSource = ref(false)
+const exportingChecklist = ref(false)
 const pdfDialogVisible = ref(false)
 const attachmentDialogVisible = ref(false)
 const selectedAttachment = ref<PreviewAttachment | null>(null)
 const summaryExpanded = ref(false)
-const checklistExpanded = ref(false)
 const generationPopover = ref<InstanceType<typeof Popover> | null>(null)
 const activeJob = ref<AIGenerationJob | null>(null)
 let pollTimer: ReturnType<typeof setTimeout> | null = null
@@ -129,14 +129,6 @@ function handoffToChat() {
   void router.push({ path: '/chat', query: { circular_ids: props.id } })
 }
 
-function checklistText(item: ComplianceChecklistItem | string): string {
-  return typeof item === 'string' ? item : item.item
-}
-
-function checklistNeedsAction(item: ComplianceChecklistItem | string): boolean {
-  return typeof item !== 'string' && item.action_required
-}
-
 function hasGenerated(feature: GenerationFeature): boolean {
   return Boolean(circular.value?.generation?.[feature])
 }
@@ -166,7 +158,13 @@ async function pollGeneration(jobId: string, epoch: number) {
     if (job.status === 'succeeded') {
       await refreshCircular()
       activeJob.value = null
-      toast.add({ severity: 'success', summary: 'AI analysis complete', detail: 'The circular intelligence was updated.', life: 3500 })
+      const hasGaps = job.result_status === 'completed_with_gaps'
+      toast.add({
+        severity: hasGaps ? 'warn' : 'success',
+        summary: hasGaps ? 'AI analysis completed with gaps' : 'AI analysis complete',
+        detail: hasGaps ? 'Some PDF attachments could not be analyzed.' : 'The circular intelligence was updated.',
+        life: hasGaps ? 6000 : 3500,
+      })
       return
     }
     if (job.status === 'failed') {
@@ -206,7 +204,6 @@ async function loadCircular() {
   stopPolling()
   activeJob.value = null
   summaryExpanded.value = false
-  checklistExpanded.value = false
   loading.value = true
   sourceLoading.value = true
   errorMessage.value = ''
@@ -245,6 +242,18 @@ async function refreshFromSbp() {
     toast.add({ severity: 'error', summary: 'Refresh failed', detail: error instanceof Error ? error.message : 'Unable to refresh the circular.', life: 6000 })
   } finally {
     refreshingSource.value = false
+  }
+}
+
+async function exportChecklist() {
+  if (!circular.value?.compliance_checklist) return
+  exportingChecklist.value = true
+  try {
+    await downloadChecklistExcel(circular.value.id, circular.value.reference)
+  } catch (error) {
+    toast.add({ severity: 'error', summary: 'Export failed', detail: error instanceof Error ? error.message : 'Unable to export the checklist.', life: 5000 })
+  } finally {
+    exportingChecklist.value = false
   }
 }
 
@@ -290,12 +299,27 @@ onBeforeUnmount(stopPolling)
               @click="generationPopover?.toggle($event)"
             />
             <Button v-if="isPdf" icon="pi pi-file-pdf" text rounded severity="danger" aria-label="Preview PDF" title="Preview PDF" @click="pdfDialogVisible = true" />
+            <Button
+              v-if="circular.compliance_checklist"
+              icon="pi pi-file-excel"
+              text
+              rounded
+              severity="success"
+              :loading="exportingChecklist"
+              aria-label="Open checklist Excel file"
+              title="Open checklist Excel file"
+              @click="exportChecklist"
+            />
             <Button icon="pi pi-refresh" text rounded severity="secondary" :loading="refreshingSource" aria-label="Refresh from SBP" title="Refresh local copy from SBP" @click="refreshFromSbp" />
             <Button icon="pi pi-comments" text rounded severity="contrast" aria-label="Open in chat" title="Open in chat" @click="handoffToChat" />
           </div>
         </div>
         <div v-if="activeJob" class="generation-progress" role="status">
-          <i class="pi pi-sparkles" /> Generating {{ activeJob.feature === 'all' ? 'all AI analysis' : activeJob.feature }} in the background
+          <i class="pi pi-sparkles" />
+          Generating {{ activeJob.feature === 'all' ? 'all AI analysis' : activeJob.feature }} in the background
+          <span v-if="activeJob.progress_total">
+            ({{ activeJob.progress_completed }}/{{ activeJob.progress_total }} source units)
+          </span>
         </div>
       </header>
 
@@ -339,27 +363,9 @@ onBeforeUnmount(stopPolling)
       </section>
 
       <section
-        v-if="circular.compliance_checklist?.length || circular.relationships.outgoing.length || circular.relationships.incoming.length"
+        v-if="circular.relationships.outgoing.length || circular.relationships.incoming.length"
         class="detail-section intelligence-section"
       >
-        <div v-if="circular.compliance_checklist?.length" class="pill-group">
-          <h2>
-            <button
-              type="button"
-              class="collapsible-heading"
-              :aria-expanded="checklistExpanded"
-              @click="checklistExpanded = !checklistExpanded"
-            >
-              <span>Checklist</span>
-              <i :class="checklistExpanded ? 'pi pi-chevron-up' : 'pi pi-chevron-down'" />
-            </button>
-          </h2>
-          <div v-show="checklistExpanded" class="intelligence-pills">
-            <span v-for="(item, index) in circular.compliance_checklist" :key="`${checklistText(item)}-${index}`" class="intelligence-pill checklist-pill">
-              <i :class="checklistNeedsAction(item) ? 'pi pi-exclamation-circle action-required' : 'pi pi-check-circle'" /> {{ checklistText(item) }}
-            </span>
-          </div>
-        </div>
         <div v-if="circular.relationships.outgoing.length || circular.relationships.incoming.length" class="pill-group">
           <h2>Relationships</h2>
           <div class="intelligence-pills">

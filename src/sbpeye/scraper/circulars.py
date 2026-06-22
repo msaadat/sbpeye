@@ -3,14 +3,16 @@ from bs4 import BeautifulSoup
 import re
 import logging
 import threading
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from sqlalchemy.orm import Session
 from ..models import Attachment, Circular, CircularRelationship
 from ..database import PROJECT_ROOT, collection, embedding_backend
+from ..checklist import PAGE_MARKER_RE, prepare_reference_chunks
+from .clean_html import extract_sbp_text
 from ..link_routing import normalize_sbp_url
-from ..search import prepare_chunks
 import uuid
 from urllib.parse import unquote, urljoin, urlparse
 
@@ -174,18 +176,60 @@ def download_attachment(
             response.close()
 
 
+def _clean_pdf_pages(raw_pages: list[str]) -> list[str]:
+    """Remove repeated page furniture while retaining page-local structure."""
+    page_lines = [
+        [re.sub(r"\s+", " ", line).strip() for line in page.splitlines() if line.strip()]
+        for page in raw_pages
+    ]
+    edge_counts: Counter[str] = Counter()
+    for lines in page_lines:
+        for line in lines[:2] + lines[-2:]:
+            if len(line) <= 160:
+                edge_counts[line.casefold()] += 1
+    repeat_threshold = max(3, (len(page_lines) + 1) // 2)
+    repeated = {
+        value for value, count in edge_counts.items() if count >= repeat_threshold
+    }
+
+    cleaned_pages: list[str] = []
+    page_number_re = re.compile(r"^(?:page\s+)?\d+(?:\s+of\s+\d+)?$", re.IGNORECASE)
+    for lines in page_lines:
+        retained: list[str] = []
+        last_index = len(lines) - 1
+        for index, line in enumerate(lines):
+            is_edge = index <= 1 or index >= last_index - 1
+            if is_edge and (line.casefold() in repeated or page_number_re.fullmatch(line)):
+                continue
+            if retained and retained[-1].endswith("-") and line[:1].islower():
+                retained[-1] = retained[-1][:-1] + line
+            else:
+                retained.append(line)
+        cleaned_pages.append("\n".join(retained))
+    return cleaned_pages
+
+
 def extract_pdf_text(pdf_path: Path) -> tuple[str, str, str | None]:
-    """Extract PDF text and classify image-only and failed documents."""
+    """Extract page-aware PDF text and classify image-only documents."""
     try:
         import pdfplumber
 
-        pages_text: list[str] = []
+        raw_pages: list[str] = []
         with pdfplumber.open(str(pdf_path)) as pdf:
             for page in pdf.pages:
-                pages_text.append(page.extract_text() or "")
+                raw_pages.append(page.extract_text() or "")
+
+        cleaned_pages = _clean_pdf_pages(raw_pages)
+        pages_text = [
+            f"[[SBPEYE_PAGE:{page_number}]]\n{text.strip()}"
+            for page_number, text in enumerate(cleaned_pages, start=1)
+        ]
 
         full_text = "\n\n".join(pages_text)
-        average_chars = len(full_text) / max(len(pages_text), 1)
+        extracted_chars = sum(
+            len(PAGE_MARKER_RE.sub("", value).strip()) for value in pages_text
+        )
+        average_chars = extracted_chars / max(len(pages_text), 1)
         status = "scanned" if average_chars < 50 else "extracted"
         return full_text, status, None
     except Exception as exc:
@@ -643,7 +687,7 @@ def process_circular(
     circular_id = str(uuid.uuid5(uuid.NAMESPACE_URL, url))
     raw_html = fetch_page_cached(url, force=force_fetch)
     soup = BeautifulSoup(raw_html, "html.parser")
-    content_text = soup.get_text(separator=" ", strip=True)
+    content_text = extract_sbp_text(raw_html)
 
     if not content_text:
         if verbose:
@@ -730,18 +774,32 @@ def _delete_document_chunks(
 def _index_circular(circular: Circular, verbose: bool = False) -> None:
     """Replace one circular's Chroma chunks without touching attachments."""
     try:
-        chunks = prepare_chunks(circular.title, circular.content_text or "")
+        document = {
+            "doc_id": circular.id,
+            "doc_type": "circular",
+            "doc_label": f"{circular.department} - {circular.reference or circular.title}",
+            "text": circular.content_text or "",
+            "file_type": "html",
+        }
+        reference_chunks = prepare_reference_chunks(document)
+        chunks = [item["text"] for item in reference_chunks]
         chunk_ids = [f"{circular.id}__chunk_{i}" for i in range(len(chunks))]
         chunk_metas = [
             {
                 "circular_id": circular.id,
                 "doc_type": "circular",
-                "title": circular.title,
-                "url": circular.url,
-                "department": circular.department,
+                "title": circular.title or "",
+                "url": circular.url or "",
+                "department": circular.department or "",
                 "chunk_index": i,
+                "ref": item["ref"],
+                "unit_id": item["unit_id"],
+                "source_start": item["source_start"],
+                "source_end": item["source_end"],
+                **({"page_start": item["page_start"]} if item["page_start"] else {}),
+                **({"page_end": item["page_end"]} if item["page_end"] else {}),
             }
-            for i in range(len(chunks))
+            for i, item in enumerate(reference_chunks)
         ]
         embeddings = embedding_backend.embed_documents(chunks)
         with _CHROMA_WRITE_LOCK:
@@ -768,7 +826,15 @@ def vectorize_attachment(
         return False
 
     try:
-        chunks = prepare_chunks(attachment.filename, attachment.content_text)
+        document = {
+            "doc_id": attachment.id,
+            "doc_type": "attachment",
+            "doc_label": attachment.filename,
+            "text": attachment.content_text,
+            "file_type": attachment.file_type or "",
+        }
+        reference_chunks = prepare_reference_chunks(document)
+        chunks = [item["text"] for item in reference_chunks]
         chunk_ids = [f"{attachment.id}__chunk_{i}" for i in range(len(chunks))]
         metadata = [
             {
@@ -780,17 +846,24 @@ def vectorize_attachment(
                 "url": attachment.original_url,
                 "department": attachment.circular.department or "",
                 "chunk_index": index,
+                "ref": item["ref"],
+                "unit_id": item["unit_id"],
+                "source_start": item["source_start"],
+                "source_end": item["source_end"],
+                **({"page_start": item["page_start"]} if item["page_start"] else {}),
+                **({"page_end": item["page_end"]} if item["page_end"] else {}),
             }
-            for index in range(len(chunks))
+            for index, item in enumerate(reference_chunks)
         ]
         embeddings = embedding_backend.embed_documents(chunks)
-        _delete_document_chunks(attachment_id_value=attachment.id)
-        collection.add(
-            documents=chunks,
-            embeddings=embeddings,
-            metadatas=metadata,
-            ids=chunk_ids,
-        )
+        with _CHROMA_WRITE_LOCK:
+            _delete_document_chunks(attachment_id_value=attachment.id)
+            collection.add(
+                documents=chunks,
+                embeddings=embeddings,
+                metadatas=metadata,
+                ids=chunk_ids,
+            )
         attachment.is_vectorized = 1
         db.commit()
         if verbose:
@@ -816,6 +889,77 @@ def vectorize_attachments(
         if vectorize_attachment(db, attachment, verbose=verbose):
             indexed += 1
     return indexed
+
+
+def reextract_circular_from_cache(
+    db: Session,
+    circular: Circular,
+    *,
+    reindex: bool = False,
+    verbose: bool = False,
+) -> dict[str, int]:
+    """Re-extract one circular and its PDFs using local cached files only."""
+    changed = 0
+    errors = 0
+    indexed = 0
+    cache_id = str(uuid.uuid5(uuid.NAMESPACE_URL, circular.url))
+    html_path = HTML_CACHE_DIR / f"{cache_id}.html"
+
+    if html_path.is_file():
+        extracted = extract_sbp_text(html_path.read_bytes())
+        if extracted and extracted != (circular.content_text or ""):
+            circular.content_text = extracted
+            changed += 1
+            _delete_document_chunks(circular_id=circular.id)
+    else:
+        errors += 1
+        if verbose:
+            print(f"  [WARN] Missing HTML cache: {html_path}")
+
+    for attachment in circular.attachments:
+        if (attachment.file_type or "").lower() != "pdf":
+            continue
+        local_path = PROJECT_ROOT / attachment.local_path if attachment.local_path else None
+        if not local_path or not local_path.is_file():
+            errors += 1
+            missing_error = "Local PDF cache is missing."
+            if (
+                attachment.extraction_status != "error"
+                or attachment.extraction_error != missing_error
+                or attachment.content_text
+            ):
+                attachment.content_text = None
+                attachment.extraction_status = "error"
+                attachment.extraction_error = missing_error
+                attachment.is_vectorized = 0
+                changed += 1
+                _delete_document_chunks(attachment_id_value=attachment.id)
+            continue
+        text, status, error = extract_pdf_text(local_path)
+        if text != (attachment.content_text or "") or status != attachment.extraction_status:
+            attachment.content_text = text or None
+            attachment.extraction_status = status
+            attachment.extraction_error = error
+            attachment.is_vectorized = 0
+            changed += 1
+            _delete_document_chunks(attachment_id_value=attachment.id)
+
+    if changed:
+        circular.compliance_checklist = None
+        circular.checklist_generated_at = None
+    db.commit()
+
+    if reindex:
+        _index_circular(circular, verbose=verbose)
+        for attachment in circular.attachments:
+            if (
+                (attachment.file_type or "").lower() == "pdf"
+                and attachment.extraction_status == "extracted"
+                and attachment.content_text
+            ):
+                indexed += int(vectorize_attachment(db, attachment, verbose=verbose))
+
+    return {"changed": changed, "errors": errors, "indexed": indexed}
 
 
 def _extract_date(text: str) -> datetime | None:

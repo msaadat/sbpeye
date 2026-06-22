@@ -113,5 +113,18 @@ def _ensure_columns():
                     "ALTER TABLE chat_sessions ADD COLUMN circular_ids TEXT"
                 ))
 
+        if "ai_generation_jobs" in table_names:
+            existing = {c["name"] for c in insp.get_columns("ai_generation_jobs")}
+            new_columns = [
+                ("progress_total", "INTEGER DEFAULT 0"),
+                ("progress_completed", "INTEGER DEFAULT 0"),
+                ("result_status", "VARCHAR"),
+            ]
+            for col_name, col_type in new_columns:
+                if col_name not in existing:
+                    conn.execute(text(
+                        f"ALTER TABLE ai_generation_jobs ADD COLUMN {col_name} {col_type}"
+                    ))
+
 Base.metadata.create_all(bind=engine)
 _ensure_columns()

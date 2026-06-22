@@ -656,6 +656,7 @@ class SearchEngine:
         # 3. Vector search (use original query — embeddings handle semantics)
         vector_ranks: dict[str, int] = {}
         vector_sources: dict[str, str] = {}
+        vector_references: dict[str, dict] = {}
         try:
             query_embeddings = embedding_backend.embed_queries([query])
             results = collection.query(
@@ -674,6 +675,13 @@ class SearchEngine:
                 circular_id = meta.get("circular_id", vid)
                 if circular_id not in vector_ranks:
                     vector_ranks[circular_id] = rank_counter
+                    if meta.get("ref"):
+                        vector_references[circular_id] = {
+                            "source_ref": meta.get("ref"),
+                            "source_page": meta.get("page_start"),
+                            "doc_type": meta.get("doc_type"),
+                            "attachment_id": meta.get("attachment_id"),
+                        }
                     if meta.get("doc_type") == "attachment" and meta.get("attachment_id"):
                         vector_sources[circular_id] = meta["attachment_id"]
                     rank_counter += 1
@@ -768,12 +776,21 @@ class SearchEngine:
                     snippet_tokens,
                     preferred_attachment_id=vector_sources.get(cid),
                 )
+                reference = vector_references.get(cid, {})
+                reference_matches_source = reference.get("doc_type") == source and (
+                    source != "attachment"
+                    or reference.get("attachment_id") == attachment_id
+                )
                 ordered.append({
                     "circular": c,
                     "snippet": snippet,
                     "match_source": source,
                     "attachment_id": attachment_id,
                     "attachment_filename": filename,
+                    **({
+                        "source_ref": reference.get("source_ref"),
+                        "source_page": reference.get("source_page"),
+                    } if reference_matches_source else {}),
                 })
 
         return ordered, total

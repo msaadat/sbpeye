@@ -1,11 +1,17 @@
+import hashlib
 import json
 import os
+import re
+import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from openai import BadRequestError, OpenAI
 
 from sqlalchemy.orm import Session
+
+from .checklist import compact_required_checklist
 
 
 TAG_TAXONOMY = [
@@ -306,53 +312,422 @@ class AIClient:
             valid_tags = tags[:5]
         return valid_tags[:5]
 
-    def generate_checklist(self, title: str, content_text: str) -> list[dict]:
-        system = "You are a compliance analyst. Generate a compliance checklist from the given SBP circular. Each item should be a specific, actionable requirement from the circular. Return a JSON object with a 'checklist' key containing an array of objects, each with 'item' (the requirement) and 'action_required' (boolean, true if banks must take concrete action)."
-        truncated = content_text[: self.config.max_context_tokens] if len(content_text) > self.config.max_context_tokens else content_text
-        user = f"Title: {title}\n\nContent:\n{truncated}"
+    @staticmethod
+    def _response_excerpt(result: str, limit: int = 300) -> str:
+        compact = re.sub(r"\s+", " ", result or "").strip()
+        return compact[:limit] + ("..." if len(compact) > limit else "")
+
+    @staticmethod
+    def _parse_json_object(result: str) -> dict[str, Any]:
+        text = (result or "").strip()
+        if not text:
+            raise ValueError("The model returned an empty checklist response.")
+
+        candidates = [text]
+        fenced = re.fullmatch(
+            r"```(?:json)?\s*(.*?)\s*```",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if fenced:
+            candidates.insert(0, fenced.group(1).strip())
+        decoder = json.JSONDecoder()
+        for start, char in enumerate(text):
+            if char not in "[{":
+                continue
+            try:
+                _, end = decoder.raw_decode(text[start:])
+            except json.JSONDecodeError:
+                continue
+            candidates.append(text[start:start + end])
+            break
+
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, str):
+                    parsed = json.loads(parsed)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+            if isinstance(parsed, list):
+                return {"items": parsed}
+        raise ValueError("The model returned an invalid checklist JSON payload.")
+
+    @staticmethod
+    def _checklist_extraction_schema() -> dict[str, Any]:
+        string_field = {"type": "string"}
+        return {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "requirement": string_field,
+                            "classification": {
+                                "type": "string",
+                                "enum": ["required", "optional"],
+                            },
+                            "actor": string_field,
+                            "action": string_field,
+                            "object": string_field,
+                            "conditions": string_field,
+                            "deadline": string_field,
+                            "evidence": string_field,
+                            "applicability": string_field,
+                            "source_unit_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "minItems": 1,
+                            },
+                        },
+                        "required": ["requirement", "classification", "source_unit_ids"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["items"],
+            "additionalProperties": False,
+        }
+
+    @classmethod
+    def _parse_checklist_items(
+        cls,
+        result: str,
+        valid_source_ids: set[str],
+    ) -> list[dict[str, Any]]:
+        parsed = cls._parse_json_object(result)
+        entries = parsed.get("items", parsed.get("checklist_items", parsed.get("checklist")))
+        if not isinstance(entries, list):
+            raise ValueError("The model returned a checklist payload without an items array.")
+
+        normalized: list[dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError("The model returned a non-object checklist item.")
+            requirement = entry.get("requirement", entry.get("item"))
+            if not isinstance(requirement, str) or len(requirement.strip()) < 8:
+                raise ValueError("The model returned a checklist item without a usable requirement.")
+            classification = entry.get("classification")
+            if classification is None and isinstance(entry.get("action_required"), bool):
+                classification = "required" if entry["action_required"] else "optional"
+            classification = str(classification or "").strip().lower()
+            if classification not in {"required", "optional"}:
+                raise ValueError("The model returned an invalid checklist classification.")
+
+            source_ids = entry.get("source_unit_ids", entry.get("source_ids", []))
+            if isinstance(source_ids, str):
+                source_ids = [source_ids]
+            if not isinstance(source_ids, list):
+                raise ValueError("The model returned invalid source citations.")
+            citations_provided = bool(source_ids)
+            cited = list(dict.fromkeys(
+                str(source_id) for source_id in source_ids
+                if str(source_id) in valid_source_ids
+            ))
+            if not cited and not citations_provided and len(valid_source_ids) == 1:
+                cited = list(valid_source_ids)
+            if not cited:
+                raise ValueError("The model returned a checklist item without a valid source citation.")
+
+            item = {
+                "requirement": re.sub(r"\s+", " ", requirement).strip(),
+                "classification": classification,
+                "source_unit_ids": cited,
+            }
+            for field_name in (
+                "actor", "action", "object", "conditions", "deadline", "evidence", "applicability"
+            ):
+                value = entry.get(field_name, "")
+                item[field_name] = re.sub(r"\s+", " ", str(value or "")).strip()
+            normalized.append(item)
+        return normalized
+
+    def _extract_checklist_block(
+        self,
+        *,
+        circular_label: str,
+        block,
+        trace_callback=None,
+    ) -> list[dict[str, Any]]:
+        system = """You are a conservative SBP regulatory compliance analyst. Extract actionable compliance requirements from exactly one complete SOURCE BLOCK.
+
+Include explicit duties, prohibitions, eligibility conditions, controls, deadlines, recordkeeping, submission requirements, required evidence, and explicit permissions or recommendations. Exclude headings, definitions without an obligation, explanatory narrative, addresses, greetings, signature labels, blank form fields, empty table cells, and formatting fragments. For forms and tables, extract only substantive required fields, attestations, evidence, submission actions, or format constraints; do not turn individual words or decorative labels into items. Combine an introductory clause with its dependent list when they form one obligation, but keep genuinely separate actions separate. Use "required" for duties, prohibitions, conditions, and mandatory evidence; use "optional" only for explicit permissions or recommendations. Populate actor, action, object, conditions, deadline, evidence, and applicability when present, using an empty string when a field is absent. Cite one or more SOURCE_ID values exactly as supplied. If the block contains no actionable requirement, return {"items":[]}. Return only the JSON object."""
+        user = f"""Circular: {circular_label}
+Document: {block.doc_label}
+Block reference: {block.ref}
+Block type: {block.block_type}
+Pages: {block.page_start or 'HTML'}-{block.page_end or block.page_start or 'HTML'}
+
+SOURCE BLOCK:
+{block.source_text}"""
+        if trace_callback:
+            trace_callback("llm_input", {
+                "block": block,
+                "system_prompt": system,
+                "user_prompt": user,
+            })
         result = self._complete(
             system,
             user,
-            temperature=0.1,
-            json_schema={
-                "type": "object",
-                "properties": {
-                    "checklist": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "item": {"type": "string"},
-                                "action_required": {"type": "boolean"},
-                            },
-                            "required": ["item", "action_required"],
-                            "additionalProperties": False,
-                        },
-                    },
-                },
-                "required": ["checklist"],
-                "additionalProperties": False,
-            },
+            temperature=0.0,
+            json_schema=self._checklist_extraction_schema(),
         )
+        if trace_callback:
+            trace_callback("llm_output", {"block": block, "raw_response": result})
+        valid_source_ids = set(block.source_unit_ids)
         try:
-            parsed = json.loads(result)
-        except json.JSONDecodeError as exc:
-            raise ValueError("The model returned invalid JSON for the checklist.") from exc
-        checklist = parsed.get("checklist") if isinstance(parsed, dict) else None
-        if not isinstance(checklist, list):
-            raise ValueError("The model returned an invalid checklist payload.")
-        normalized = []
-        for entry in checklist:
-            if not isinstance(entry, dict) or not isinstance(entry.get("item"), str):
-                raise ValueError("The model returned an invalid checklist item.")
-            action_required = entry.get("action_required", False)
-            if not isinstance(action_required, bool):
-                raise ValueError("The model returned a non-boolean checklist action flag.")
-            normalized.append({
-                "item": entry["item"].strip(),
-                "action_required": action_required,
-            })
-        return normalized
+            return self._parse_checklist_items(result, valid_source_ids)
+        except ValueError:
+            retry_system = (
+                system
+                + "\nYour previous response was malformed. Return the schema-compliant JSON object only, with valid SOURCE_ID citations."
+            )
+            retry_result = self._complete(
+                retry_system,
+                user,
+                temperature=0.0,
+                json_schema=self._checklist_extraction_schema(),
+            )
+            if trace_callback:
+                trace_callback("llm_output", {
+                    "block": block,
+                    "raw_response": retry_result,
+                    "attempt": 2,
+                })
+            try:
+                return self._parse_checklist_items(retry_result, valid_source_ids)
+            except ValueError as exc:
+                first = self._response_excerpt(result)
+                second = self._response_excerpt(retry_result)
+                raise ValueError(
+                    "The model returned an invalid checklist response after retry. "
+                    f"First: {first!r}; retry: {second!r}"
+                ) from exc
+
+    @staticmethod
+    def _materialize_checklist_item(entry, block, units_by_id) -> dict[str, Any]:
+        source_units = [units_by_id[source_id] for source_id in entry["source_unit_ids"]]
+        refs = list(dict.fromkeys(unit.ref for unit in source_units))
+        pages = [
+            page
+            for unit in source_units
+            for page in (unit.page_start, unit.page_end)
+            if page is not None
+        ]
+        digest = hashlib.sha256(
+            f"{block.doc_id}\0{entry['requirement']}\0{'|'.join(entry['source_unit_ids'])}".encode("utf-8")
+        ).hexdigest()[:20]
+        source_text = "\n\n".join(unit.source_text for unit in source_units)
+        requirement_tokens = set(re.findall(r"[a-z0-9]+", entry["requirement"].casefold()))
+        candidates = [
+            re.sub(r"\s+", " ", candidate).strip(" -*|\n")
+            for candidate in re.split(r"(?<=[.;:])\s+|\n+", source_text)
+        ]
+        candidates = [candidate for candidate in candidates if candidate]
+        source_excerpt = max(
+            candidates,
+            key=lambda candidate: len(
+                requirement_tokens
+                & set(re.findall(r"[a-z0-9]+", candidate.casefold()))
+            ),
+            default=source_text,
+        )
+        if len(source_excerpt) > 900:
+            source_excerpt = source_excerpt[:897].rstrip() + "..."
+        return {
+            "item_id": f"checklist:{digest}",
+            "requirement": entry["requirement"],
+            "classification": entry["classification"],
+            "actor": entry["actor"],
+            "action": entry["action"],
+            "object": entry["object"],
+            "conditions": entry["conditions"],
+            "deadline": entry["deadline"],
+            "evidence": entry["evidence"],
+            "applicability": entry["applicability"],
+            "ref": "; ".join(refs),
+            "source_refs": refs,
+            "source_unit_ids": entry["source_unit_ids"],
+            "source_text": source_excerpt,
+            "doc_id": block.doc_id,
+            "doc_type": block.doc_type,
+            "doc_label": block.doc_label,
+            "page_start": min(pages) if pages else None,
+            "page_end": max(pages) if pages else None,
+        }
+
+    @staticmethod
+    def _deduplicate_checklist_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        deduplicated: list[dict[str, Any]] = []
+        by_key: dict[str, dict[str, Any]] = {}
+        for item in items:
+            semantic_fields = [
+                item.get("actor"), item.get("action"), item.get("object"),
+                item.get("conditions"), item.get("deadline"), item.get("applicability"),
+            ]
+            key_text = " | ".join(str(value or "") for value in semantic_fields)
+            if not item.get("action") or not item.get("object"):
+                key_text = str(item.get("requirement") or "")
+            key = re.sub(r"[^a-z0-9]+", " ", key_text.casefold()).strip()
+            existing = by_key.get(key)
+            if existing is None:
+                by_key[key] = item
+                deduplicated.append(item)
+                continue
+            existing["classification"] = (
+                "required"
+                if "required" in {existing.get("classification"), item.get("classification")}
+                else "optional"
+            )
+            for list_field in ("source_refs", "source_unit_ids"):
+                existing[list_field] = list(dict.fromkeys([
+                    *existing.get(list_field, []), *item.get(list_field, [])
+                ]))
+            existing["ref"] = "; ".join(existing["source_refs"])
+            merged_source_text = "\n\n".join(dict.fromkeys([
+                existing.get("source_text", ""), item.get("source_text", "")
+            ]))
+            existing["source_text"] = (
+                merged_source_text
+                if len(merged_source_text) <= 900
+                else merged_source_text[:897].rstrip() + "..."
+            )
+            pages = [
+                page for page in (
+                    existing.get("page_start"), existing.get("page_end"),
+                    item.get("page_start"), item.get("page_end"),
+                ) if page is not None
+            ]
+            if pages:
+                existing["page_start"] = min(pages)
+                existing["page_end"] = max(pages)
+        return deduplicated
+
+    def generate_checklist(
+        self,
+        circular,
+        *,
+        delay: float = 0.0,
+        progress_callback=None,
+        trace_callback=None,
+        documents: list[dict[str, Any]] | None = None,
+        gaps: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        from .checklist import build_analysis_blocks, build_checklist_corpus, segment_document
+
+        if documents is None:
+            documents, discovered_gaps = build_checklist_corpus(circular)
+            gaps = discovered_gaps if gaps is None else list(gaps)
+        else:
+            documents = list(documents)
+            gaps = list(gaps or [])
+        if trace_callback:
+            for document in documents:
+                trace_callback("document", {"document": document})
+        document_units = []
+        failed_document_ids: set[str] = set()
+        for document in documents:
+            try:
+                units = segment_document(document)
+            except Exception as exc:
+                units = []
+                failed_document_ids.add(document["doc_id"])
+                gaps.append({
+                    "doc_id": document["doc_id"],
+                    "doc_type": document["doc_type"],
+                    "doc_label": document["doc_label"],
+                    "reason": "docling_conversion_error",
+                    "error": str(exc),
+                })
+            document_units.append((document, units))
+        if trace_callback:
+            for document, units in document_units:
+                trace_callback("parsing", {"document": document, "units": units})
+        for document, units in document_units:
+            if not units and document["doc_id"] not in failed_document_ids:
+                gaps.append({
+                    "doc_id": document["doc_id"],
+                    "doc_type": document["doc_type"],
+                    "doc_label": document["doc_label"],
+                    "reason": "no_items",
+                })
+        document_blocks = [
+            (document, units, build_analysis_blocks(units))
+            for document, units in document_units
+        ]
+        if trace_callback:
+            for document, _, blocks in document_blocks:
+                trace_callback("analysis_blocks", {"document": document, "blocks": blocks})
+        total_blocks = sum(len(blocks) for _, _, blocks in document_blocks)
+        completed = 0
+        checklist_items: list[dict[str, Any]] = []
+        all_units = [unit for _, units in document_units for unit in units]
+        units_by_id = {unit.unit_id: unit for unit in all_units}
+        circular_label = circular.reference or circular.title
+        if progress_callback:
+            progress_callback(0, total_blocks)
+
+        for _, _, blocks in document_blocks:
+            for block in blocks:
+                try:
+                    extracted = self._extract_checklist_block(
+                        circular_label=circular_label,
+                        block=block,
+                        trace_callback=trace_callback,
+                    )
+                    materialized = [
+                        self._materialize_checklist_item(entry, block, units_by_id)
+                        for entry in extracted
+                    ]
+                    checklist_items.extend(materialized)
+                except ValueError as exc:
+                    materialized = []
+                    gaps.append({
+                        "doc_id": block.doc_id,
+                        "doc_type": block.doc_type,
+                        "doc_label": block.doc_label,
+                        "reason": "checklist_extraction_error",
+                        "error": str(exc),
+                        "block_id": block.block_id,
+                        "ref": block.ref,
+                        "page_start": block.page_start,
+                        "page_end": block.page_end,
+                    })
+                if trace_callback:
+                    trace_callback("normalized_block", {
+                        "block": block,
+                        "items": materialized,
+                        "completed": completed + 1,
+                        "total": total_blocks,
+                    })
+                completed += 1
+                if progress_callback:
+                    progress_callback(completed, total_blocks)
+                if delay > 0 and completed < total_blocks:
+                    time.sleep(delay)
+
+        checklist_items = self._deduplicate_checklist_items(checklist_items)
+        return {
+            "schema_version": 2,
+            "status": "completed_with_gaps" if gaps else "completed",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "coverage_gaps": gaps,
+            "checklist_items": checklist_items,
+            "source_units": [unit.payload() for unit in all_units],
+            "analysis_blocks": [
+                {
+                    key: value
+                    for key, value in block.payload().items()
+                    if key != "source_text"
+                }
+                for _, _, blocks in document_blocks
+                for block in blocks
+            ],
+        }
 
     def extract_relationships(self, title: str, reference: str, content_text: str) -> dict:
         system = "You are a financial regulations analyst. Extract any mentions of this circular relating to previous circulars — whether it amends, supersedes, cancels, adds to, or clarifies them. Return ONLY valid JSON with these keys: 'amends' (list of reference strings), 'supersedes' (list), 'cancels' (list), 'adds_to' (list), 'clarifies' (list). Each reference string should be as close to the original format as possible, e.g. 'BPRD Circular No. 12 of 2023'."
@@ -490,7 +865,7 @@ class AIClient:
                     "url": c.url,
                     "summary": c.summary,
                     "tags": json.loads(c.tags) if c.tags else [],
-                    "compliance_checklist": json.loads(c.compliance_checklist) if c.compliance_checklist else [],
+                    "compliance_checklist": compact_required_checklist(c.compliance_checklist),
                     "status": c.status or "active",
                     "content_preview": (c.content_text or "")[:2000],
                     "citation": f"[[circular:{c.id}|{c.reference or c.title}]]",

@@ -112,6 +112,14 @@ def _ensure_columns():
                 conn.execute(text(
                     "ALTER TABLE chat_sessions ADD COLUMN circular_ids TEXT"
                 ))
+            if "updated_at" not in existing:
+                conn.execute(text(
+                    "ALTER TABLE chat_sessions ADD COLUMN updated_at DATETIME"
+                ))
+                conn.execute(text(
+                    "UPDATE chat_sessions SET updated_at = created_at "
+                    "WHERE updated_at IS NULL"
+                ))
 
         if "ai_generation_jobs" in table_names:
             existing = {c["name"] for c in insp.get_columns("ai_generation_jobs")}

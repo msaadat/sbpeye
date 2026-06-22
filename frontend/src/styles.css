@@ -525,6 +525,11 @@ a {
   cursor: pointer;
 }
 
+.session-item > button:first-child:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
 .session-item strong,
 .session-item span {
   overflow: hidden;
@@ -539,6 +544,27 @@ a {
 .chat-message-meta span {
   color: var(--sbp-muted);
   font-size: 0.82rem;
+}
+
+.session-item-actions,
+.message-actions,
+.message-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+.session-rename {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 0.2rem;
+  align-items: center;
+}
+
+.session-rename .p-inputtext {
+  min-width: 0;
+  width: 100%;
 }
 
 .context-header {
@@ -659,6 +685,44 @@ a {
   justify-content: space-between;
   align-items: center;
   gap: 1rem;
+}
+
+.message-actions {
+  min-height: 1.8rem;
+}
+
+.message-actions .p-button {
+  width: 1.8rem;
+  height: 1.8rem;
+}
+
+@media (hover: hover) {
+  .message-actions .p-button {
+    opacity: 0;
+    transition: opacity 120ms ease;
+  }
+
+  .chat-message:hover .message-actions .p-button,
+  .chat-message:focus-within .message-actions .p-button {
+    opacity: 1;
+  }
+}
+
+.message-editor {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.message-editor .p-textarea {
+  width: 100%;
+}
+
+.message-editor-actions {
+  justify-content: flex-end;
+}
+
+.retry-message {
+  justify-self: start;
 }
 
 .chat-message p,

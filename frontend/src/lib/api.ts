@@ -278,12 +278,14 @@ export interface ChatSession {
   id: string
   title?: string | null
   created_at?: string | null
+  updated_at?: string | null
 }
 
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant' | string
   content: string
+  circular_ids?: string[]
   created_at?: string | null
 }
 
@@ -529,6 +531,27 @@ export async function deleteChatSession(sessionId: string): Promise<{ success: b
   })
 }
 
+export async function renameChatSession(
+  sessionId: string,
+  title: string,
+): Promise<ChatSession> {
+  return requestJson<ChatSession>(`/chat/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title }),
+  })
+}
+
+export async function truncateChatSession(
+  sessionId: string,
+  messageId: string,
+): Promise<{ success: boolean }> {
+  return requestJson<{ success: boolean }>(
+    `/chat/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}`,
+    { method: 'DELETE' },
+  )
+}
+
 export async function sendChatMessage(payload: {
   message: string
   session_id?: string | null
@@ -548,6 +571,7 @@ export async function streamChatMessage(
     message: string
     session_id?: string | null
     circular_ids?: string[]
+    replace_message_id?: string
   },
   handlers: {
     onSession?: (sessionId: string) => void
@@ -555,6 +579,7 @@ export async function streamChatMessage(
     onError?: (message: string) => void
     onDone?: (sessionId?: string) => void
   },
+  signal?: AbortSignal,
 ): Promise<void> {
   const response = await fetch(`${API_BASE}/chat/stream`, {
     method: 'POST',
@@ -563,6 +588,7 @@ export async function streamChatMessage(
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(payload),
+    signal,
   })
 
   if (!response.ok) {

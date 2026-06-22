@@ -12,7 +12,7 @@ from sbpeye.chat_retrieval import (
     estimate_tokens,
 )
 from sbpeye.database import Base
-from sbpeye.main import get_chat_session
+from sbpeye.main import _truncate_chat_messages, get_chat_session
 from sbpeye.models import Attachment, ChatMessage, ChatSession, Circular
 
 
@@ -196,3 +196,65 @@ def test_session_context_is_authoritative_including_empty_selection():
     db.commit()
     payload = asyncio.run(get_chat_session(session.id, db))
     assert payload["circulars"] == []
+
+
+def test_chat_session_returns_each_messages_context_snapshot():
+    db = make_session()
+    add_circular(db, "one", "One")
+    session = ChatSession(id="session", title="Test", circular_ids="[]")
+    message = ChatMessage(
+        id="message",
+        session_id=session.id,
+        role="user",
+        content="Question",
+        circular_ids=json.dumps(["one"]),
+    )
+    db.add_all([session, message])
+    db.commit()
+
+    payload = asyncio.run(get_chat_session(session.id, db))
+
+    assert payload["messages"][0]["circular_ids"] == ["one"]
+
+
+def test_truncate_chat_messages_can_preserve_and_edit_target_turn():
+    db = make_session()
+    session = ChatSession(id="session", title="Test", circular_ids="[]")
+    messages = [
+        ChatMessage(id="01", session_id=session.id, role="user", content="First"),
+        ChatMessage(id="02", session_id=session.id, role="assistant", content="Answer"),
+        ChatMessage(id="03", session_id=session.id, role="user", content="Second"),
+        ChatMessage(id="04", session_id=session.id, role="assistant", content="Answer 2"),
+    ]
+    db.add_all([session, *messages])
+    db.commit()
+
+    target = _truncate_chat_messages(
+        db, session.id, "03", include_message=False
+    )
+    target.content = "Edited second"
+    db.commit()
+
+    remaining = db.query(ChatMessage).order_by(ChatMessage.id).all()
+    assert [(message.id, message.content) for message in remaining] == [
+        ("01", "First"),
+        ("02", "Answer"),
+        ("03", "Edited second"),
+    ]
+
+
+def test_truncate_chat_messages_can_delete_target_and_following_history():
+    db = make_session()
+    session = ChatSession(id="session", title="Test", circular_ids="[]")
+    messages = [
+        ChatMessage(id="01", session_id=session.id, role="user", content="First"),
+        ChatMessage(id="02", session_id=session.id, role="assistant", content="Answer"),
+        ChatMessage(id="03", session_id=session.id, role="user", content="Second"),
+    ]
+    db.add_all([session, *messages])
+    db.commit()
+
+    _truncate_chat_messages(db, session.id, "02", include_message=True)
+    db.commit()
+
+    assert [message.id for message in db.query(ChatMessage).all()] == ["01"]

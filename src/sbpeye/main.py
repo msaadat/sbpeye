@@ -1202,9 +1202,16 @@ async def chat_page():
 
 @app.get("/api/chat/sessions")
 async def list_chat_sessions(db: Session = Depends(get_db)):
-    sessions = db.query(ChatSession).order_by(ChatSession.created_at.desc()).limit(50).all()
+    sessions = db.query(ChatSession).order_by(
+        func.coalesce(ChatSession.updated_at, ChatSession.created_at).desc()
+    ).limit(50).all()
     return [
-        {"id": s.id, "title": s.title, "created_at": s.created_at.isoformat() if s.created_at else None}
+        {
+            "id": s.id,
+            "title": s.title,
+            "created_at": _isoformat(s.created_at),
+            "updated_at": _isoformat(s.updated_at or s.created_at),
+        }
         for s in sessions
     ]
 
@@ -1214,7 +1221,9 @@ async def get_chat_session(session_id: str, db: Session = Depends(get_db)):
     session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
     if not session:
         return JSONResponse({"error": "Session not found"}, status_code=404)
-    messages = db.query(ChatMessage).filter(ChatMessage.session_id == session_id).order_by(ChatMessage.created_at).all()
+    messages = db.query(ChatMessage).filter(
+        ChatMessage.session_id == session_id
+    ).order_by(ChatMessage.created_at, ChatMessage.id).all()
     if session.circular_ids is not None:
         circular_ids = _normalize_circular_ids(_safe_json_list(session.circular_ids))
     else:
@@ -1231,7 +1240,13 @@ async def get_chat_session(session_id: str, db: Session = Depends(get_db)):
         "id": session.id,
         "title": session.title,
         "messages": [
-            {"id": m.id, "role": m.role, "content": m.content, "created_at": m.created_at.isoformat() if m.created_at else None}
+            {
+                "id": m.id,
+                "role": m.role,
+                "content": m.content,
+                "circular_ids": _normalize_circular_ids(_safe_json_list(m.circular_ids)),
+                "created_at": _isoformat(m.created_at),
+            }
             for m in messages
         ],
         "circulars": [
@@ -1242,6 +1257,23 @@ async def get_chat_session(session_id: str, db: Session = Depends(get_db)):
     }
 
 
+@app.patch("/api/chat/sessions/{session_id}")
+async def rename_chat_session(session_id: str, request: Request, db: Session = Depends(get_db)):
+    session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+    if not session:
+        return JSONResponse({"error": "Session not found"}, status_code=404)
+
+    data = await request.json()
+    title = data.get("title")
+    if not isinstance(title, str) or not title.strip():
+        return JSONResponse({"error": "Title cannot be empty"}, status_code=400)
+
+    session.title = title.strip()[:120]
+    session.updated_at = datetime.utcnow()
+    db.commit()
+    return {"id": session.id, "title": session.title, "updated_at": _isoformat(session.updated_at)}
+
+
 @app.delete("/api/chat/sessions/{session_id}")
 async def delete_chat_session(session_id: str, db: Session = Depends(get_db)):
     session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
@@ -1249,6 +1281,56 @@ async def delete_chat_session(session_id: str, db: Session = Depends(get_db)):
         return JSONResponse({"error": "Session not found"}, status_code=404)
     db.query(ChatMessage).filter(ChatMessage.session_id == session_id).delete()
     db.delete(session)
+    db.commit()
+    return {"success": True}
+
+
+def _ordered_chat_messages(db: Session, session_id: str) -> list[ChatMessage]:
+    return db.query(ChatMessage).filter(
+        ChatMessage.session_id == session_id
+    ).order_by(ChatMessage.created_at, ChatMessage.id).all()
+
+
+def _truncate_chat_messages(
+    db: Session,
+    session_id: str,
+    message_id: str,
+    *,
+    include_message: bool,
+) -> ChatMessage | None:
+    messages = _ordered_chat_messages(db, session_id)
+    target_index = next(
+        (index for index, message in enumerate(messages) if message.id == message_id),
+        None,
+    )
+    if target_index is None:
+        return None
+
+    target = messages[target_index]
+    delete_from = target_index if include_message else target_index + 1
+    delete_ids = [message.id for message in messages[delete_from:]]
+    if delete_ids:
+        db.query(ChatMessage).filter(ChatMessage.id.in_(delete_ids)).delete(
+            synchronize_session=False
+        )
+    return target
+
+
+@app.delete("/api/chat/sessions/{session_id}/messages/{message_id}")
+async def truncate_chat_session(
+    session_id: str,
+    message_id: str,
+    db: Session = Depends(get_db),
+):
+    session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+    if not session:
+        return JSONResponse({"error": "Session not found"}, status_code=404)
+    if not _truncate_chat_messages(
+        db, session_id, message_id, include_message=True
+    ):
+        return JSONResponse({"error": "Message not found"}, status_code=404)
+
+    session.updated_at = datetime.utcnow()
     db.commit()
     return {"success": True}
 
@@ -1296,6 +1378,7 @@ async def chat_message(request: Request, db: Session = Depends(get_db)):
             )
             db.add(session)
     session.circular_ids = json.dumps(circular_ids)
+    session.updated_at = datetime.utcnow()
 
     user_msg = ChatMessage(
         id=str(uuid.uuid4()),
@@ -1307,7 +1390,7 @@ async def chat_message(request: Request, db: Session = Depends(get_db)):
     db.add(user_msg)
     db.commit()
 
-    messages = db.query(ChatMessage).filter(ChatMessage.session_id == session_id).order_by(ChatMessage.created_at).all()
+    messages = _ordered_chat_messages(db, session_id)
     chat_messages = [{"role": m.role, "content": m.content} for m in messages]
 
     try:
@@ -1331,6 +1414,7 @@ async def chat_message(request: Request, db: Session = Depends(get_db)):
         content=response_text,
     )
     db.add(assistant_msg)
+    session.updated_at = datetime.utcnow()
     db.commit()
 
     return {"response": response_text, "session_id": session_id}
@@ -1342,9 +1426,15 @@ async def chat_message_stream(request: Request, db: Session = Depends(get_db)):
     message = data.get("message", "")
     circular_ids = _normalize_circular_ids(data.get("circular_ids", []))
     session_id = data.get("session_id")
+    replace_message_id = data.get("replace_message_id")
 
     if not message.strip():
         return JSONResponse({"error": "Message cannot be empty"}, status_code=400)
+
+    if replace_message_id and not session_id:
+        return JSONResponse(
+            {"error": "A session is required to replace a message"}, status_code=400
+        )
 
     if not session_id:
         session_id = str(uuid.uuid4())
@@ -1365,15 +1455,26 @@ async def chat_message_stream(request: Request, db: Session = Depends(get_db)):
             )
             db.add(session)
     session.circular_ids = json.dumps(circular_ids)
+    session.updated_at = datetime.utcnow()
 
-    user_msg = ChatMessage(
-        id=str(uuid.uuid4()),
-        session_id=session_id,
-        role="user",
-        content=message,
-        circular_ids=json.dumps(circular_ids) if circular_ids else None,
-    )
-    db.add(user_msg)
+    if replace_message_id:
+        user_msg = _truncate_chat_messages(
+            db, session_id, replace_message_id, include_message=False
+        )
+        if not user_msg or user_msg.role != "user":
+            db.rollback()
+            return JSONResponse({"error": "User message not found"}, status_code=404)
+        user_msg.content = message
+        user_msg.circular_ids = json.dumps(circular_ids) if circular_ids else None
+    else:
+        user_msg = ChatMessage(
+            id=str(uuid.uuid4()),
+            session_id=session_id,
+            role="user",
+            content=message,
+            circular_ids=json.dumps(circular_ids) if circular_ids else None,
+        )
+        db.add(user_msg)
     db.commit()
 
     def sse(event: str, payload: dict) -> str:
@@ -1385,7 +1486,7 @@ async def chat_message_stream(request: Request, db: Session = Depends(get_db)):
         try:
             yield sse("meta", {"session_id": session_id})
 
-            rows = stream_db.query(ChatMessage).filter(ChatMessage.session_id == session_id).order_by(ChatMessage.created_at).all()
+            rows = _ordered_chat_messages(stream_db, session_id)
             chat_messages = [{"role": m.role, "content": m.content} for m in rows]
             client = get_ai_client(stream_db)
             circulars_context = _build_chat_circulars_context(
@@ -1412,22 +1513,15 @@ async def chat_message_stream(request: Request, db: Session = Depends(get_db)):
                 content=response_text,
             )
             stream_db.add(assistant_msg)
+            stream_session = stream_db.query(ChatSession).filter(
+                ChatSession.id == session_id
+            ).first()
+            if stream_session:
+                stream_session.updated_at = datetime.utcnow()
             stream_db.commit()
-            yield sse("done", {"session_id": session_id})
+            yield sse("done", {"session_id": session_id, "message_id": assistant_msg.id})
         except Exception as e:
             stream_db.rollback()
-            error_text = f"Error generating response: {str(e)}"
-            if not response_parts:
-                response_parts.append(error_text)
-                yield sse("token", {"content": error_text})
-            assistant_msg = ChatMessage(
-                id=str(uuid.uuid4()),
-                session_id=session_id,
-                role="assistant",
-                content="".join(response_parts),
-            )
-            stream_db.add(assistant_msg)
-            stream_db.commit()
             yield sse("error", {"error": str(e), "session_id": session_id})
         finally:
             stream_db.close()

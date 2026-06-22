@@ -144,8 +144,13 @@ class ChatSession(Base):
     title = Column(String, nullable=True)
     circular_ids = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    messages = relationship("ChatMessage", back_populates="session", order_by="ChatMessage.created_at")
+    messages = relationship(
+        "ChatMessage",
+        back_populates="session",
+        order_by="(ChatMessage.created_at, ChatMessage.id)",
+    )
 
 class ChatMessage(Base):
     __tablename__ = "chat_messages"

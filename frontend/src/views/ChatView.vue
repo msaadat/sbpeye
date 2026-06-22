@@ -20,8 +20,10 @@ import {
   getChatSessions,
   getCircularDetail,
   getCircularSearch,
+  renameChatSession,
   resolveDocument,
   streamChatMessage,
+  truncateChatSession,
   type ChatMessage,
   type ChatSession,
   type CircularSummary,
@@ -50,11 +52,16 @@ const sessionsLoading = ref(false)
 const sessionLoading = ref(false)
 const searchLoading = ref(false)
 const sending = ref(false)
+const editingMessageId = ref<string | null>(null)
+const editDraft = ref('')
+const renamingSessionId = ref<string | null>(null)
+const renameDraft = ref('')
 const errorMessage = ref('')
 const messagesEl = ref<HTMLElement | null>(null)
 const attachmentDialogVisible = ref(false)
 const selectedAttachment = ref<ResolvedDocument | null>(null)
 let searchTimer: number | undefined
+let streamController: AbortController | null = null
 
 marked.use({
   breaks: true,
@@ -74,6 +81,10 @@ function formatDate(value?: string | null): string {
     day: '2-digit',
     year: 'numeric',
   }).format(new Date(value))
+}
+
+function sessionDate(session: ChatSession): string {
+  return formatDate(session.updated_at || session.created_at)
 }
 
 function renderMarkdown(content: string): string {
@@ -180,6 +191,7 @@ async function loadSessions() {
 }
 
 async function loadSession(sessionId: string) {
+  if (sending.value) return
   sessionLoading.value = true
   errorMessage.value = ''
 
@@ -197,11 +209,37 @@ async function loadSession(sessionId: string) {
 }
 
 function newSession() {
+  if (sending.value) return
   currentSessionId.value = null
   messages.value = []
   selectedCirculars.value = []
   inputMessage.value = ''
   errorMessage.value = ''
+  editingMessageId.value = null
+  renamingSessionId.value = null
+}
+
+function startRenaming(session: ChatSession) {
+  renamingSessionId.value = session.id
+  renameDraft.value = session.title || 'New chat'
+}
+
+async function saveSessionTitle(sessionId: string) {
+  const title = renameDraft.value.trim()
+  if (!title) return
+
+  try {
+    await renameChatSession(sessionId, title)
+    renamingSessionId.value = null
+    await loadSessions()
+  } catch (error) {
+    toast.add({
+      severity: 'error',
+      summary: 'Rename failed',
+      detail: error instanceof Error ? error.message : 'Unable to rename this session.',
+      life: 6000,
+    })
+  }
 }
 
 function confirmDeleteSession(sessionId: string) {
@@ -241,6 +279,48 @@ async function removeSession(sessionId: string) {
       severity: 'error',
       summary: 'Delete failed',
       detail: error instanceof Error ? error.message : 'Unable to delete this session.',
+      life: 6000,
+    })
+  }
+}
+
+async function copyMessage(content: string) {
+  try {
+    await navigator.clipboard.writeText(content)
+    toast.add({ severity: 'success', summary: 'Copied', life: 1800 })
+  } catch {
+    toast.add({ severity: 'error', summary: 'Copy failed', life: 4000 })
+  }
+}
+
+function startEditing(message: LocalMessage) {
+  editingMessageId.value = message.id
+  editDraft.value = message.content
+}
+
+function confirmDeleteMessage(message: LocalMessage) {
+  if (!currentSessionId.value) return
+  confirm.require({
+    message: 'Delete this message and all responses after it?',
+    header: 'Delete conversation history',
+    icon: 'pi pi-trash',
+    rejectProps: { label: 'Cancel', severity: 'secondary', outlined: true },
+    acceptProps: { label: 'Delete', severity: 'danger' },
+    accept: () => void deleteMessage(message),
+  })
+}
+
+async function deleteMessage(message: LocalMessage) {
+  if (!currentSessionId.value) return
+  try {
+    await truncateChatSession(currentSessionId.value, message.id)
+    await loadSession(currentSessionId.value)
+    await loadSessions()
+  } catch (error) {
+    toast.add({
+      severity: 'error',
+      summary: 'Delete failed',
+      detail: error instanceof Error ? error.message : 'Unable to delete this message.',
       life: 6000,
     })
   }
@@ -298,25 +378,40 @@ async function loadCircularContextFromQuery() {
   await router.replace({ path: '/chat' })
 }
 
-async function sendMessage() {
-  const text = inputMessage.value.trim()
+async function generateMessage(
+  textValue: string,
+  replaceMessage?: LocalMessage,
+) {
+  const text = textValue.trim()
   if (!text || sending.value) {
     return
   }
 
-  inputMessage.value = ''
   errorMessage.value = ''
   sending.value = true
+  editingMessageId.value = null
+  const circularIds = replaceMessage?.circular_ids?.length
+    ? replaceMessage.circular_ids
+    : selectedCirculars.value.map((item) => item.id)
 
-  messages.value = [
-    ...messages.value,
-    {
-      id: `local-${Date.now()}`,
-      role: 'user',
-      content: text,
-      pending: true,
-    },
-  ]
+  if (replaceMessage) {
+    const targetIndex = messages.value.findIndex((message) => message.id === replaceMessage.id)
+    messages.value = [
+      ...messages.value.slice(0, targetIndex),
+      { ...replaceMessage, content: text, pending: false },
+    ]
+  } else {
+    messages.value = [
+      ...messages.value,
+      {
+        id: `local-${Date.now()}`,
+        role: 'user',
+        content: text,
+        circular_ids: circularIds,
+        pending: true,
+      },
+    ]
+  }
   await scrollToBottom()
 
   try {
@@ -332,11 +427,13 @@ async function sendMessage() {
     ]
     await scrollToBottom()
 
+    streamController = new AbortController()
     await streamChatMessage(
       {
         message: text,
         session_id: currentSessionId.value,
-        circular_ids: selectedCirculars.value.map((item) => item.id),
+        circular_ids: circularIds,
+        replace_message_id: replaceMessage?.id,
       },
       {
         onSession: (sessionId) => {
@@ -357,19 +454,81 @@ async function sendMessage() {
           }
         },
       },
+      streamController.signal,
     )
 
-    messages.value = messages.value.map((message) =>
-      message.id === assistantId ? { ...message, pending: false } : message,
-    )
+    if (currentSessionId.value) {
+      await loadSession(currentSessionId.value)
+    }
     await loadSessions()
     await scrollToBottom()
   } catch (error) {
-    messages.value = messages.value.filter((message) => !message.pending)
-    errorMessage.value = error instanceof Error ? error.message : 'Unable to send message.'
+    if (currentSessionId.value) {
+      await loadSession(currentSessionId.value)
+    } else {
+      messages.value = messages.value.filter((message) => !message.pending)
+    }
+    if (!(error instanceof DOMException && error.name === 'AbortError')) {
+      errorMessage.value = error instanceof Error ? error.message : 'Unable to send message.'
+    }
   } finally {
+    streamController = null
     sending.value = false
   }
+}
+
+function sendMessage() {
+  const text = inputMessage.value
+  inputMessage.value = ''
+  void generateMessage(text)
+}
+
+function saveEditedMessage(message: LocalMessage) {
+  const text = editDraft.value.trim()
+  if (!text || text === message.content) {
+    editingMessageId.value = null
+    return
+  }
+  confirm.require({
+    message: 'Editing this message will replace all responses after it. Continue?',
+    header: 'Edit conversation history',
+    icon: 'pi pi-pencil',
+    rejectProps: { label: 'Cancel', severity: 'secondary', outlined: true },
+    acceptProps: { label: 'Edit and regenerate' },
+    accept: () => void generateMessage(text, message),
+  })
+}
+
+function regenerateMessage(assistantIndex: number) {
+  const userMessage = [...messages.value.slice(0, assistantIndex)]
+    .reverse()
+    .find((message) => message.role === 'user')
+  if (!userMessage) return
+  if (assistantIndex < messages.value.length - 1) {
+    confirm.require({
+      message: 'Regenerating this response will replace all later messages. Continue?',
+      header: 'Regenerate response',
+      icon: 'pi pi-refresh',
+      rejectProps: { label: 'Cancel', severity: 'secondary', outlined: true },
+      acceptProps: { label: 'Regenerate' },
+      accept: () => void generateMessage(userMessage.content, userMessage),
+    })
+    return
+  }
+  void generateMessage(userMessage.content, userMessage)
+}
+
+function retryMessage(message: LocalMessage) {
+  void generateMessage(message.content, message)
+}
+
+function stopGeneration() {
+  streamController?.abort()
+}
+
+function isUnansweredUser(index: number): boolean {
+  return messages.value[index].role === 'user'
+    && (!messages.value[index + 1] || messages.value[index + 1].role !== 'assistant')
 }
 
 watch(contextQuery, () => {
@@ -393,7 +552,7 @@ onMounted(async () => {
       <Card class="session-panel">
         <template #content>
           <div class="session-panel-actions">
-            <Button label="New" icon="pi pi-plus" size="small" fluid @click="newSession" />
+            <Button label="New" icon="pi pi-plus" size="small" fluid :disabled="sending" @click="newSession" />
           </div>
 
           <div v-if="sessionsLoading" class="preview-loading compact-loading">
@@ -408,18 +567,45 @@ onMounted(async () => {
               class="session-item"
               :class="{ active: session.id === currentSessionId }"
             >
-              <button type="button" @click="loadSession(session.id)">
-                <strong>{{ session.title || 'New chat' }}</strong>
-                <span>{{ formatDate(session.created_at) }}</span>
-              </button>
-              <Button
-                icon="pi pi-trash"
-                text
-                rounded
-                severity="danger"
-                aria-label="Delete session"
-                @click="confirmDeleteSession(session.id)"
-              />
+              <form
+                v-if="renamingSessionId === session.id"
+                class="session-rename"
+                @submit.prevent="saveSessionTitle(session.id)"
+              >
+                <InputText
+                  v-model="renameDraft"
+                  autofocus
+                  maxlength="120"
+                  aria-label="Session title"
+                  @keydown.escape="renamingSessionId = null"
+                />
+                <Button icon="pi pi-check" type="submit" text rounded aria-label="Save session title" />
+                <Button icon="pi pi-times" type="button" text rounded severity="secondary" aria-label="Cancel rename" @click="renamingSessionId = null" />
+              </form>
+              <template v-else>
+                <button type="button" :disabled="sending" @click="loadSession(session.id)">
+                  <strong>{{ session.title || 'New chat' }}</strong>
+                  <span>{{ sessionDate(session) }}</span>
+                </button>
+                <div class="session-item-actions">
+                  <Button
+                    icon="pi pi-pencil"
+                    text
+                    rounded
+                    severity="secondary"
+                    aria-label="Rename session"
+                    @click="startRenaming(session)"
+                  />
+                  <Button
+                    icon="pi pi-trash"
+                    text
+                    rounded
+                    severity="danger"
+                    aria-label="Delete session"
+                    @click="confirmDeleteSession(session.id)"
+                  />
+                </div>
+              </template>
             </div>
           </div>
 
@@ -498,22 +684,87 @@ onMounted(async () => {
               </Message>
 
               <article
-                v-for="message in messages"
+                v-for="(message, index) in messages"
                 v-else
                 :key="message.id"
                 :class="messageClass(message.role)"
               >
                 <div class="chat-message-meta">
                   <strong>{{ message.role === 'user' ? 'You' : 'Assistant' }}</strong>
-                  <span v-if="message.pending">Sending</span>
+                  <div class="message-actions">
+                    <span v-if="message.pending">Sending</span>
+                    <Button
+                      icon="pi pi-copy"
+                      text
+                      rounded
+                      size="small"
+                      severity="secondary"
+                      aria-label="Copy message"
+                      title="Copy"
+                      @click="copyMessage(message.content)"
+                    />
+                    <Button
+                      v-if="message.role === 'user' && !message.pending"
+                      icon="pi pi-pencil"
+                      text
+                      rounded
+                      size="small"
+                      severity="secondary"
+                      aria-label="Edit message"
+                      title="Edit and regenerate"
+                      :disabled="sending"
+                      @click="startEditing(message)"
+                    />
+                    <Button
+                      v-if="message.role === 'assistant' && !message.pending"
+                      icon="pi pi-refresh"
+                      text
+                      rounded
+                      size="small"
+                      severity="secondary"
+                      aria-label="Regenerate response"
+                      title="Regenerate"
+                      :disabled="sending"
+                      @click="regenerateMessage(index)"
+                    />
+                    <Button
+                      v-if="!message.pending"
+                      icon="pi pi-trash"
+                      text
+                      rounded
+                      size="small"
+                      severity="danger"
+                      aria-label="Delete message and following history"
+                      title="Delete from here"
+                      :disabled="sending"
+                      @click="confirmDeleteMessage(message)"
+                    />
+                  </div>
+                </div>
+                <div v-if="editingMessageId === message.id" class="message-editor">
+                  <Textarea v-model="editDraft" rows="3" auto-resize autofocus />
+                  <div class="message-editor-actions">
+                    <Button label="Cancel" size="small" text severity="secondary" @click="editingMessageId = null" />
+                    <Button label="Save and regenerate" size="small" @click="saveEditedMessage(message)" />
+                  </div>
                 </div>
                 <div
-                  v-if="message.role === 'assistant'"
+                  v-else-if="message.role === 'assistant'"
                   class="markdown-body"
                   v-html="renderMarkdown(message.content)"
                   @click="handleCitationClick"
                 />
                 <p v-else>{{ message.content }}</p>
+                <Button
+                  v-if="isUnansweredUser(index) && !message.pending"
+                  class="retry-message"
+                  icon="pi pi-refresh"
+                  label="Retry"
+                  size="small"
+                  text
+                  :disabled="sending"
+                  @click="retryMessage(message)"
+                />
               </article>
 
               <div v-if="sending" class="assistant-typing">
@@ -533,10 +784,19 @@ onMounted(async () => {
               />
               <div class="composer-actions">
                 <Button
+                  v-if="sending"
+                  icon="pi pi-stop"
+                  label="Stop"
+                  type="button"
+                  severity="danger"
+                  outlined
+                  @click="stopGeneration"
+                />
+                <Button
+                  v-else
                   icon="pi pi-send"
                   label="Send"
                   type="submit"
-                  :loading="sending"
                   :disabled="!inputMessage.trim()"
                 />
               </div>

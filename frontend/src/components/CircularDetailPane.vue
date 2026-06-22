@@ -67,6 +67,7 @@ const generationFeatures: Array<{ feature: GenerationFeature; label: string; ico
 ]
 
 const sourceUrl = computed(() => source.value?.url || circular.value?.url || '')
+const sourceWebsiteUrl = computed(() => source.value?.original_url || circular.value?.url || source.value?.url || '')
 const isPdf = computed(() => source.value?.type === 'pdf' || sourceUrl.value.toLowerCase().split('?', 1)[0].endsWith('.pdf'))
 
 function formatDate(value?: string | null): string {
@@ -323,6 +324,19 @@ onBeforeUnmount(stopPolling)
               aria-label="Open checklist Excel file"
               title="Open checklist Excel file"
               @click="exportChecklist"
+            />
+            <Button
+              v-if="sourceWebsiteUrl"
+              as="a"
+              :href="sourceWebsiteUrl"
+              target="_blank"
+              rel="noopener noreferrer"
+              icon="pi pi-external-link"
+              text
+              rounded
+              severity="info"
+              aria-label="View on SBP website"
+              title="View on SBP website"
             />
             <Button icon="pi pi-refresh" text rounded severity="secondary" :loading="refreshingSource" aria-label="Refresh from SBP" title="Refresh local copy from SBP" @click="refreshFromSbp" />
             <Button icon="pi pi-comments" text rounded severity="contrast" aria-label="Open in chat" title="Open in chat" @click="handoffToChat" />

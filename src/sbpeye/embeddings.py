@@ -1,8 +1,9 @@
 import os
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 import numpy as np
 from openai import OpenAI
@@ -16,6 +17,40 @@ load_app_env()
 
 DEFAULT_FASTEMBED_MODEL = "BAAI/bge-base-en-v1.5"
 DEFAULT_LM_STUDIO_URL = "http://localhost:1234/v1"
+QUERY_CACHE_SIZE = 128
+
+
+def _embed_queries_with_cache(
+    queries: list[str],
+    cache: OrderedDict[str, list[float]],
+    lock: threading.Lock,
+    embed_missing: Callable[[list[str]], list[list[float]]],
+) -> list[list[float]]:
+    if not queries:
+        return []
+
+    resolved: dict[str, list[float]] = {}
+    with lock:
+        for query in queries:
+            if query in cache:
+                resolved[query] = cache[query]
+                cache.move_to_end(query)
+
+    missing = list(dict.fromkeys(query for query in queries if query not in resolved))
+    if missing:
+        embeddings = embed_missing(missing)
+        if len(embeddings) != len(missing):
+            raise RuntimeError("Embedding backend returned an unexpected number of results")
+
+        resolved.update(zip(missing, embeddings, strict=True))
+        with lock:
+            for query, embedding in zip(missing, embeddings, strict=True):
+                cache[query] = embedding
+                cache.move_to_end(query)
+                if len(cache) > QUERY_CACHE_SIZE:
+                    cache.popitem(last=False)
+
+    return [resolved[query] for query in queries]
 
 
 @dataclass(frozen=True)
@@ -118,6 +153,8 @@ class FastEmbedBackend:
         self.config = config
         self._model = None
         self._lock = threading.Lock()
+        self._query_cache: OrderedDict[str, list[float]] = OrderedDict()
+        self._query_cache_lock = threading.Lock()
 
     @staticmethod
     def _preferred_providers() -> list[str]:
@@ -206,10 +243,15 @@ class FastEmbedBackend:
         return self._as_lists(self._get_model().embed(documents))
 
     def embed_queries(self, queries: list[str]) -> list[list[float]]:
-        model = self._get_model()
-        if hasattr(model, "query_embed"):
-            return self._as_lists(model.query_embed(queries))
-        return self._as_lists(model.embed(queries))
+        def embed_missing(values: list[str]) -> list[list[float]]:
+            model = self._get_model()
+            if hasattr(model, "query_embed"):
+                return self._as_lists(model.query_embed(values))
+            return self._as_lists(model.embed(values))
+
+        return _embed_queries_with_cache(
+            queries, self._query_cache, self._query_cache_lock, embed_missing
+        )
 
 
 class LMStudioEmbeddingBackend:
@@ -221,6 +263,8 @@ class LMStudioEmbeddingBackend:
             timeout=30.0,
             max_retries=1,
         )
+        self._query_cache: OrderedDict[str, list[float]] = OrderedDict()
+        self._query_cache_lock = threading.Lock()
 
     def _embed(self, values: list[str]) -> list[list[float]]:
         response = self._client.embeddings.create(
@@ -233,7 +277,9 @@ class LMStudioEmbeddingBackend:
         return self._embed(documents)
 
     def embed_queries(self, queries: list[str]) -> list[list[float]]:
-        return self._embed(queries)
+        return _embed_queries_with_cache(
+            queries, self._query_cache, self._query_cache_lock, self._embed
+        )
 
 
 def create_embedding_backend(config: EmbeddingConfig) -> EmbeddingBackend:

@@ -2,6 +2,8 @@
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useToast } from 'primevue/usetoast'
+import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 import Button from 'primevue/button'
 import Message from 'primevue/message'
 import Popover from 'primevue/popover'
@@ -35,6 +37,11 @@ const emit = defineEmits<{ close: [] }>()
 const router = useRouter()
 const toast = useToast()
 
+marked.use({
+  breaks: true,
+  gfm: true,
+})
+
 const circular = ref<CircularDetail | null>(null)
 const source = ref<CircularSourceContent | null>(null)
 const loading = ref(false)
@@ -65,6 +72,13 @@ const isPdf = computed(() => source.value?.type === 'pdf' || sourceUrl.value.toL
 function formatDate(value?: string | null): string {
   if (!value) return ''
   return new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short', day: '2-digit' }).format(new Date(value))
+}
+
+function renderMarkdown(content?: string | null): string {
+  if (!content) return ''
+  return DOMPurify.sanitize(marked.parse(content) as string, {
+    USE_PROFILES: { html: true },
+  })
 }
 
 function statusSeverity(status?: string | null): 'success' | 'info' | 'warn' | 'danger' | 'secondary' {
@@ -359,7 +373,11 @@ onBeforeUnmount(stopPolling)
             <i :class="summaryExpanded ? 'pi pi-chevron-up' : 'pi pi-chevron-down'" />
           </button>
         </h2>
-        <p v-show="summaryExpanded" class="detail-copy">{{ circular.summary }}</p>
+        <div
+          v-show="summaryExpanded"
+          class="detail-copy markdown-body summary-markdown"
+          v-html="renderMarkdown(circular.summary)"
+        />
       </section>
 
       <section

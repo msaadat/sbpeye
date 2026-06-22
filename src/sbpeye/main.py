@@ -86,6 +86,27 @@ def _isoformat(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
 
 
+def _summary_preview(value: str | None, limit: int = 200) -> str | None:
+    if not value:
+        return None
+    text = value
+    text = _re.sub(r"```.*?```", " ", text, flags=_re.DOTALL)
+    text = _re.sub(r"`([^`]*)`", r"\1", text)
+    text = _re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", text)
+    text = _re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = _re.sub(r"^#{1,6}\s*", "", text, flags=_re.MULTILINE)
+    text = _re.sub(r"^>\s*", "", text, flags=_re.MULTILINE)
+    text = _re.sub(r"^\s*[-*+]\s+", "", text, flags=_re.MULTILINE)
+    text = _re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    text = _re.sub(r"\*([^*]+)\*", r"\1", text)
+    text = _re.sub(r"_([^_]+)_", r"\1", text)
+    text = _re.sub(r"\s+", " ", text).strip()
+    if len(text) <= limit:
+        return text
+    clipped = text[:limit].rsplit(" ", 1)[0].strip()
+    return (clipped or text[:limit].strip()) + "..."
+
+
 def _circular_summary(
     circular: Circular,
     snippet: str | None = None,
@@ -102,7 +123,7 @@ def _circular_summary(
         "reference": circular.reference,
         "date": circular.date.strftime("%Y-%m-%d") if circular.date else None,
         "url": circular.url,
-        "summary": circular.summary[:200] if circular.summary else None,
+        "summary": _summary_preview(circular.summary),
         "tags": _safe_json_list(circular.tags),
         "status": circular.status or "active",
         "snippet": snippet or "",

@@ -9,6 +9,7 @@ wheels/
 # Virtual environments
 .venv
 .env.local
+.codex
 
 # Frontend
 frontend/node_modules/

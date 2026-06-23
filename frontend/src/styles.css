@@ -1657,7 +1657,7 @@ a {
 .source-section .source-frame {
   width: 100%;
   max-height: none;
-  overflow-x: hidden;
+  overflow-x: auto;
 }
 
 .source-section .sbp-source-content {
@@ -1666,7 +1666,7 @@ a {
   max-width: 100%;
   padding: 0.85rem;
   font-size: 0.82rem;
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
 }
 
 .source-section .sbp-source-content > *,
@@ -1689,18 +1689,29 @@ a {
 }
 
 .source-section .sbp-source-content table {
+  max-width: none !important;
+  table-layout: auto;
+}
+
+.source-section .sbp-source-content table[border="0"],
+.source-section .sbp-source-content table:not([border]) {
   width: 100% !important;
   max-width: 100% !important;
-  table-layout: fixed;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
 }
 
 .source-section .sbp-source-content td,
 .source-section .sbp-source-content th {
-  width: auto !important;
-  min-width: 0 !important;
   white-space: normal !important;
-  overflow-wrap: anywhere;
-  word-break: break-word;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.source-section .sbp-source-content table * {
+  max-width: none !important;
+  overflow-wrap: normal !important;
+  word-break: normal;
 }
 
 .source-section .sbp-source-content pre,

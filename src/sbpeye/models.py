@@ -90,6 +90,40 @@ class AIGenerationJob(Base):
     started_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
 
+
+class ResearchWorkspace(Base):
+    __tablename__ = "research_workspaces"
+
+    id = Column(String, primary_key=True)
+    name = Column(String, nullable=False)
+    search_state = Column(Text, nullable=True)
+    last_circular_id = Column(String, ForeignKey("circulars.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    pinned_circulars = relationship(
+        "WorkspaceCircular",
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        order_by="WorkspaceCircular.added_at.desc()",
+    )
+
+
+class WorkspaceCircular(Base):
+    __tablename__ = "workspace_circulars"
+
+    workspace_id = Column(
+        String, ForeignKey("research_workspaces.id"), primary_key=True
+    )
+    circular_id = Column(String, ForeignKey("circulars.id"), primary_key=True)
+    role = Column(String, nullable=False, default="pinned")
+    note = Column(Text, nullable=True)
+    added_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_viewed_at = Column(DateTime, nullable=True)
+
+    workspace = relationship("ResearchWorkspace", back_populates="pinned_circulars")
+    circular = relationship("Circular")
+
 class EcoDataSeries(Base):
     __tablename__ = "ecodata_series"
 

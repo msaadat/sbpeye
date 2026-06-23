@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useConfirm } from 'primevue/useconfirm'
 import { useToast } from 'primevue/usetoast'
 import Button from 'primevue/button'
 import Checkbox from 'primevue/checkbox'
@@ -11,13 +12,21 @@ import Select from 'primevue/select'
 import CircularDetailPane from '@/components/CircularDetailPane.vue'
 import CircularResultContent from '@/components/CircularResultContent.vue'
 import {
+  createResearchWorkspace,
+  deleteResearchWorkspace,
   downloadBatchZip,
   downloadCsvExport,
   getCircularDepartments,
   getCircularSearch,
   getCircularTags,
+  getResearchWorkspace,
+  getResearchWorkspaces,
+  pinWorkspaceCircular,
+  updateResearchWorkspace,
+  unpinWorkspaceCircular,
   type CircularSummary,
   type DepartmentCount,
+  type ResearchWorkspace,
   type SearchFilters,
   type TagCount,
 } from '@/lib/api'
@@ -26,13 +35,19 @@ interface SelectOption<T = string> { label: string; value: T }
 
 const route = useRoute()
 const router = useRouter()
+const confirm = useConfirm()
 const toast = useToast()
 
 const rows = ref<CircularSummary[]>([])
 const selectedIds = ref<string[]>([])
+const workspaces = ref<ResearchWorkspace[]>([])
+const activeWorkspaceId = ref('')
+const newWorkspaceName = ref('')
 const departments = ref<DepartmentCount[]>([])
 const tags = ref<TagCount[]>([])
 const loading = ref(false)
+const workspacesLoading = ref(false)
+const workspaceSaving = ref(false)
 const optionsLoading = ref(false)
 const exportLoading = ref(false)
 const zipLoading = ref(false)
@@ -53,6 +68,9 @@ const selectedCircularId = computed(() => typeof route.params.id === 'string' ? 
 const totalPages = computed(() => Math.max(1, Math.ceil(totalRecords.value / perPage.value)))
 const allPageSelected = computed(() => Boolean(rows.value.length) && rows.value.every((row) => selectedIds.value.includes(row.id)))
 const hasFilters = computed(() => Boolean(query.value.trim() || department.value || tag.value || startYear.value || endYear.value))
+const activeWorkspace = computed(() => workspaces.value.find((workspace) => workspace.id === activeWorkspaceId.value) || null)
+const pinnedCirculars = computed(() => activeWorkspace.value?.pinned_circulars || [])
+const pinnedIds = computed(() => new Set(activeWorkspace.value?.pinned_circular_ids || []))
 
 const sortOptions: SelectOption[] = [
   { label: 'Relevance', value: 'relevance' },
@@ -72,6 +90,13 @@ const departmentOptions = computed<SelectOption[]>(() => [
 const tagOptions = computed<SelectOption[]>(() => [
   { label: 'All tags', value: '' },
   ...tags.value.map((item) => ({ label: `${item.tag} (${item.count.toLocaleString()})`, value: item.tag })),
+])
+const workspaceOptions = computed<SelectOption[]>(() => [
+  { label: 'No workspace', value: '' },
+  ...workspaces.value.map((workspace) => ({
+    label: `${workspace.name} (${workspace.pinned_count.toLocaleString()})`,
+    value: workspace.id,
+  })),
 ])
 const filters = computed<SearchFilters>(() => ({
   q: query.value.trim(), start_year: startYear.value, end_year: endYear.value,
@@ -94,8 +119,33 @@ function readRouteFilters() {
   perPage.value = [20, 50, 100].includes(Number(queryString(route.query.per_page))) ? Number(queryString(route.query.per_page)) : 20
 }
 
+function routeHasSearchState(): boolean {
+  return Boolean(
+    queryString(route.query.q)
+    || queryString(route.query.department)
+    || queryString(route.query.tag)
+    || queryString(route.query.start_year)
+    || queryString(route.query.end_year)
+    || queryString(route.query.sort_by)
+    || queryString(route.query.page)
+    || queryString(route.query.per_page),
+  )
+}
+
+function applySearchState(state: SearchFilters = {}) {
+  query.value = typeof state.q === 'string' ? state.q : ''
+  department.value = typeof state.department === 'string' && state.department ? state.department : null
+  tag.value = typeof state.tag === 'string' && state.tag ? state.tag : null
+  startYear.value = Number(state.start_year) || null
+  endYear.value = Number(state.end_year) || null
+  sortBy.value = typeof state.sort_by === 'string' && state.sort_by ? state.sort_by : 'relevance'
+  page.value = Math.max(1, Number(state.page) || 1)
+  perPage.value = [20, 50, 100].includes(Number(state.per_page)) ? Number(state.per_page) : 20
+}
+
 function routeQuery(): Record<string, string> {
   const result: Record<string, string> = {}
+  if (activeWorkspaceId.value) result.workspace = activeWorkspaceId.value
   if (query.value.trim()) result.q = query.value.trim()
   if (department.value) result.department = department.value
   if (tag.value) result.tag = tag.value
@@ -109,6 +159,86 @@ function routeQuery(): Record<string, string> {
 
 async function syncRoute() {
   await router.replace({ path: selectedCircularId.value ? `/circulars/${selectedCircularId.value}` : '/circulars', query: routeQuery() })
+}
+
+function upsertWorkspace(workspace: ResearchWorkspace) {
+  const index = workspaces.value.findIndex((item) => item.id === workspace.id)
+  if (index >= 0) {
+    workspaces.value = [
+      ...workspaces.value.slice(0, index),
+      workspace,
+      ...workspaces.value.slice(index + 1),
+    ]
+  } else {
+    workspaces.value = [workspace, ...workspaces.value]
+  }
+}
+
+async function saveActiveWorkspaceState(overrides: {
+  name?: string
+  search_state?: SearchFilters
+  last_circular_id?: string | null
+} = {}) {
+  if (!activeWorkspaceId.value) return
+  try {
+    const workspace = await updateResearchWorkspace(activeWorkspaceId.value, {
+      search_state: filters.value,
+      last_circular_id: selectedCircularId.value || null,
+      ...overrides,
+    })
+    upsertWorkspace(workspace)
+  } catch (error) {
+    toast.add({ severity: 'warn', summary: 'Workspace not saved', detail: error instanceof Error ? error.message : 'Unable to save workspace state.', life: 4000 })
+  }
+}
+
+async function activateWorkspace(workspaceId: string, restoreState = true) {
+  if (!workspaceId) {
+    activeWorkspaceId.value = ''
+    localStorage.removeItem('sbpeye-active-workspace')
+    await syncRoute()
+    return
+  }
+
+  workspacesLoading.value = true
+  try {
+    const workspace = await getResearchWorkspace(workspaceId)
+    upsertWorkspace(workspace)
+    activeWorkspaceId.value = workspace.id
+    localStorage.setItem('sbpeye-active-workspace', workspace.id)
+    if (restoreState) {
+      applySearchState(workspace.search_state)
+      await router.replace({
+        path: workspace.last_circular_id ? `/circulars/${workspace.last_circular_id}` : '/circulars',
+        query: routeQuery(),
+      })
+    } else {
+      await syncRoute()
+    }
+  } catch (error) {
+    activeWorkspaceId.value = ''
+    localStorage.removeItem('sbpeye-active-workspace')
+    toast.add({ severity: 'error', summary: 'Workspace unavailable', detail: error instanceof Error ? error.message : 'Unable to open workspace.', life: 6000 })
+  } finally {
+    workspacesLoading.value = false
+  }
+}
+
+async function loadWorkspaces() {
+  workspacesLoading.value = true
+  try {
+    workspaces.value = await getResearchWorkspaces()
+    const requestedWorkspaceId = queryString(route.query.workspace)
+    const storedWorkspaceId = localStorage.getItem('sbpeye-active-workspace') || ''
+    const workspaceId = requestedWorkspaceId || (!routeHasSearchState() ? storedWorkspaceId : '')
+    if (workspaceId && workspaces.value.some((workspace) => workspace.id === workspaceId)) {
+      await activateWorkspace(workspaceId, true)
+    }
+  } catch (error) {
+    toast.add({ severity: 'warn', summary: 'Workspaces unavailable', detail: error instanceof Error ? error.message : 'Unable to load research workspaces.', life: 5000 })
+  } finally {
+    workspacesLoading.value = false
+  }
 }
 
 async function loadOptions() {
@@ -136,6 +266,7 @@ async function loadCirculars(resetPage = false) {
     page.value = response.page
     perPage.value = response.per_page
     await syncRoute()
+    await saveActiveWorkspaceState()
   } catch (error) {
     if (controller !== searchController) return
     rows.value = []
@@ -146,6 +277,89 @@ async function loadCirculars(resetPage = false) {
   } finally {
     window.clearTimeout(timeout)
     if (controller === searchController) loading.value = false
+  }
+}
+
+async function createWorkspace() {
+  const name = newWorkspaceName.value.trim()
+  if (!name || workspaceSaving.value) return
+  workspaceSaving.value = true
+  try {
+    let workspace = await createResearchWorkspace({
+      name,
+      search_state: filters.value,
+      last_circular_id: selectedCircularId.value || null,
+    })
+    upsertWorkspace(workspace)
+    activeWorkspaceId.value = workspace.id
+    localStorage.setItem('sbpeye-active-workspace', workspace.id)
+    newWorkspaceName.value = ''
+
+    for (const circularId of selectedIds.value) {
+      workspace = await pinWorkspaceCircular(workspace.id, circularId)
+    }
+    upsertWorkspace(workspace)
+    await syncRoute()
+    toast.add({ severity: 'success', summary: 'Workspace created', life: 2200 })
+  } catch (error) {
+    toast.add({ severity: 'error', summary: 'Workspace not created', detail: error instanceof Error ? error.message : 'Unable to create workspace.', life: 6000 })
+  } finally {
+    workspaceSaving.value = false
+  }
+}
+
+async function handleWorkspaceChange() {
+  await activateWorkspace(activeWorkspaceId.value, true)
+  await loadCirculars()
+}
+
+function confirmDeleteWorkspace() {
+  if (!activeWorkspace.value || workspaceSaving.value) return
+  const workspace = activeWorkspace.value
+  confirm.require({
+    message: `Delete "${workspace.name}"? Pinned circulars stay in the SBPEye index.`,
+    header: 'Delete workspace',
+    icon: 'pi pi-trash',
+    rejectProps: { label: 'Cancel', severity: 'secondary', outlined: true },
+    acceptProps: { label: 'Delete', severity: 'danger' },
+    accept: () => { void removeWorkspace(workspace.id) },
+  })
+}
+
+async function removeWorkspace(workspaceId: string) {
+  workspaceSaving.value = true
+  try {
+    await deleteResearchWorkspace(workspaceId)
+    workspaces.value = workspaces.value.filter((workspace) => workspace.id !== workspaceId)
+    if (activeWorkspaceId.value === workspaceId) {
+      activeWorkspaceId.value = ''
+      localStorage.removeItem('sbpeye-active-workspace')
+      await syncRoute()
+    }
+    toast.add({ severity: 'success', summary: 'Workspace deleted', life: 2200 })
+  } catch (error) {
+    toast.add({ severity: 'error', summary: 'Delete failed', detail: error instanceof Error ? error.message : 'Unable to delete workspace.', life: 6000 })
+  } finally {
+    workspaceSaving.value = false
+  }
+}
+
+function isPinned(id: string): boolean {
+  return pinnedIds.value.has(id)
+}
+
+async function togglePinned(id: string) {
+  if (!activeWorkspaceId.value || workspaceSaving.value) return
+  workspaceSaving.value = true
+  try {
+    const workspace = isPinned(id)
+      ? await unpinWorkspaceCircular(activeWorkspaceId.value, id)
+      : await pinWorkspaceCircular(activeWorkspaceId.value, id)
+    upsertWorkspace(workspace)
+  } catch (error) {
+    toast.add({ severity: 'error', summary: 'Workspace update failed', detail: error instanceof Error ? error.message : 'Unable to update pinned circulars.', life: 6000 })
+  } finally {
+    workspaceSaving.value = false
   }
 }
 
@@ -168,12 +382,14 @@ function togglePageSelection() {
   }
 }
 
-function openCircular(id: string) {
-  void router.push({ path: `/circulars/${id}`, query: routeQuery() })
+async function openCircular(id: string) {
+  await router.push({ path: `/circulars/${id}`, query: routeQuery() })
+  await saveActiveWorkspaceState({ last_circular_id: id })
 }
 
 function closeCircular() {
   void router.push({ path: '/circulars', query: routeQuery() })
+  void saveActiveWorkspaceState({ last_circular_id: null })
 }
 
 async function exportCsv() {
@@ -195,6 +411,11 @@ function handoffToChat() {
   if (selectedIds.value.length) void router.push({ path: '/chat', query: { circular_ids: selectedIds.value.join(',') } })
 }
 
+function handoffWorkspaceToChat() {
+  const circularIds = activeWorkspace.value?.pinned_circular_ids || []
+  if (circularIds.length) void router.push({ path: '/chat', query: { circular_ids: circularIds.join(',') } })
+}
+
 function changePage(offset: number) {
   page.value = Math.min(totalPages.value, Math.max(1, page.value + offset))
   void loadCirculars()
@@ -202,9 +423,10 @@ function changePage(offset: number) {
 
 watch(perPage, () => { if (!loading.value) void loadCirculars(true) })
 
-onMounted(() => {
+onMounted(async () => {
   readRouteFilters()
   void loadOptions()
+  await loadWorkspaces()
   void loadCirculars()
 })
 
@@ -218,6 +440,54 @@ onBeforeUnmount(() => searchController?.abort())
         <div><span>Circulars</span><strong>Search workspace</strong></div>
         <Button icon="pi pi-filter-slash" size="small" text rounded aria-label="Reset filters" :disabled="!hasFilters" @click="clearFilters" />
       </div>
+
+      <section class="research-workspace-panel">
+        <div class="workspace-panel-heading">
+          <span>Research workspace</span>
+          <Button
+            icon="pi pi-trash"
+            size="small"
+            text
+            rounded
+            severity="danger"
+            aria-label="Delete workspace"
+            :disabled="!activeWorkspace || workspaceSaving"
+            @click="confirmDeleteWorkspace"
+          />
+        </div>
+        <Select
+          v-model="activeWorkspaceId"
+          :options="workspaceOptions"
+          option-label="label"
+          option-value="value"
+          size="small"
+          :loading="workspacesLoading"
+          @change="handleWorkspaceChange"
+        />
+        <form class="workspace-create-form" @submit.prevent="createWorkspace">
+          <InputText v-model="newWorkspaceName" size="small" maxlength="120" placeholder="New topic name" />
+          <Button icon="pi pi-plus" type="submit" size="small" text rounded aria-label="Create workspace" :disabled="!newWorkspaceName.trim()" :loading="workspaceSaving" />
+        </form>
+        <div v-if="activeWorkspace" class="workspace-pinned-block">
+          <div class="workspace-pinned-heading">
+            <span>{{ pinnedCirculars.length }} pinned</span>
+            <Button label="Chat" icon="pi pi-comments" size="small" text :disabled="!pinnedCirculars.length" @click="handoffWorkspaceToChat" />
+          </div>
+          <div v-if="pinnedCirculars.length" class="workspace-pinned-list">
+            <div
+              v-for="circular in pinnedCirculars"
+              :key="circular.id"
+              class="workspace-pinned-item"
+              :class="{ active: circular.id === selectedCircularId }"
+            >
+              <button type="button" @click="openCircular(circular.id)">
+                <span>{{ circular.reference || circular.title }}</span>
+              </button>
+              <Button icon="pi pi-times" text rounded size="small" severity="secondary" :aria-label="`Unpin ${circular.title}`" @click.stop="togglePinned(circular.id)" />
+            </div>
+          </div>
+        </div>
+      </section>
 
       <form class="filter-stack" @submit.prevent="loadCirculars(true)">
         <label><span>Search</span><span class="filter-search"><i class="pi pi-search" /><InputText v-model="query" size="small" placeholder="Reference, title, policy..." /></span></label>
@@ -260,6 +530,16 @@ onBeforeUnmount(() => searchController?.abort())
         >
           <span class="result-select" @click.stop>
             <Checkbox v-model="selectedIds" :value="row.id" :input-id="`select-${row.id}`" :aria-label="`Select ${row.title}`" />
+            <Button
+              :icon="isPinned(row.id) ? 'pi pi-star-fill' : 'pi pi-star'"
+              text
+              rounded
+              size="small"
+              severity="secondary"
+              :disabled="!activeWorkspace"
+              :aria-label="isPinned(row.id) ? `Unpin ${row.title}` : `Pin ${row.title}`"
+              @click="togglePinned(row.id)"
+            />
           </span>
           <CircularResultContent
             :circular="row"

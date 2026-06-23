@@ -1210,6 +1210,95 @@ a {
   font-size: 0.9rem;
 }
 
+.research-workspace-panel {
+  display: grid;
+  gap: 0.4rem;
+  padding: 0.55rem 0;
+  border-bottom: 1px solid var(--sbp-border);
+}
+
+.workspace-panel-heading,
+.workspace-pinned-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.45rem;
+}
+
+.workspace-panel-heading span,
+.workspace-pinned-heading span {
+  color: var(--sbp-muted);
+  font-size: 0.68rem;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.research-workspace-panel .p-select,
+.workspace-create-form .p-inputtext {
+  min-width: 0;
+  width: 100%;
+}
+
+.workspace-create-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.25rem;
+}
+
+.workspace-pinned-block {
+  display: grid;
+  min-width: 0;
+  gap: 0.28rem;
+}
+
+.workspace-pinned-list {
+  display: grid;
+  max-height: 10.5rem;
+  overflow: auto;
+  border: 1px solid var(--sbp-border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--sbp-surface) 88%, transparent);
+}
+
+.workspace-pinned-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.2rem;
+  min-width: 0;
+  border-bottom: 1px solid var(--sbp-border);
+}
+
+.workspace-pinned-item:last-child {
+  border-bottom: 0;
+}
+
+.workspace-pinned-item.active {
+  background: color-mix(in srgb, var(--sbp-green) 10%, var(--sbp-surface));
+}
+
+.workspace-pinned-item > button:first-child {
+  min-width: 0;
+  padding: 0.42rem 0.5rem;
+  border: 0;
+  color: var(--sbp-text);
+  font: inherit;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.workspace-pinned-item > button:first-child span {
+  display: block;
+  overflow: hidden;
+  color: var(--sbp-text);
+  font-size: 0.73rem;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .filter-stack {
   display: grid;
   gap: 0.45rem;
@@ -1348,7 +1437,16 @@ a {
 }
 
 .result-select {
+  display: grid;
+  justify-items: center;
+  gap: 0.2rem;
   padding-top: 0.08rem;
+}
+
+.result-select .p-button {
+  width: 1.45rem;
+  height: 1.45rem;
+  padding: 0;
 }
 
 .result-content {

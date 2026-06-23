@@ -319,6 +319,18 @@ export interface SearchFilters {
   per_page?: number
 }
 
+export interface ResearchWorkspace {
+  id: string
+  name: string
+  search_state: SearchFilters
+  last_circular_id?: string | null
+  pinned_circular_ids: string[]
+  pinned_circulars: CircularSummary[]
+  pinned_count: number
+  created_at?: string | null
+  updated_at?: string | null
+}
+
 const API_BASE = '/api'
 
 function toQueryString(params: Record<string, string | number | boolean | null | undefined>): string {
@@ -463,6 +475,68 @@ export async function getCircularBrowse(department: string, year: number): Promi
 
 export async function getCircularBrowseRecent(limit = 100): Promise<CircularSummary[]> {
   return requestJson<CircularSummary[]>(`/circulars/browse_recent${toQueryString({ limit })}`)
+}
+
+export async function getResearchWorkspaces(): Promise<ResearchWorkspace[]> {
+  return requestJson<ResearchWorkspace[]>('/workspaces')
+}
+
+export async function createResearchWorkspace(payload: {
+  name: string
+  search_state?: SearchFilters
+  last_circular_id?: string | null
+}): Promise<ResearchWorkspace> {
+  return requestJson<ResearchWorkspace>('/workspaces', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function getResearchWorkspace(id: string): Promise<ResearchWorkspace> {
+  return requestJson<ResearchWorkspace>(`/workspaces/${encodeURIComponent(id)}`)
+}
+
+export async function updateResearchWorkspace(
+  id: string,
+  payload: {
+    name?: string
+    search_state?: SearchFilters
+    last_circular_id?: string | null
+  },
+): Promise<ResearchWorkspace> {
+  return requestJson<ResearchWorkspace>(`/workspaces/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function deleteResearchWorkspace(id: string): Promise<{ success: boolean }> {
+  return requestJson<{ success: boolean }>(`/workspaces/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  })
+}
+
+export async function pinWorkspaceCircular(
+  workspaceId: string,
+  circularId: string,
+): Promise<ResearchWorkspace> {
+  return requestJson<ResearchWorkspace>(`/workspaces/${encodeURIComponent(workspaceId)}/circulars`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ circular_id: circularId }),
+  })
+}
+
+export async function unpinWorkspaceCircular(
+  workspaceId: string,
+  circularId: string,
+): Promise<ResearchWorkspace> {
+  return requestJson<ResearchWorkspace>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/circulars/${encodeURIComponent(circularId)}`,
+    { method: 'DELETE' },
+  )
 }
 
 export async function getEcoData(series = 'KIBOR_6M'): Promise<Array<{ date: string; value: number }>> {

@@ -14,7 +14,7 @@ import json
 import uuid
 
 from .database import PROJECT_ROOT, engine, Base, get_db, SessionLocal, has_vector_store_data
-from .models import AIGenerationJob, Attachment, CachedDocument, SyncStatus, Circular, CircularRelationship, EcoDataSeries, EcoDataEntry, Settings, ChatSession, ChatMessage
+from .models import AIGenerationJob, Attachment, CachedDocument, SyncStatus, Circular, CircularRelationship, EcoDataSeries, EcoDataEntry, Settings, ChatSession, ChatMessage, ResearchWorkspace, WorkspaceCircular
 from .search import search_engine
 from .ai import AIClient, AIConfig, get_ai_client, get_provider_api_key, get_provider_definition, normalize_provider
 from .circular_ai import GENERATION_ACTIONS, generation_job_payload, run_generation_job
@@ -132,6 +132,33 @@ def _circular_summary(
         "attachment_filename": attachment_filename,
         "source_ref": source_ref,
         "source_page": source_page,
+    }
+
+
+def _workspace_search_state(value: str | None) -> dict:
+    return _safe_json_object(value) or {}
+
+
+def _workspace_payload(workspace: ResearchWorkspace, include_circulars: bool = True) -> dict:
+    pinned_links = list(workspace.pinned_circulars or [])
+    pinned_circulars = [
+        _circular_summary(link.circular)
+        for link in pinned_links
+        if link.circular is not None
+    ] if include_circulars else []
+
+    return {
+        "id": workspace.id,
+        "name": workspace.name,
+        "search_state": _workspace_search_state(workspace.search_state),
+        "last_circular_id": workspace.last_circular_id,
+        "pinned_circular_ids": [
+            link.circular_id for link in pinned_links
+        ],
+        "pinned_circulars": pinned_circulars,
+        "pinned_count": len(pinned_links),
+        "created_at": _isoformat(workspace.created_at),
+        "updated_at": _isoformat(workspace.updated_at or workspace.created_at),
     }
 
 
@@ -1191,6 +1218,158 @@ async def test_ai_connection(db: Session = Depends(get_db)):
         return result
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+# --- Research Workspaces ---
+
+@app.get("/api/workspaces")
+async def list_research_workspaces(db: Session = Depends(get_db)):
+    workspaces = db.query(ResearchWorkspace).order_by(
+        func.coalesce(ResearchWorkspace.updated_at, ResearchWorkspace.created_at).desc()
+    ).all()
+    return [_workspace_payload(workspace, include_circulars=False) for workspace in workspaces]
+
+
+@app.post("/api/workspaces")
+async def create_research_workspace(request: Request, db: Session = Depends(get_db)):
+    data = await request.json()
+    name = data.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return JSONResponse({"error": "Workspace name cannot be empty"}, status_code=400)
+
+    search_state = data.get("search_state", {})
+    if search_state is None:
+        search_state = {}
+    if not isinstance(search_state, dict):
+        return JSONResponse({"error": "search_state must be an object"}, status_code=400)
+
+    last_circular_id = data.get("last_circular_id")
+    if last_circular_id is not None and not isinstance(last_circular_id, str):
+        return JSONResponse({"error": "last_circular_id must be a string"}, status_code=400)
+
+    workspace = ResearchWorkspace(
+        id=str(uuid.uuid4()),
+        name=name.strip()[:120],
+        search_state=json.dumps(search_state),
+        last_circular_id=last_circular_id or None,
+    )
+    db.add(workspace)
+    db.commit()
+    db.refresh(workspace)
+    return _workspace_payload(workspace)
+
+
+@app.get("/api/workspaces/{workspace_id}")
+async def get_research_workspace(workspace_id: str, db: Session = Depends(get_db)):
+    workspace = db.query(ResearchWorkspace).filter(
+        ResearchWorkspace.id == workspace_id
+    ).first()
+    if not workspace:
+        return JSONResponse({"error": "Workspace not found"}, status_code=404)
+    return _workspace_payload(workspace)
+
+
+@app.patch("/api/workspaces/{workspace_id}")
+async def update_research_workspace(workspace_id: str, request: Request, db: Session = Depends(get_db)):
+    workspace = db.query(ResearchWorkspace).filter(
+        ResearchWorkspace.id == workspace_id
+    ).first()
+    if not workspace:
+        return JSONResponse({"error": "Workspace not found"}, status_code=404)
+
+    data = await request.json()
+    if "name" in data:
+        name = data.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return JSONResponse({"error": "Workspace name cannot be empty"}, status_code=400)
+        workspace.name = name.strip()[:120]
+
+    if "search_state" in data:
+        search_state = data.get("search_state") or {}
+        if not isinstance(search_state, dict):
+            return JSONResponse({"error": "search_state must be an object"}, status_code=400)
+        workspace.search_state = json.dumps(search_state)
+
+    if "last_circular_id" in data:
+        last_circular_id = data.get("last_circular_id")
+        if last_circular_id is not None and not isinstance(last_circular_id, str):
+            return JSONResponse({"error": "last_circular_id must be a string"}, status_code=400)
+        workspace.last_circular_id = last_circular_id or None
+
+    workspace.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(workspace)
+    return _workspace_payload(workspace)
+
+
+@app.delete("/api/workspaces/{workspace_id}")
+async def delete_research_workspace(workspace_id: str, db: Session = Depends(get_db)):
+    workspace = db.query(ResearchWorkspace).filter(
+        ResearchWorkspace.id == workspace_id
+    ).first()
+    if not workspace:
+        return JSONResponse({"error": "Workspace not found"}, status_code=404)
+    db.delete(workspace)
+    db.commit()
+    return {"success": True}
+
+
+@app.post("/api/workspaces/{workspace_id}/circulars")
+async def pin_workspace_circular(workspace_id: str, request: Request, db: Session = Depends(get_db)):
+    workspace = db.query(ResearchWorkspace).filter(
+        ResearchWorkspace.id == workspace_id
+    ).first()
+    if not workspace:
+        return JSONResponse({"error": "Workspace not found"}, status_code=404)
+
+    data = await request.json()
+    circular_id = data.get("circular_id")
+    if not isinstance(circular_id, str) or not circular_id.strip():
+        return JSONResponse({"error": "circular_id is required"}, status_code=400)
+
+    circular = db.query(Circular).filter(Circular.id == circular_id).first()
+    if not circular:
+        return JSONResponse({"error": "Circular not found"}, status_code=404)
+
+    link = db.query(WorkspaceCircular).filter(
+        WorkspaceCircular.workspace_id == workspace_id,
+        WorkspaceCircular.circular_id == circular_id,
+    ).first()
+    if not link:
+        link = WorkspaceCircular(
+            workspace_id=workspace_id,
+            circular_id=circular_id,
+            role="pinned",
+            added_at=datetime.utcnow(),
+        )
+        db.add(link)
+    link.last_viewed_at = datetime.utcnow()
+    workspace.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(workspace)
+    return _workspace_payload(workspace)
+
+
+@app.delete("/api/workspaces/{workspace_id}/circulars/{circular_id}")
+async def unpin_workspace_circular(workspace_id: str, circular_id: str, db: Session = Depends(get_db)):
+    workspace = db.query(ResearchWorkspace).filter(
+        ResearchWorkspace.id == workspace_id
+    ).first()
+    if not workspace:
+        return JSONResponse({"error": "Workspace not found"}, status_code=404)
+
+    link = db.query(WorkspaceCircular).filter(
+        WorkspaceCircular.workspace_id == workspace_id,
+        WorkspaceCircular.circular_id == circular_id,
+    ).first()
+    if link:
+        db.delete(link)
+        if workspace.last_circular_id == circular_id:
+            workspace.last_circular_id = None
+        workspace.updated_at = datetime.utcnow()
+        db.commit()
+    db.refresh(workspace)
+    return _workspace_payload(workspace)
 
 
 # --- Chat Feature ---

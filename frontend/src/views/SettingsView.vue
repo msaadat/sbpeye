@@ -242,7 +242,7 @@ onMounted(() => {
       {{ loadError }}
     </Message>
 
-    <Card>
+    <Card class="glass-panel">
       <template #content>
         <div class="settings-grid">
           <label>
@@ -319,7 +319,7 @@ onMounted(() => {
       </template>
     </Card>
 
-    <Card>
+    <Card class="glass-panel">
       <template #title>Search embeddings</template>
       <template #content>
         <div class="settings-grid">

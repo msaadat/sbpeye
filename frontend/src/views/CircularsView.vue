@@ -435,7 +435,7 @@ onBeforeUnmount(() => searchController?.abort())
 
 <template>
   <section class="circular-workspace" :class="{ 'has-detail': selectedCircularId }">
-    <aside class="circular-filters">
+    <aside class="circular-filters glass-panel" style="padding: 1rem;">
       <div class="workspace-brandline">
         <div><span>Circulars</span><strong>Search workspace</strong></div>
         <Button icon="pi pi-filter-slash" size="small" text rounded aria-label="Reset filters" :disabled="!hasFilters" @click="clearFilters" />
@@ -508,7 +508,7 @@ onBeforeUnmount(() => searchController?.abort())
       </div>
     </aside>
 
-    <main class="circular-results-pane">
+    <main class="circular-results-pane glass-panel" style="padding: 1rem;">
       <div class="results-toolbar">
         <div class="results-count"><strong>{{ totalRecords.toLocaleString() }}</strong><span> results</span></div>
         <div class="results-toolbar-actions">

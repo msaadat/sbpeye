@@ -223,7 +223,7 @@ onMounted(() => {
 
 <template>
   <section class="view-stack eco-data-view">
-    <div class="eco-data-toolbar">
+    <div class="eco-data-toolbar glass-panel" style="border-radius: 1rem; padding: 1rem; margin-bottom: 1rem;">
       <span class="eco-data-search">
         <i class="pi pi-search" />
         <InputText

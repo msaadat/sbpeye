@@ -33,7 +33,7 @@ function statusSeverity(status: string): 'success' | 'info' | 'warn' | 'danger' 
   <span class="result-content">
     <strong>{{ circular.title }}</strong>
     <span class="result-topline">
-      <code>{{ circular.reference || 'No reference' }} · {{ formatDate(circular.date) }}</code>
+      <span class="result-reference">{{ circular.reference || 'No reference' }} · {{ formatDate(circular.date) }}</span>
       <Tag
         v-if="circular.status && circular.status !== 'active'"
         :value="circular.status"

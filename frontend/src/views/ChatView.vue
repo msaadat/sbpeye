@@ -549,7 +549,7 @@ onMounted(async () => {
 <template>
   <section class="view-stack chat-view">
     <div class="chat-layout">
-      <Card class="session-panel">
+      <Card class="session-panel glass-panel">
         <template #content>
           <div class="session-panel-actions">
             <Button label="New" icon="pi pi-plus" size="small" fluid :disabled="sending" @click="newSession" />
@@ -564,7 +564,7 @@ onMounted(async () => {
             <div
               v-for="session in sessions"
               :key="session.id"
-              class="session-item"
+              class="session-item animated-card"
               :class="{ active: session.id === currentSessionId }"
             >
               <form
@@ -616,7 +616,7 @@ onMounted(async () => {
       </Card>
 
       <div class="chat-main">
-        <Card class="context-card">
+        <Card class="context-card glass-panel">
           <template #content>
             <div class="context-header">
               <Tag :value="contextModeLabel" :severity="hasContext ? 'success' : 'secondary'" />
@@ -653,7 +653,7 @@ onMounted(async () => {
                   v-for="result in searchResults"
                   :key="result.id"
                   type="button"
-                  class="circular-result-item"
+                  class="circular-result-item animated-card"
                   :disabled="isSelected(result.id)"
                   @click="addContext(result)"
                 >
@@ -667,7 +667,7 @@ onMounted(async () => {
           </template>
         </Card>
 
-        <Card class="conversation-card">
+        <Card class="conversation-card glass-panel">
           <template #content>
             <Message v-if="errorMessage" severity="error" :closable="false">
               {{ errorMessage }}

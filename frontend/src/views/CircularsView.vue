@@ -493,33 +493,117 @@ onBeforeUnmount(() => searchController?.abort())
       </div>
     </header>
 
+    <section class="search-controls-bar" aria-label="Search controls">
+      <form class="search-controls-form" @submit.prevent="loadCirculars(true)">
+        <span class="search-input-wrap">
+          <i class="pi pi-search search-icon" />
+          <InputText
+            v-model="query"
+            size="small"
+            placeholder="Reference, title, policy..."
+            class="search-main-input"
+          />
+          <Button
+            v-if="query"
+            icon="pi pi-times"
+            text
+            rounded
+            size="small"
+            aria-label="Clear search"
+            title="Clear search"
+            type="button"
+            class="search-clear-btn"
+            @click="query = ''; loadCirculars(true)"
+          />
+        </span>
+
+        <Select
+          v-model="department"
+          :options="departmentOptions"
+          option-label="label"
+          option-value="value"
+          size="small"
+          placeholder="Department"
+          :loading="optionsLoading"
+          class="search-select"
+          @change="loadCirculars(true)"
+        />
+
+        <Select
+          v-model="tag"
+          :options="tagOptions"
+          option-label="label"
+          option-value="value"
+          size="small"
+          placeholder="Tag"
+          :loading="optionsLoading"
+          class="search-select search-select-sm"
+          @change="loadCirculars(true)"
+        />
+
+        <span class="year-range">
+          <InputNumber
+            v-model="startYear"
+            size="small"
+            :use-grouping="false"
+            :min="1900"
+            :max="2100"
+            placeholder="From"
+            class="year-input"
+          />
+          <span class="year-sep">–</span>
+          <InputNumber
+            v-model="endYear"
+            size="small"
+            :use-grouping="false"
+            :min="1900"
+            :max="2100"
+            placeholder="To"
+            class="year-input"
+          />
+        </span>
+
+        <Select
+          v-model="sortBy"
+          :options="sortOptions"
+          option-label="label"
+          option-value="value"
+          size="small"
+          class="search-select"
+          @change="loadCirculars(true)"
+        />
+
+        <Button
+          type="submit"
+          icon="pi pi-search"
+          size="small"
+          :loading="loading"
+          aria-label="Search"
+          title="Search"
+        />
+
+        <Button
+          v-if="hasFilters"
+          icon="pi pi-filter-slash"
+          size="small"
+          text
+          rounded
+          aria-label="Clear all filters"
+          title="Clear all filters"
+          type="button"
+          @click="clearFilters"
+        />
+      </form>
+
+      <div class="search-utilities">
+        <Button label="CSV" icon="pi pi-download" size="small" text title="Export CSV" :loading="exportLoading" @click="exportCsv" />
+        <Button label="ZIP" icon="pi pi-file-zip" size="small" text title="Download selected as ZIP" :disabled="!selectedIds.length" :loading="zipLoading" @click="downloadSelectedZip" />
+        <Button label="Chat" icon="pi pi-comments" size="small" text title="Open selected in Chat" :disabled="!selectedIds.length" @click="handoffToChat" />
+      </div>
+    </section>
+
     <section class="circular-workspace" :class="{ 'has-detail': selectedCircularId }">
-      <aside class="circular-filters glass-panel" style="padding: 1rem;">
-        <div class="workspace-brandline">
-          <div><span>Circulars</span><strong>Search controls</strong></div>
-          <Button icon="pi pi-filter-slash" size="small" text rounded aria-label="Reset filters" :disabled="!hasFilters" @click="clearFilters" />
-        </div>
-
-        <form class="filter-stack" @submit.prevent="loadCirculars(true)">
-          <label><span>Search</span><span class="filter-search"><i class="pi pi-search" /><InputText v-model="query" size="small" placeholder="Reference, title, policy..." /></span></label>
-          <label><span>Department</span><Select v-model="department" :options="departmentOptions" option-label="label" option-value="value" size="small" :loading="optionsLoading" @change="loadCirculars(true)" /></label>
-          <label><span>Tag</span><Select v-model="tag" :options="tagOptions" option-label="label" option-value="value" size="small" :loading="optionsLoading" @change="loadCirculars(true)" /></label>
-          <div class="year-fields">
-            <label><span>From year</span><InputNumber v-model="startYear" size="small" :use-grouping="false" :min="1900" :max="2100" placeholder="From" /></label>
-            <label><span>To year</span><InputNumber v-model="endYear" size="small" :use-grouping="false" :min="1900" :max="2100" placeholder="To" /></label>
-          </div>
-          <label><span>Sort</span><Select v-model="sortBy" :options="sortOptions" option-label="label" option-value="value" size="small" @change="loadCirculars(true)" /></label>
-          <Button type="submit" label="Search" icon="pi pi-search" size="small" :loading="loading" />
-        </form>
-
-        <div class="filter-utilities">
-          <Button label="Export CSV" icon="pi pi-download" size="small" text :loading="exportLoading" @click="exportCsv" />
-          <Button label="Download ZIP" icon="pi pi-file-zip" size="small" text :disabled="!selectedIds.length" :loading="zipLoading" @click="downloadSelectedZip" />
-          <Button label="Chat" icon="pi pi-comments" size="small" text :disabled="!selectedIds.length" @click="handoffToChat" />
-        </div>
-      </aside>
-
-      <main class="circular-results-pane glass-panel" style="padding: 1rem;">
+      <main class="circular-results-pane glass-panel">
         <Message v-if="errorMessage" severity="error" :closable="false">{{ errorMessage }}</Message>
         <div class="circular-result-list" :class="{ loading }">
           <section v-if="pinnedCirculars.length" class="pinned-results-section" aria-label="Pinned circulars">

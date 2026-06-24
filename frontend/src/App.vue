@@ -3,7 +3,6 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import Button from 'primevue/button'
 import ConfirmDialog from 'primevue/confirmdialog'
-import Menubar from 'primevue/menubar'
 import Message from 'primevue/message'
 import Toast from 'primevue/toast'
 import SbpNewsPanel from '@/components/SbpNewsPanel.vue'
@@ -107,73 +106,63 @@ onMounted(() => {
     <Toast />
     <ConfirmDialog />
 
-    <header class="app-header">
-      <Menubar :model="navItems" class="app-nav">
-        <template #start>
-          <RouterLink to="/circulars" class="brand">
-            <span class="brand-mark">SBP</span>
-            <span>
-              <strong>SBPEye</strong>
-              <small>Regulatory intelligence</small>
-            </span>
-          </RouterLink>
-        </template>
+    <nav class="app-sidebar" aria-label="Main navigation">
+      <RouterLink to="/circulars" class="sidebar-brand" title="SBPEye — Regulatory intelligence" aria-label="SBPEye home">
+        <span class="brand-mark">SBP</span>
+      </RouterLink>
 
-        <template #item="{ item, props }">
-          <RouterLink
-            v-if="item.route"
-            v-slot="{ href, navigate }"
-            :to="item.route"
-            custom
-          >
-            <a
-              v-bind="props.action"
-              :href="href"
-              :class="{ 'is-active': item.active }"
-              @click="navigate"
-            >
-              <span :class="item.icon" />
-              <span>{{ item.label }}</span>
-            </a>
-          </RouterLink>
-        </template>
+      <div class="sidebar-nav">
+        <RouterLink
+          v-for="item in navItems"
+          :key="item.route"
+          :to="item.route"
+          class="sidebar-nav-item"
+          :class="{ 'is-active': item.active }"
+          :title="item.label"
+          :aria-label="item.label"
+          :aria-current="item.active ? 'page' : undefined"
+        >
+          <span :class="item.icon" />
+          <span class="sidebar-nav-label">{{ item.label }}</span>
+        </RouterLink>
+      </div>
 
-        <template #end>
-          <div class="header-tools">
-            <div class="status-chip" :title="statusDetail">
-              <i
-                class="pi"
-                :class="{
-                  'pi-spin pi-spinner': statusLoading,
-                  'pi-exclamation-circle': statusError,
-                  'pi-check-circle': !statusLoading && !statusError,
-                }"
-              />
-              <span>{{ statusLabel }}</span>
-            </div>
+      <div class="sidebar-tools">
+        <div
+          class="sidebar-status"
+          :title="`${statusLabel}\n${statusDetail}`"
+          :aria-label="statusLabel"
+        >
+          <i
+            class="pi"
+            :class="{
+              'pi-spin pi-spinner': statusLoading,
+              'pi-exclamation-circle': statusError,
+              'pi-check-circle': !statusLoading && !statusError,
+            }"
+          />
+        </div>
 
-            <SbpNewsPanel />
+        <SbpNewsPanel />
 
-            <Button
-              text
-              rounded
-              :icon="darkMode ? 'pi pi-sun' : 'pi pi-moon'"
-              :aria-label="darkMode ? 'Use light theme' : 'Use dark theme'"
-              :title="darkMode ? 'Use light theme' : 'Use dark theme'"
-              @click="toggleTheme"
-            />
-          </div>
-        </template>
-      </Menubar>
+        <Button
+          text
+          rounded
+          :icon="darkMode ? 'pi pi-sun' : 'pi pi-moon'"
+          :aria-label="darkMode ? 'Use light theme' : 'Use dark theme'"
+          :title="darkMode ? 'Use light theme' : 'Use dark theme'"
+          @click="toggleTheme"
+        />
+      </div>
+    </nav>
 
+    <div class="app-body">
       <Message v-if="statusError" severity="warn" size="small" class="status-message">
         App status endpoint is not available yet.
       </Message>
-    </header>
-
-    <main class="app-main">
-      <RouterView />
-    </main>
-
+      <main class="app-main">
+        <RouterView />
+      </main>
+    </div>
   </div>
 </template>

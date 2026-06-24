@@ -70,6 +70,8 @@ marked.use({
 
 const hasContext = computed(() => selectedCirculars.value.length > 0)
 const contextModeLabel = computed(() => (hasContext.value ? 'Grounded' : 'Ungrounded'))
+const activeSession = computed(() => sessions.value.find((session) => session.id === currentSessionId.value) || null)
+const activeSessionIsWorkspace = computed(() => activeSession.value?.session_type === 'workspace')
 
 function formatDate(value?: string | null): string {
   if (!value) {
@@ -85,6 +87,15 @@ function formatDate(value?: string | null): string {
 
 function sessionDate(session: ChatSession): string {
   return formatDate(session.updated_at || session.created_at)
+}
+
+function isWorkspaceSession(session: ChatSession | null | undefined): boolean {
+  return session?.session_type === 'workspace'
+}
+
+function sessionIconClass(session: ChatSession): string {
+  if (!isWorkspaceSession(session)) return 'pi-comments'
+  return session.is_default_workspace ? 'pi-home' : 'pi-folder'
 }
 
 function renderMarkdown(content: string): string {
@@ -155,6 +166,9 @@ function isSelected(id: string): boolean {
 }
 
 function addContext(circular: CircularSummary) {
+  if (activeSessionIsWorkspace.value) {
+    return
+  }
   if (isSelected(circular.id)) {
     return
   }
@@ -163,6 +177,9 @@ function addContext(circular: CircularSummary) {
 }
 
 function removeContext(id: string) {
+  if (activeSessionIsWorkspace.value) {
+    return
+  }
   selectedCirculars.value = selectedCirculars.value.filter((item) => item.id !== id)
 }
 
@@ -200,6 +217,9 @@ async function loadSession(sessionId: string) {
     currentSessionId.value = data.id
     messages.value = data.messages
     selectedCirculars.value = data.circulars || []
+    contextQuery.value = ''
+    searchResults.value = []
+    renamingSessionId.value = null
     await scrollToBottom()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : 'Unable to load chat session.'
@@ -220,6 +240,7 @@ function newSession() {
 }
 
 function startRenaming(session: ChatSession) {
+  if (isWorkspaceSession(session)) return
   renamingSessionId.value = session.id
   renameDraft.value = session.title || 'New chat'
 }
@@ -242,10 +263,16 @@ async function saveSessionTitle(sessionId: string) {
   }
 }
 
-function confirmDeleteSession(sessionId: string) {
+function confirmDeleteSession(session: ChatSession) {
+  const workspaceSession = isWorkspaceSession(session)
+  const defaultWorkspace = workspaceSession && session.is_default_workspace
   confirm.require({
-    message: 'Delete this chat session?',
-    header: 'Delete session',
+    message: defaultWorkspace
+      ? 'Clear the Default workspace chat and remove its attached circulars?'
+      : workspaceSession
+        ? `Delete "${session.title || 'Workspace'}" and its chat history?`
+        : 'Delete this chat session?',
+    header: defaultWorkspace ? 'Clear Default session' : workspaceSession ? 'Delete workspace' : 'Delete session',
     icon: 'pi pi-trash',
     rejectProps: {
       label: 'Cancel',
@@ -257,21 +284,24 @@ function confirmDeleteSession(sessionId: string) {
       severity: 'danger',
     },
     accept: () => {
-      void removeSession(sessionId)
+      void removeSession(session)
     },
   })
 }
 
-async function removeSession(sessionId: string) {
+async function removeSession(session: ChatSession) {
+  const sessionId = session.id
   try {
     await deleteChatSession(sessionId)
-    if (currentSessionId.value === sessionId) {
+    await loadSessions()
+    if (currentSessionId.value === sessionId && session.is_default_workspace) {
+      await loadSession(sessionId)
+    } else if (currentSessionId.value === sessionId) {
       newSession()
     }
-    await loadSessions()
     toast.add({
       severity: 'success',
-      summary: 'Session deleted',
+      summary: session.is_default_workspace ? 'Default session cleared' : 'Session deleted',
       life: 2500,
     })
   } catch (error) {
@@ -327,6 +357,11 @@ async function deleteMessage(message: LocalMessage) {
 }
 
 async function searchCirculars() {
+  if (activeSessionIsWorkspace.value) {
+    searchResults.value = []
+    return
+  }
+
   const query = contextQuery.value.trim()
   if (query.length < 2) {
     searchResults.value = []
@@ -391,6 +426,7 @@ async function generateMessage(
   sending.value = true
   editingMessageId.value = null
   const circularIds = replaceMessage?.circular_ids?.length
+    && !activeSessionIsWorkspace.value
     ? replaceMessage.circular_ids
     : selectedCirculars.value.map((item) => item.id)
 
@@ -565,7 +601,7 @@ onMounted(async () => {
               v-for="session in sessions"
               :key="session.id"
               class="session-item animated-card"
-              :class="{ active: session.id === currentSessionId }"
+              :class="{ active: session.id === currentSessionId, workspace: isWorkspaceSession(session) }"
             >
               <form
                 v-if="renamingSessionId === session.id"
@@ -584,11 +620,22 @@ onMounted(async () => {
               </form>
               <template v-else>
                 <button type="button" :disabled="sending" @click="loadSession(session.id)">
-                  <strong>{{ session.title || 'New chat' }}</strong>
-                  <span>{{ sessionDate(session) }}</span>
+                  <strong>
+                    <i class="pi" :class="sessionIconClass(session)" />
+                    <span>{{ session.title || 'New chat' }}</span>
+                  </strong>
+                  <span>
+                    <template v-if="isWorkspaceSession(session)">
+                      {{ (session.pinned_count || 0).toLocaleString() }} pinned
+                    </template>
+                    <template v-else>
+                      {{ sessionDate(session) }}
+                    </template>
+                  </span>
                 </button>
                 <div class="session-item-actions">
                   <Button
+                    v-if="!isWorkspaceSession(session)"
                     icon="pi pi-pencil"
                     text
                     rounded
@@ -602,7 +649,7 @@ onMounted(async () => {
                     rounded
                     severity="danger"
                     aria-label="Delete session"
-                    @click="confirmDeleteSession(session.id)"
+                    @click="confirmDeleteSession(session)"
                   />
                 </div>
               </template>
@@ -631,13 +678,23 @@ onMounted(async () => {
                 class="context-chip"
               >
                 <span>{{ circular.reference || circular.title }}</span>
-                <button type="button" :aria-label="`Remove ${circular.title}`" @click="removeContext(circular.id)">
+                <button
+                  v-if="!activeSessionIsWorkspace"
+                  type="button"
+                  :aria-label="`Remove ${circular.title}`"
+                  @click="removeContext(circular.id)"
+                >
                   <i class="pi pi-times" />
                 </button>
               </Tag>
             </div>
 
-            <div class="context-search">
+            <div v-if="activeSessionIsWorkspace" class="workspace-context-note">
+              <i class="pi pi-thumbtack" />
+              <span>Workspace pins</span>
+            </div>
+
+            <div v-else class="context-search">
               <span class="p-input-icon-left">
                 <i class="pi pi-search" />
                 <InputText v-model="contextQuery" placeholder="Search circulars to add context" />

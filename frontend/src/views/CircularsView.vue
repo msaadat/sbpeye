@@ -43,6 +43,7 @@ const selectedIds = ref<string[]>([])
 const workspaces = ref<ResearchWorkspace[]>([])
 const activeWorkspaceId = ref('')
 const newWorkspaceName = ref('')
+const creatingWorkspace = ref(false)
 const departments = ref<DepartmentCount[]>([])
 const tags = ref<TagCount[]>([])
 const loading = ref(false)
@@ -66,11 +67,14 @@ let searchController: AbortController | undefined
 
 const selectedCircularId = computed(() => typeof route.params.id === 'string' ? route.params.id : '')
 const totalPages = computed(() => Math.max(1, Math.ceil(totalRecords.value / perPage.value)))
-const allPageSelected = computed(() => Boolean(rows.value.length) && rows.value.every((row) => selectedIds.value.includes(row.id)))
 const hasFilters = computed(() => Boolean(query.value.trim() || department.value || tag.value || startYear.value || endYear.value))
 const activeWorkspace = computed(() => workspaces.value.find((workspace) => workspace.id === activeWorkspaceId.value) || null)
+const defaultWorkspace = computed(() => workspaces.value.find((workspace) => workspace.is_default) || workspaces.value[0] || null)
 const pinnedCirculars = computed(() => activeWorkspace.value?.pinned_circulars || [])
 const pinnedIds = computed(() => new Set(activeWorkspace.value?.pinned_circular_ids || []))
+const searchRows = computed(() => rows.value.filter((row) => !pinnedIds.value.has(row.id)))
+const allPageSelected = computed(() => Boolean(searchRows.value.length) && searchRows.value.every((row) => selectedIds.value.includes(row.id)))
+const canDeleteActiveWorkspace = computed(() => Boolean(activeWorkspace.value && !activeWorkspace.value.is_default))
 
 const sortOptions: SelectOption[] = [
   { label: 'Relevance', value: 'relevance' },
@@ -90,13 +94,6 @@ const departmentOptions = computed<SelectOption[]>(() => [
 const tagOptions = computed<SelectOption[]>(() => [
   { label: 'All tags', value: '' },
   ...tags.value.map((item) => ({ label: `${item.tag} (${item.count.toLocaleString()})`, value: item.tag })),
-])
-const workspaceOptions = computed<SelectOption[]>(() => [
-  { label: 'No workspace', value: '' },
-  ...workspaces.value.map((workspace) => ({
-    label: `${workspace.name} (${workspace.pinned_count.toLocaleString()})`,
-    value: workspace.id,
-  })),
 ])
 const filters = computed<SearchFilters>(() => ({
   q: query.value.trim(), start_year: startYear.value, end_year: endYear.value,
@@ -145,7 +142,7 @@ function applySearchState(state: SearchFilters = {}) {
 
 function routeQuery(): Record<string, string> {
   const result: Record<string, string> = {}
-  if (activeWorkspaceId.value) result.workspace = activeWorkspaceId.value
+  if (activeWorkspaceId.value && !activeWorkspace.value?.is_default) result.workspace = activeWorkspaceId.value
   if (query.value.trim()) result.q = query.value.trim()
   if (department.value) result.department = department.value
   if (tag.value) result.tag = tag.value
@@ -161,16 +158,20 @@ async function syncRoute() {
   await router.replace({ path: selectedCircularId.value ? `/circulars/${selectedCircularId.value}` : '/circulars', query: routeQuery() })
 }
 
+function orderWorkspaces(items: ResearchWorkspace[]): ResearchWorkspace[] {
+  return [...items].sort((a, b) => Number(Boolean(b.is_default)) - Number(Boolean(a.is_default)))
+}
+
 function upsertWorkspace(workspace: ResearchWorkspace) {
   const index = workspaces.value.findIndex((item) => item.id === workspace.id)
   if (index >= 0) {
-    workspaces.value = [
+    workspaces.value = orderWorkspaces([
       ...workspaces.value.slice(0, index),
       workspace,
       ...workspaces.value.slice(index + 1),
-    ]
+    ])
   } else {
-    workspaces.value = [workspace, ...workspaces.value]
+    workspaces.value = orderWorkspaces([workspace, ...workspaces.value])
   }
 }
 
@@ -194,10 +195,8 @@ async function saveActiveWorkspaceState(overrides: {
 
 async function activateWorkspace(workspaceId: string, restoreState = true) {
   if (!workspaceId) {
-    activeWorkspaceId.value = ''
-    localStorage.removeItem('sbpeye-active-workspace')
-    await syncRoute()
-    return
+    workspaceId = defaultWorkspace.value?.id || ''
+    if (!workspaceId) return
   }
 
   workspacesLoading.value = true
@@ -216,7 +215,7 @@ async function activateWorkspace(workspaceId: string, restoreState = true) {
       await syncRoute()
     }
   } catch (error) {
-    activeWorkspaceId.value = ''
+    activeWorkspaceId.value = defaultWorkspace.value?.id || ''
     localStorage.removeItem('sbpeye-active-workspace')
     toast.add({ severity: 'error', summary: 'Workspace unavailable', detail: error instanceof Error ? error.message : 'Unable to open workspace.', life: 6000 })
   } finally {
@@ -227,13 +226,16 @@ async function activateWorkspace(workspaceId: string, restoreState = true) {
 async function loadWorkspaces() {
   workspacesLoading.value = true
   try {
-    workspaces.value = await getResearchWorkspaces()
+    workspaces.value = orderWorkspaces(await getResearchWorkspaces())
     const requestedWorkspaceId = queryString(route.query.workspace)
     const storedWorkspaceId = localStorage.getItem('sbpeye-active-workspace') || ''
-    const workspaceId = requestedWorkspaceId || (!routeHasSearchState() ? storedWorkspaceId : '')
-    if (workspaceId && workspaces.value.some((workspace) => workspace.id === workspaceId)) {
-      await activateWorkspace(workspaceId, true)
-    }
+    const defaultId = defaultWorkspace.value?.id || ''
+    const requestedExists = requestedWorkspaceId && workspaces.value.some((workspace) => workspace.id === requestedWorkspaceId)
+    const storedExists = storedWorkspaceId && workspaces.value.some((workspace) => workspace.id === storedWorkspaceId)
+    const workspaceId = requestedExists
+      ? requestedWorkspaceId
+      : (!routeHasSearchState() && storedExists ? storedWorkspaceId : defaultId)
+    if (workspaceId) await activateWorkspace(workspaceId, !routeHasSearchState())
   } catch (error) {
     toast.add({ severity: 'warn', summary: 'Workspaces unavailable', detail: error instanceof Error ? error.message : 'Unable to load research workspaces.', life: 5000 })
   } finally {
@@ -294,6 +296,7 @@ async function createWorkspace() {
     activeWorkspaceId.value = workspace.id
     localStorage.setItem('sbpeye-active-workspace', workspace.id)
     newWorkspaceName.value = ''
+    creatingWorkspace.value = false
 
     for (const circularId of selectedIds.value) {
       workspace = await pinWorkspaceCircular(workspace.id, circularId)
@@ -308,14 +311,24 @@ async function createWorkspace() {
   }
 }
 
-async function handleWorkspaceChange() {
-  await activateWorkspace(activeWorkspaceId.value, true)
+function beginCreateWorkspace() {
+  creatingWorkspace.value = true
+}
+
+function cancelCreateWorkspace() {
+  creatingWorkspace.value = false
+  newWorkspaceName.value = ''
+}
+
+async function openWorkspaceTab(workspaceId: string) {
+  if (workspaceId === activeWorkspaceId.value || workspacesLoading.value) return
+  await activateWorkspace(workspaceId, true)
   await loadCirculars()
 }
 
 function confirmDeleteWorkspace() {
-  if (!activeWorkspace.value || workspaceSaving.value) return
   const workspace = activeWorkspace.value
+  if (!workspace || workspace.is_default || workspaceSaving.value) return
   confirm.require({
     message: `Delete "${workspace.name}"? Pinned circulars stay in the SBPEye index.`,
     header: 'Delete workspace',
@@ -332,9 +345,16 @@ async function removeWorkspace(workspaceId: string) {
     await deleteResearchWorkspace(workspaceId)
     workspaces.value = workspaces.value.filter((workspace) => workspace.id !== workspaceId)
     if (activeWorkspaceId.value === workspaceId) {
-      activeWorkspaceId.value = ''
-      localStorage.removeItem('sbpeye-active-workspace')
-      await syncRoute()
+      const fallbackId = defaultWorkspace.value?.id || ''
+      activeWorkspaceId.value = fallbackId
+      if (fallbackId) {
+        localStorage.setItem('sbpeye-active-workspace', fallbackId)
+        await activateWorkspace(fallbackId, true)
+        await loadCirculars()
+      } else {
+        localStorage.removeItem('sbpeye-active-workspace')
+        await syncRoute()
+      }
     }
     toast.add({ severity: 'success', summary: 'Workspace deleted', life: 2200 })
   } catch (error) {
@@ -349,6 +369,7 @@ function isPinned(id: string): boolean {
 }
 
 async function togglePinned(id: string) {
+  if (!activeWorkspaceId.value && defaultWorkspace.value) activeWorkspaceId.value = defaultWorkspace.value.id
   if (!activeWorkspaceId.value || workspaceSaving.value) return
   workspaceSaving.value = true
   try {
@@ -375,10 +396,10 @@ function clearFilters() {
 
 function togglePageSelection() {
   if (allPageSelected.value) {
-    const pageIds = new Set(rows.value.map((row) => row.id))
+    const pageIds = new Set(searchRows.value.map((row) => row.id))
     selectedIds.value = selectedIds.value.filter((id) => !pageIds.has(id))
   } else {
-    selectedIds.value = [...new Set([...selectedIds.value, ...rows.value.map((row) => row.id)])]
+    selectedIds.value = [...new Set([...selectedIds.value, ...searchRows.value.map((row) => row.id)])]
   }
 }
 
@@ -434,129 +455,160 @@ onBeforeUnmount(() => searchController?.abort())
 </script>
 
 <template>
-  <section class="circular-workspace" :class="{ 'has-detail': selectedCircularId }">
-    <aside class="circular-filters glass-panel" style="padding: 1rem;">
-      <div class="workspace-brandline">
-        <div><span>Circulars</span><strong>Search workspace</strong></div>
-        <Button icon="pi pi-filter-slash" size="small" text rounded aria-label="Reset filters" :disabled="!hasFilters" @click="clearFilters" />
+  <section class="circulars-screen">
+    <header class="workspace-tabs-bar">
+      <div class="workspace-tabs" role="tablist" aria-label="Research workspaces">
+        <button
+          v-for="workspace in workspaces"
+          :key="workspace.id"
+          type="button"
+          class="workspace-tab"
+          :class="{ active: workspace.id === activeWorkspaceId }"
+          role="tab"
+          :aria-selected="workspace.id === activeWorkspaceId"
+          @click="openWorkspaceTab(workspace.id)"
+        >
+          <i class="pi" :class="workspace.is_default ? 'pi-home' : 'pi-folder'" />
+          <span class="workspace-tab-label">{{ workspace.name }}</span>
+          <span class="workspace-tab-count">{{ workspace.pinned_count.toLocaleString() }}</span>
+        </button>
+
+        <form v-if="creatingWorkspace" class="workspace-create-form workspace-create-tab" @submit.prevent="createWorkspace">
+          <InputText v-model="newWorkspaceName" size="small" maxlength="120" placeholder="Workspace name" autofocus />
+          <Button icon="pi pi-check" type="submit" size="small" text rounded aria-label="Create workspace" :disabled="!newWorkspaceName.trim()" :loading="workspaceSaving" />
+          <Button icon="pi pi-times" type="button" size="small" text rounded severity="secondary" aria-label="Cancel workspace creation" @click="cancelCreateWorkspace" />
+        </form>
+
+        <Button v-else icon="pi pi-plus" size="small" text rounded aria-label="Create workspace" @click="beginCreateWorkspace" />
       </div>
 
-      <section class="research-workspace-panel">
-        <div class="workspace-panel-heading">
-          <span>Research workspace</span>
-          <Button
-            icon="pi pi-trash"
-            size="small"
-            text
-            rounded
-            severity="danger"
-            aria-label="Delete workspace"
-            :disabled="!activeWorkspace || workspaceSaving"
-            @click="confirmDeleteWorkspace"
-          />
-        </div>
-        <Select
-          v-model="activeWorkspaceId"
-          :options="workspaceOptions"
-          option-label="label"
-          option-value="value"
+      <div class="workspace-actions">
+        <span class="workspace-pinned-summary"><i class="pi pi-star-fill" />{{ pinnedCirculars.length.toLocaleString() }} pinned</span>
+        <Button label="Chat" icon="pi pi-comments" size="small" text :disabled="!pinnedCirculars.length" @click="handoffWorkspaceToChat" />
+        <Button
+          icon="pi pi-trash"
           size="small"
-          :loading="workspacesLoading"
-          @change="handleWorkspaceChange"
+          text
+          rounded
+          severity="danger"
+          aria-label="Delete workspace"
+          :disabled="!canDeleteActiveWorkspace || workspaceSaving"
+          @click="confirmDeleteWorkspace"
         />
-        <form class="workspace-create-form" @submit.prevent="createWorkspace">
-          <InputText v-model="newWorkspaceName" size="small" maxlength="120" placeholder="New topic name" />
-          <Button icon="pi pi-plus" type="submit" size="small" text rounded aria-label="Create workspace" :disabled="!newWorkspaceName.trim()" :loading="workspaceSaving" />
-        </form>
-        <div v-if="activeWorkspace" class="workspace-pinned-block">
-          <div class="workspace-pinned-heading">
-            <span>{{ pinnedCirculars.length }} pinned</span>
-            <Button label="Chat" icon="pi pi-comments" size="small" text :disabled="!pinnedCirculars.length" @click="handoffWorkspaceToChat" />
+      </div>
+    </header>
+
+    <section class="circular-workspace" :class="{ 'has-detail': selectedCircularId }">
+      <aside class="circular-filters glass-panel" style="padding: 1rem;">
+        <div class="workspace-brandline">
+          <div><span>Circulars</span><strong>Search controls</strong></div>
+          <Button icon="pi pi-filter-slash" size="small" text rounded aria-label="Reset filters" :disabled="!hasFilters" @click="clearFilters" />
+        </div>
+
+        <form class="filter-stack" @submit.prevent="loadCirculars(true)">
+          <label><span>Search</span><span class="filter-search"><i class="pi pi-search" /><InputText v-model="query" size="small" placeholder="Reference, title, policy..." /></span></label>
+          <label><span>Department</span><Select v-model="department" :options="departmentOptions" option-label="label" option-value="value" size="small" :loading="optionsLoading" @change="loadCirculars(true)" /></label>
+          <label><span>Tag</span><Select v-model="tag" :options="tagOptions" option-label="label" option-value="value" size="small" :loading="optionsLoading" @change="loadCirculars(true)" /></label>
+          <div class="year-fields">
+            <label><span>From year</span><InputNumber v-model="startYear" size="small" :use-grouping="false" :min="1900" :max="2100" placeholder="From" /></label>
+            <label><span>To year</span><InputNumber v-model="endYear" size="small" :use-grouping="false" :min="1900" :max="2100" placeholder="To" /></label>
           </div>
-          <div v-if="pinnedCirculars.length" class="workspace-pinned-list">
-            <div
+          <label><span>Sort</span><Select v-model="sortBy" :options="sortOptions" option-label="label" option-value="value" size="small" @change="loadCirculars(true)" /></label>
+          <Button type="submit" label="Search" icon="pi pi-search" size="small" :loading="loading" />
+        </form>
+
+        <div class="filter-utilities">
+          <Button label="Export CSV" icon="pi pi-download" size="small" text :loading="exportLoading" @click="exportCsv" />
+          <Button label="Download ZIP" icon="pi pi-file-zip" size="small" text :disabled="!selectedIds.length" :loading="zipLoading" @click="downloadSelectedZip" />
+          <Button label="Chat" icon="pi pi-comments" size="small" text :disabled="!selectedIds.length" @click="handoffToChat" />
+        </div>
+      </aside>
+
+      <main class="circular-results-pane glass-panel" style="padding: 1rem;">
+        <div class="results-toolbar">
+          <div class="results-count"><strong>{{ totalRecords.toLocaleString() }}</strong><span> results</span></div>
+          <div class="results-toolbar-actions">
+            <Checkbox :model-value="allPageSelected" binary aria-label="Select page" :disabled="!searchRows.length" @update:model-value="togglePageSelection" />
+            <span v-if="selectedIds.length">{{ selectedIds.length }} selected</span>
+            <Select v-model="perPage" :options="pageSizeOptions" option-label="label" option-value="value" size="small" />
+          </div>
+        </div>
+
+        <Message v-if="errorMessage" severity="error" :closable="false">{{ errorMessage }}</Message>
+        <div class="circular-result-list" :class="{ loading }">
+          <section v-if="pinnedCirculars.length" class="pinned-results-section" aria-label="Pinned circulars">
+            <div class="pinned-results-heading">
+              <div><span>Pinned circulars</span><strong>{{ activeWorkspace?.name }}</strong></div>
+              <Button label="Chat" icon="pi pi-comments" size="small" text :disabled="!pinnedCirculars.length" @click="handoffWorkspaceToChat" />
+            </div>
+
+            <button
               v-for="circular in pinnedCirculars"
               :key="circular.id"
-              class="workspace-pinned-item"
+              type="button"
+              class="circular-result-item pinned-result-item"
               :class="{ active: circular.id === selectedCircularId }"
+              @click="openCircular(circular.id)"
             >
-              <button type="button" @click="openCircular(circular.id)">
-                <span>{{ circular.reference || circular.title }}</span>
-              </button>
-              <Button icon="pi pi-times" text rounded size="small" severity="secondary" :aria-label="`Unpin ${circular.title}`" @click.stop="togglePinned(circular.id)" />
-            </div>
-          </div>
-        </div>
-      </section>
+              <span class="result-select" @click.stop>
+                <Checkbox v-model="selectedIds" :value="circular.id" :input-id="`select-pinned-${circular.id}`" :aria-label="`Select ${circular.title}`" />
+                <Button
+                  icon="pi pi-star-fill"
+                  text
+                  rounded
+                  size="small"
+                  severity="secondary"
+                  :disabled="workspaceSaving"
+                  :aria-label="`Unpin ${circular.title}`"
+                  @click="togglePinned(circular.id)"
+                />
+              </span>
+              <CircularResultContent
+                :circular="circular"
+                :show-snippet="!selectedCircularId"
+                :max-tags="selectedCircularId ? 1 : 3"
+              />
+            </button>
+          </section>
 
-      <form class="filter-stack" @submit.prevent="loadCirculars(true)">
-        <label><span>Search</span><span class="filter-search"><i class="pi pi-search" /><InputText v-model="query" size="small" placeholder="Reference, title, policy..." /></span></label>
-        <label><span>Department</span><Select v-model="department" :options="departmentOptions" option-label="label" option-value="value" size="small" :loading="optionsLoading" @change="loadCirculars(true)" /></label>
-        <label><span>Tag</span><Select v-model="tag" :options="tagOptions" option-label="label" option-value="value" size="small" :loading="optionsLoading" @change="loadCirculars(true)" /></label>
-        <div class="year-fields">
-          <label><span>From year</span><InputNumber v-model="startYear" size="small" :use-grouping="false" :min="1900" :max="2100" placeholder="From" /></label>
-          <label><span>To year</span><InputNumber v-model="endYear" size="small" :use-grouping="false" :min="1900" :max="2100" placeholder="To" /></label>
-        </div>
-        <label><span>Sort</span><Select v-model="sortBy" :options="sortOptions" option-label="label" option-value="value" size="small" @change="loadCirculars(true)" /></label>
-        <Button type="submit" label="Search" icon="pi pi-search" size="small" :loading="loading" />
-      </form>
-
-      <div class="filter-utilities">
-        <Button label="Export CSV" icon="pi pi-download" size="small" text :loading="exportLoading" @click="exportCsv" />
-        <Button label="Download ZIP" icon="pi pi-file-zip" size="small" text :disabled="!selectedIds.length" :loading="zipLoading" @click="downloadSelectedZip" />
-        <Button label="Chat" icon="pi pi-comments" size="small" text :disabled="!selectedIds.length" @click="handoffToChat" />
-      </div>
-    </aside>
-
-    <main class="circular-results-pane glass-panel" style="padding: 1rem;">
-      <div class="results-toolbar">
-        <div class="results-count"><strong>{{ totalRecords.toLocaleString() }}</strong><span> results</span></div>
-        <div class="results-toolbar-actions">
-          <Checkbox :model-value="allPageSelected" binary aria-label="Select page" @update:model-value="togglePageSelection" />
-          <span v-if="selectedIds.length">{{ selectedIds.length }} selected</span>
-          <Select v-model="perPage" :options="pageSizeOptions" option-label="label" option-value="value" size="small" />
-        </div>
-      </div>
-
-      <Message v-if="errorMessage" severity="error" :closable="false">{{ errorMessage }}</Message>
-      <div class="circular-result-list" :class="{ loading }">
-        <button
-          v-for="row in rows"
-          :key="row.id"
-          type="button"
-          class="circular-result-item"
-          :class="{ active: row.id === selectedCircularId }"
-          @click="openCircular(row.id)"
-        >
-          <span class="result-select" @click.stop>
-            <Checkbox v-model="selectedIds" :value="row.id" :input-id="`select-${row.id}`" :aria-label="`Select ${row.title}`" />
-            <Button
-              :icon="isPinned(row.id) ? 'pi pi-star-fill' : 'pi pi-star'"
-              text
-              rounded
-              size="small"
-              severity="secondary"
-              :disabled="!activeWorkspace"
-              :aria-label="isPinned(row.id) ? `Unpin ${row.title}` : `Pin ${row.title}`"
-              @click="togglePinned(row.id)"
+          <button
+            v-for="row in searchRows"
+            :key="row.id"
+            type="button"
+            class="circular-result-item"
+            :class="{ active: row.id === selectedCircularId }"
+            @click="openCircular(row.id)"
+          >
+            <span class="result-select" @click.stop>
+              <Checkbox v-model="selectedIds" :value="row.id" :input-id="`select-${row.id}`" :aria-label="`Select ${row.title}`" />
+              <Button
+                :icon="isPinned(row.id) ? 'pi pi-star-fill' : 'pi pi-star'"
+                text
+                rounded
+                size="small"
+                severity="secondary"
+                :disabled="workspaceSaving"
+                :aria-label="isPinned(row.id) ? `Unpin ${row.title}` : `Pin ${row.title}`"
+                @click="togglePinned(row.id)"
+              />
+            </span>
+            <CircularResultContent
+              :circular="row"
+              :show-snippet="!selectedCircularId"
+              :max-tags="selectedCircularId ? 1 : 3"
             />
-          </span>
-          <CircularResultContent
-            :circular="row"
-            :show-snippet="!selectedCircularId"
-            :max-tags="selectedCircularId ? 1 : 3"
-          />
-        </button>
-        <div v-if="!loading && !rows.length" class="empty-table-state"><i class="pi pi-search" /><strong>No circulars found</strong><span>Adjust the filters and try again.</span></div>
-      </div>
+          </button>
+          <div v-if="!loading && !rows.length" class="empty-table-state"><i class="pi pi-search" /><strong>No circulars found</strong><span>Adjust the filters and try again.</span></div>
+        </div>
 
-      <div class="results-pagination">
-        <Button icon="pi pi-angle-left" text rounded aria-label="Previous page" :disabled="page <= 1 || loading" @click="changePage(-1)" />
-        <span>Page {{ page }} of {{ totalPages }}</span>
-        <Button icon="pi pi-angle-right" text rounded aria-label="Next page" :disabled="page >= totalPages || loading" @click="changePage(1)" />
-      </div>
-    </main>
+        <div class="results-pagination">
+          <Button icon="pi pi-angle-left" text rounded aria-label="Previous page" :disabled="page <= 1 || loading" @click="changePage(-1)" />
+          <span>Page {{ page }} of {{ totalPages }}</span>
+          <Button icon="pi pi-angle-right" text rounded aria-label="Next page" :disabled="page >= totalPages || loading" @click="changePage(1)" />
+        </div>
+      </main>
 
-    <CircularDetailPane v-if="selectedCircularId" :id="selectedCircularId" @close="closeCircular" />
+      <CircularDetailPane v-if="selectedCircularId" :id="selectedCircularId" @close="closeCircular" />
+    </section>
   </section>
 </template>

@@ -139,6 +139,42 @@ def _workspace_search_state(value: str | None) -> dict:
     return _safe_json_object(value) or {}
 
 
+DEFAULT_WORKSPACE_ID = "default"
+DEFAULT_WORKSPACE_NAME = "Default"
+WORKSPACE_CHAT_SESSION_PREFIX = "workspace:"
+
+
+def _ensure_default_workspace(db: Session) -> ResearchWorkspace:
+    workspace = db.query(ResearchWorkspace).filter(
+        ResearchWorkspace.is_default == 1
+    ).first()
+    if workspace:
+        return workspace
+
+    workspace = db.query(ResearchWorkspace).filter(
+        ResearchWorkspace.id == DEFAULT_WORKSPACE_ID
+    ).first()
+    if workspace:
+        workspace.is_default = 1
+        if not workspace.name:
+            workspace.name = DEFAULT_WORKSPACE_NAME
+        workspace.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(workspace)
+        return workspace
+
+    workspace = ResearchWorkspace(
+        id=DEFAULT_WORKSPACE_ID,
+        name=DEFAULT_WORKSPACE_NAME,
+        is_default=1,
+        search_state=json.dumps({}),
+    )
+    db.add(workspace)
+    db.commit()
+    db.refresh(workspace)
+    return workspace
+
+
 def _workspace_payload(workspace: ResearchWorkspace, include_circulars: bool = True) -> dict:
     pinned_links = list(workspace.pinned_circulars or [])
     pinned_circulars = [
@@ -150,6 +186,7 @@ def _workspace_payload(workspace: ResearchWorkspace, include_circulars: bool = T
     return {
         "id": workspace.id,
         "name": workspace.name,
+        "is_default": bool(workspace.is_default),
         "search_state": _workspace_search_state(workspace.search_state),
         "last_circular_id": workspace.last_circular_id,
         "pinned_circular_ids": [
@@ -160,6 +197,78 @@ def _workspace_payload(workspace: ResearchWorkspace, include_circulars: bool = T
         "created_at": _isoformat(workspace.created_at),
         "updated_at": _isoformat(workspace.updated_at or workspace.created_at),
     }
+
+
+def _workspace_chat_session_id(workspace_id: str) -> str:
+    return f"{WORKSPACE_CHAT_SESSION_PREFIX}{workspace_id}"
+
+
+def _workspace_id_from_chat_session(session_id: str | None) -> str | None:
+    if not isinstance(session_id, str):
+        return None
+    if not session_id.startswith(WORKSPACE_CHAT_SESSION_PREFIX):
+        return None
+    workspace_id = session_id[len(WORKSPACE_CHAT_SESSION_PREFIX):]
+    return workspace_id or None
+
+
+def _workspace_circular_ids(workspace: ResearchWorkspace) -> list[str]:
+    return [
+        link.circular_id
+        for link in list(workspace.pinned_circulars or [])
+        if link.circular is not None
+    ]
+
+
+def _workspace_circular_summaries(workspace: ResearchWorkspace) -> list[dict]:
+    return [
+        _circular_summary(link.circular)
+        for link in list(workspace.pinned_circulars or [])
+        if link.circular is not None
+    ]
+
+
+def _chat_session_payload(session: ChatSession) -> dict:
+    return {
+        "id": session.id,
+        "title": session.title,
+        "session_type": "chat",
+        "created_at": _isoformat(session.created_at),
+        "updated_at": _isoformat(session.updated_at or session.created_at),
+    }
+
+
+def _workspace_chat_session_payload(
+    workspace: ResearchWorkspace,
+    session: ChatSession | None = None,
+) -> dict:
+    return {
+        "id": _workspace_chat_session_id(workspace.id),
+        "title": workspace.name,
+        "session_type": "workspace",
+        "workspace_id": workspace.id,
+        "is_default_workspace": bool(workspace.is_default),
+        "pinned_count": len(list(workspace.pinned_circulars or [])),
+        "circular_ids": _workspace_circular_ids(workspace),
+        "created_at": _isoformat(session.created_at if session else workspace.created_at),
+        "updated_at": _isoformat(
+            (session.updated_at or session.created_at) if session else (workspace.updated_at or workspace.created_at)
+        ),
+    }
+
+
+def _get_workspace_for_chat_session(
+    db: Session,
+    session_id: str | None,
+) -> ResearchWorkspace | None:
+    workspace_id = _workspace_id_from_chat_session(session_id)
+    if not workspace_id:
+        return None
+    if workspace_id == DEFAULT_WORKSPACE_ID:
+        return _ensure_default_workspace(db)
+    return db.query(ResearchWorkspace).filter(
+        ResearchWorkspace.id == workspace_id
+    ).first()
 
 
 def _settings_payload(config: AIConfig, embedding: EmbeddingConfig) -> dict:
@@ -1224,10 +1333,18 @@ async def test_ai_connection(db: Session = Depends(get_db)):
 
 @app.get("/api/workspaces")
 async def list_research_workspaces(db: Session = Depends(get_db)):
+    _ensure_default_workspace(db)
     workspaces = db.query(ResearchWorkspace).order_by(
+        ResearchWorkspace.is_default.desc(),
         func.coalesce(ResearchWorkspace.updated_at, ResearchWorkspace.created_at).desc()
     ).all()
     return [_workspace_payload(workspace, include_circulars=False) for workspace in workspaces]
+
+
+@app.get("/api/workspaces/default")
+async def get_default_research_workspace(db: Session = Depends(get_db)):
+    workspace = _ensure_default_workspace(db)
+    return _workspace_payload(workspace)
 
 
 @app.post("/api/workspaces")
@@ -1250,6 +1367,7 @@ async def create_research_workspace(request: Request, db: Session = Depends(get_
     workspace = ResearchWorkspace(
         id=str(uuid.uuid4()),
         name=name.strip()[:120],
+        is_default=0,
         search_state=json.dumps(search_state),
         last_circular_id=last_circular_id or None,
     )
@@ -1261,6 +1379,9 @@ async def create_research_workspace(request: Request, db: Session = Depends(get_
 
 @app.get("/api/workspaces/{workspace_id}")
 async def get_research_workspace(workspace_id: str, db: Session = Depends(get_db)):
+    if workspace_id == DEFAULT_WORKSPACE_ID:
+        return _workspace_payload(_ensure_default_workspace(db))
+
     workspace = db.query(ResearchWorkspace).filter(
         ResearchWorkspace.id == workspace_id
     ).first()
@@ -1271,6 +1392,9 @@ async def get_research_workspace(workspace_id: str, db: Session = Depends(get_db
 
 @app.patch("/api/workspaces/{workspace_id}")
 async def update_research_workspace(workspace_id: str, request: Request, db: Session = Depends(get_db)):
+    if workspace_id == DEFAULT_WORKSPACE_ID:
+        _ensure_default_workspace(db)
+
     workspace = db.query(ResearchWorkspace).filter(
         ResearchWorkspace.id == workspace_id
     ).first()
@@ -1279,6 +1403,8 @@ async def update_research_workspace(workspace_id: str, request: Request, db: Ses
 
     data = await request.json()
     if "name" in data:
+        if workspace.is_default:
+            return JSONResponse({"error": "Default workspace cannot be renamed"}, status_code=400)
         name = data.get("name")
         if not isinstance(name, str) or not name.strip():
             return JSONResponse({"error": "Workspace name cannot be empty"}, status_code=400)
@@ -1309,6 +1435,11 @@ async def delete_research_workspace(workspace_id: str, db: Session = Depends(get
     ).first()
     if not workspace:
         return JSONResponse({"error": "Workspace not found"}, status_code=404)
+    if workspace.is_default:
+        return JSONResponse({"error": "Default workspace cannot be deleted"}, status_code=400)
+    workspace_session_id = _workspace_chat_session_id(workspace.id)
+    db.query(ChatMessage).filter(ChatMessage.session_id == workspace_session_id).delete()
+    db.query(ChatSession).filter(ChatSession.id == workspace_session_id).delete()
     db.delete(workspace)
     db.commit()
     return {"success": True}
@@ -1381,22 +1512,58 @@ async def chat_page():
 
 @app.get("/api/chat/sessions")
 async def list_chat_sessions(db: Session = Depends(get_db)):
+    _ensure_default_workspace(db)
+    workspaces = db.query(ResearchWorkspace).order_by(
+        ResearchWorkspace.is_default.desc(),
+        func.coalesce(ResearchWorkspace.updated_at, ResearchWorkspace.created_at).desc()
+    ).all()
+    workspace_session_ids = [
+        _workspace_chat_session_id(workspace.id) for workspace in workspaces
+    ]
+    workspace_sessions = db.query(ChatSession).filter(
+        ChatSession.id.in_(workspace_session_ids)
+    ).all() if workspace_session_ids else []
+    workspace_session_by_id = {
+        session.id: session for session in workspace_sessions
+    }
     sessions = db.query(ChatSession).order_by(
         func.coalesce(ChatSession.updated_at, ChatSession.created_at).desc()
-    ).limit(50).all()
+    ).filter(~ChatSession.id.in_(workspace_session_ids)).limit(50).all()
     return [
-        {
-            "id": s.id,
-            "title": s.title,
-            "created_at": _isoformat(s.created_at),
-            "updated_at": _isoformat(s.updated_at or s.created_at),
-        }
-        for s in sessions
+        *[
+            _workspace_chat_session_payload(
+                workspace,
+                workspace_session_by_id.get(_workspace_chat_session_id(workspace.id)),
+            )
+            for workspace in workspaces
+        ],
+        *[_chat_session_payload(session) for session in sessions],
     ]
 
 
 @app.get("/api/chat/sessions/{session_id}")
 async def get_chat_session(session_id: str, db: Session = Depends(get_db)):
+    workspace = _get_workspace_for_chat_session(db, session_id)
+    if workspace:
+        session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+        messages = _ordered_chat_messages(db, session_id) if session else []
+        return {
+            **_workspace_chat_session_payload(workspace, session),
+            "messages": [
+                {
+                    "id": m.id,
+                    "role": m.role,
+                    "content": m.content,
+                    "circular_ids": _normalize_circular_ids(_safe_json_list(m.circular_ids)),
+                    "created_at": _isoformat(m.created_at),
+                }
+                for m in messages
+            ],
+            "circulars": _workspace_circular_summaries(workspace),
+        }
+    if _workspace_id_from_chat_session(session_id):
+        return JSONResponse({"error": "Workspace not found"}, status_code=404)
+
     session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
     if not session:
         return JSONResponse({"error": "Session not found"}, status_code=404)
@@ -1418,6 +1585,7 @@ async def get_chat_session(session_id: str, db: Session = Depends(get_db)):
     return {
         "id": session.id,
         "title": session.title,
+        "session_type": "chat",
         "messages": [
             {
                 "id": m.id,
@@ -1438,6 +1606,9 @@ async def get_chat_session(session_id: str, db: Session = Depends(get_db)):
 
 @app.patch("/api/chat/sessions/{session_id}")
 async def rename_chat_session(session_id: str, request: Request, db: Session = Depends(get_db)):
+    if _workspace_id_from_chat_session(session_id):
+        return JSONResponse({"error": "Workspace chat sessions use the workspace name"}, status_code=400)
+
     session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
     if not session:
         return JSONResponse({"error": "Session not found"}, status_code=404)
@@ -1455,6 +1626,23 @@ async def rename_chat_session(session_id: str, request: Request, db: Session = D
 
 @app.delete("/api/chat/sessions/{session_id}")
 async def delete_chat_session(session_id: str, db: Session = Depends(get_db)):
+    workspace = _get_workspace_for_chat_session(db, session_id)
+    if workspace:
+        db.query(ChatMessage).filter(ChatMessage.session_id == session_id).delete()
+        db.query(ChatSession).filter(ChatSession.id == session_id).delete()
+        if workspace.is_default:
+            db.query(WorkspaceCircular).filter(
+                WorkspaceCircular.workspace_id == workspace.id
+            ).delete()
+            workspace.last_circular_id = None
+            workspace.updated_at = datetime.utcnow()
+        else:
+            db.delete(workspace)
+        db.commit()
+        return {"success": True}
+    if _workspace_id_from_chat_session(session_id):
+        return JSONResponse({"error": "Workspace not found"}, status_code=404)
+
     session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
     if not session:
         return JSONResponse({"error": "Session not found"}, status_code=404)
@@ -1534,11 +1722,26 @@ async def chat_message(request: Request, db: Session = Depends(get_db)):
     message = data.get("message", "")
     circular_ids = _normalize_circular_ids(data.get("circular_ids", []))
     session_id = data.get("session_id")
+    workspace = _get_workspace_for_chat_session(db, session_id)
 
     if not message.strip():
         return JSONResponse({"error": "Message cannot be empty"}, status_code=400)
+    if _workspace_id_from_chat_session(session_id) and not workspace:
+        return JSONResponse({"error": "Workspace not found"}, status_code=404)
 
-    if not session_id:
+    if workspace:
+        circular_ids = _workspace_circular_ids(workspace)
+        session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+        if not session:
+            session = ChatSession(
+                id=session_id,
+                title=workspace.name,
+                circular_ids=json.dumps(circular_ids),
+            )
+            db.add(session)
+        else:
+            session.title = workspace.name
+    elif not session_id:
         session_id = str(uuid.uuid4())
         session = ChatSession(
             id=session_id,
@@ -1606,16 +1809,31 @@ async def chat_message_stream(request: Request, db: Session = Depends(get_db)):
     circular_ids = _normalize_circular_ids(data.get("circular_ids", []))
     session_id = data.get("session_id")
     replace_message_id = data.get("replace_message_id")
+    workspace = _get_workspace_for_chat_session(db, session_id)
 
     if not message.strip():
         return JSONResponse({"error": "Message cannot be empty"}, status_code=400)
+    if _workspace_id_from_chat_session(session_id) and not workspace:
+        return JSONResponse({"error": "Workspace not found"}, status_code=404)
 
     if replace_message_id and not session_id:
         return JSONResponse(
             {"error": "A session is required to replace a message"}, status_code=400
         )
 
-    if not session_id:
+    if workspace:
+        circular_ids = _workspace_circular_ids(workspace)
+        session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+        if not session:
+            session = ChatSession(
+                id=session_id,
+                title=workspace.name,
+                circular_ids=json.dumps(circular_ids),
+            )
+            db.add(session)
+        else:
+            session.title = workspace.name
+    elif not session_id:
         session_id = str(uuid.uuid4())
         session = ChatSession(
             id=session_id,

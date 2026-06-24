@@ -277,6 +277,11 @@ export interface SettingsPayload {
 export interface ChatSession {
   id: string
   title?: string | null
+  session_type?: 'chat' | 'workspace'
+  workspace_id?: string | null
+  is_default_workspace?: boolean
+  pinned_count?: number
+  circular_ids?: string[]
   created_at?: string | null
   updated_at?: string | null
 }
@@ -292,6 +297,10 @@ export interface ChatMessage {
 export interface ChatSessionDetail {
   id: string
   title?: string | null
+  session_type?: 'chat' | 'workspace'
+  workspace_id?: string | null
+  is_default_workspace?: boolean
+  pinned_count?: number
   messages: ChatMessage[]
   circulars: CircularSummary[]
 }
@@ -322,6 +331,7 @@ export interface SearchFilters {
 export interface ResearchWorkspace {
   id: string
   name: string
+  is_default?: boolean
   search_state: SearchFilters
   last_circular_id?: string | null
   pinned_circular_ids: string[]

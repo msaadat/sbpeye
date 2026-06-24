@@ -134,5 +134,12 @@ def _ensure_columns():
                         f"ALTER TABLE ai_generation_jobs ADD COLUMN {col_name} {col_type}"
                     ))
 
+        if "research_workspaces" in table_names:
+            existing = {c["name"] for c in insp.get_columns("research_workspaces")}
+            if "is_default" not in existing:
+                conn.execute(text(
+                    "ALTER TABLE research_workspaces ADD COLUMN is_default INTEGER DEFAULT 0"
+                ))
+
 Base.metadata.create_all(bind=engine)
 _ensure_columns()

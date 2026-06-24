@@ -96,6 +96,7 @@ class ResearchWorkspace(Base):
 
     id = Column(String, primary_key=True)
     name = Column(String, nullable=False)
+    is_default = Column(Integer, nullable=False, default=0)
     search_state = Column(Text, nullable=True)
     last_circular_id = Column(String, ForeignKey("circulars.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

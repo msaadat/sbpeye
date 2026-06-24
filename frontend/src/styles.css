@@ -1487,6 +1487,12 @@ a {
   background: color-mix(in srgb, var(--sbp-surface) 90%, var(--sbp-subtle));
 }
 
+.results-toolbar {
+  margin-top: 0.7rem;
+  border-top: 1px solid var(--sbp-border);
+  border-bottom: 0;
+}
+
 .results-count strong {
   color: var(--sbp-green);
   font-size: 1rem;
@@ -1521,20 +1527,12 @@ a {
 }
 
 .pinned-results-section {
-  position: sticky;
-  z-index: 4;
-  top: 0;
-  max-height: min(18rem, 42%);
-  overflow: auto;
   border-bottom: 1px solid color-mix(in srgb, var(--sbp-green) 26%, var(--sbp-border));
   background: color-mix(in srgb, var(--sbp-surface) 92%, var(--sbp-gold) 8%);
   box-shadow: 0 8px 18px color-mix(in srgb, #000 8%, transparent);
 }
 
 .pinned-results-heading {
-  position: sticky;
-  z-index: 2;
-  top: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;

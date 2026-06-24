@@ -299,6 +299,11 @@ h1, h2, h3, h4, h5, h6 {
   text-underline-offset: 0.15em;
 }
 
+.sbp-source-content a.document-pill,
+.sbp-source-content a[data-document-link="true"] {
+  text-decoration: none;
+}
+
 .sbpeye-dark .source-frame .sbp-source-content {
   color: var(--sbp-text);
 }

@@ -483,7 +483,7 @@ onBeforeUnmount(() => searchController?.abort())
       </div>
 
       <div class="workspace-actions">
-        <span class="workspace-pinned-summary"><i class="pi pi-star-fill" />{{ pinnedCirculars.length.toLocaleString() }} pinned</span>
+        <span class="workspace-pinned-summary"><i class="pi pi-bookmark-fill" />{{ pinnedCirculars.length.toLocaleString() }} pinned</span>
         <Button label="Chat" icon="pi pi-comments" size="small" text :disabled="!pinnedCirculars.length" @click="handoffWorkspaceToChat" />
         <Button
           icon="pi pi-trash"
@@ -525,22 +525,9 @@ onBeforeUnmount(() => searchController?.abort())
       </aside>
 
       <main class="circular-results-pane glass-panel" style="padding: 1rem;">
-        <div class="results-toolbar">
-          <div class="results-count"><strong>{{ totalRecords.toLocaleString() }}</strong><span> results</span></div>
-          <div class="results-toolbar-actions">
-            <Checkbox :model-value="allPageSelected" binary aria-label="Select page" :disabled="!searchRows.length" @update:model-value="togglePageSelection" />
-            <span v-if="selectedIds.length">{{ selectedIds.length }} selected</span>
-            <Select v-model="perPage" :options="pageSizeOptions" option-label="label" option-value="value" size="small" />
-          </div>
-        </div>
-
         <Message v-if="errorMessage" severity="error" :closable="false">{{ errorMessage }}</Message>
         <div class="circular-result-list" :class="{ loading }">
           <section v-if="pinnedCirculars.length" class="pinned-results-section" aria-label="Pinned circulars">
-            <div class="pinned-results-heading">
-              <div><span>Pinned circulars</span><strong>{{ activeWorkspace?.name }}</strong></div>
-              <Button label="Chat" icon="pi pi-comments" size="small" text :disabled="!pinnedCirculars.length" @click="handoffWorkspaceToChat" />
-            </div>
 
             <button
               v-for="circular in pinnedCirculars"
@@ -553,7 +540,7 @@ onBeforeUnmount(() => searchController?.abort())
               <span class="result-select" @click.stop>
                 <Checkbox v-model="selectedIds" :value="circular.id" :input-id="`select-pinned-${circular.id}`" :aria-label="`Select ${circular.title}`" />
                 <Button
-                  icon="pi pi-star-fill"
+                  icon="pi pi-bookmark-fill"
                   text
                   rounded
                   size="small"
@@ -582,7 +569,7 @@ onBeforeUnmount(() => searchController?.abort())
             <span class="result-select" @click.stop>
               <Checkbox v-model="selectedIds" :value="row.id" :input-id="`select-${row.id}`" :aria-label="`Select ${row.title}`" />
               <Button
-                :icon="isPinned(row.id) ? 'pi pi-star-fill' : 'pi pi-star'"
+                :icon="isPinned(row.id) ? 'pi pi-bookmark-fill' : 'pi pi-bookmark'"
                 text
                 rounded
                 size="small"
@@ -599,6 +586,15 @@ onBeforeUnmount(() => searchController?.abort())
             />
           </button>
           <div v-if="!loading && !rows.length" class="empty-table-state"><i class="pi pi-search" /><strong>No circulars found</strong><span>Adjust the filters and try again.</span></div>
+        </div>
+
+        <div class="results-toolbar">
+          <div class="results-count"><strong>{{ totalRecords.toLocaleString() }}</strong><span> results</span></div>
+          <div class="results-toolbar-actions">
+            <Checkbox :model-value="allPageSelected" binary aria-label="Select page" :disabled="!searchRows.length" @update:model-value="togglePageSelection" />
+            <span v-if="selectedIds.length">{{ selectedIds.length }} selected</span>
+            <Select v-model="perPage" :options="pageSizeOptions" option-label="label" option-value="value" size="small" />
+          </div>
         </div>
 
         <div class="results-pagination">

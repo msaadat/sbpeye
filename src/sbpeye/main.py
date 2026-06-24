@@ -139,6 +139,25 @@ def _workspace_search_state(value: str | None) -> dict:
     return _safe_json_object(value) or {}
 
 
+def _sorted_workspace_pinned_links(workspace: ResearchWorkspace) -> list[WorkspaceCircular]:
+    def _sort_key(link: WorkspaceCircular) -> tuple:
+        circular_date = link.circular.date if link.circular and link.circular.date else datetime.min
+        added_at = link.added_at or datetime.min
+        title = (link.circular.title if link.circular and link.circular.title else "").lower()
+        circular_id = link.circular_id or ""
+        return (circular_date, added_at, title, circular_id)
+
+    return sorted(
+        [
+            link
+            for link in list(workspace.pinned_circulars or [])
+            if link.circular is not None
+        ],
+        key=_sort_key,
+        reverse=True,
+    )
+
+
 DEFAULT_WORKSPACE_ID = "default"
 DEFAULT_WORKSPACE_NAME = "Default"
 WORKSPACE_CHAT_SESSION_PREFIX = "workspace:"
@@ -176,11 +195,10 @@ def _ensure_default_workspace(db: Session) -> ResearchWorkspace:
 
 
 def _workspace_payload(workspace: ResearchWorkspace, include_circulars: bool = True) -> dict:
-    pinned_links = list(workspace.pinned_circulars or [])
+    pinned_links = _sorted_workspace_pinned_links(workspace)
     pinned_circulars = [
         _circular_summary(link.circular)
         for link in pinned_links
-        if link.circular is not None
     ] if include_circulars else []
 
     return {
@@ -215,16 +233,14 @@ def _workspace_id_from_chat_session(session_id: str | None) -> str | None:
 def _workspace_circular_ids(workspace: ResearchWorkspace) -> list[str]:
     return [
         link.circular_id
-        for link in list(workspace.pinned_circulars or [])
-        if link.circular is not None
+        for link in _sorted_workspace_pinned_links(workspace)
     ]
 
 
 def _workspace_circular_summaries(workspace: ResearchWorkspace) -> list[dict]:
     return [
         _circular_summary(link.circular)
-        for link in list(workspace.pinned_circulars or [])
-        if link.circular is not None
+        for link in _sorted_workspace_pinned_links(workspace)
     ]
 
 

@@ -1,225 +1,321 @@
-/* Premium UI/UX Aesthetics */
-:root {
-  /* Modern Typography */
-  font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  
-  /* Rich, vibrant colors */
-  --sbp-green: #10b981; /* Emerald 500 */
-  --sbp-green-strong: #047857; /* Emerald 700 */
-  --sbp-gold: #f59e0b; /* Amber 500 */
-  --sbp-bg: #f8fafc; /* Slate 50 */
-  --sbp-surface: #ffffff;
-  --sbp-border: #e2e8f0; /* Slate 200 */
-  --sbp-text: #0f172a; /* Slate 900 */
-  --sbp-muted: #64748b; /* Slate 500 */
-  --sbp-subtle: #f1f5f9; /* Slate 100 */
+/* ============================================================================
+   SBPEye — institutional polish layer
+   Sits on top of styles.css. Keeps the deep SBP green as the brand colour and
+   leans on hairlines, calm spacing, and subtle motion rather than glassmorphism
+   or floating cards. "Modern, not dry" — restrained animation, no SaaS gloss.
+   ========================================================================== */
 
-  /* Override PrimeVue colors for Aura */
-  --p-primary-50: #ecfdf5;
-  --p-primary-100: #d1fae5;
-  --p-primary-200: #a7f3d0;
-  --p-primary-300: #6ee7b7;
-  --p-primary-400: #34d399;
-  --p-primary-500: #10b981;
-  --p-primary-600: #059669;
-  --p-primary-700: #047857;
-  --p-primary-800: #065f46;
-  --p-primary-900: #064e3b;
-  --p-primary-950: #022c22;
-}
-
-:root.sbpeye-dark {
-  /* Deep, sleek dark mode */
-  --sbp-bg: #020617; /* Slate 950 */
-  --sbp-surface: #0f172a; /* Slate 900 */
-  --sbp-border: #1e293b; /* Slate 800 */
-  --sbp-text: #f8fafc; /* Slate 50 */
-  --sbp-muted: #94a3b8; /* Slate 400 */
-  --sbp-subtle: #1e293b; /* Slate 800 */
-}
-
-/* Background Gradients */
-body {
-  background: 
-    radial-gradient(circle at 15% 15%, rgba(16, 185, 129, 0.08), transparent 40%),
-    radial-gradient(circle at 85% 85%, rgba(245, 158, 11, 0.05), transparent 40%),
-    var(--sbp-bg) !important;
-  background-attachment: fixed !important;
-}
-
-:root.sbpeye-dark body {
-  background: 
-    radial-gradient(circle at 15% 15%, rgba(16, 185, 129, 0.08), transparent 40%),
-    radial-gradient(circle at 85% 85%, rgba(245, 158, 11, 0.04), transparent 40%),
-    var(--sbp-bg) !important;
-  background-attachment: fixed !important;
-}
-
-/* Typography refinements */
+/* ---- Typography ---------------------------------------------------------- */
 h1, h2, h3, h4, h5, h6 {
   font-family: 'Inter', sans-serif;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.012em;
 }
 
+/* ---- Motion primitives --------------------------------------------------- */
+@keyframes sbp-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes sbp-rise-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ---- Brand mark ---------------------------------------------------------- */
 .brand-mark {
-  background: linear-gradient(135deg, var(--sbp-green), var(--sbp-green-strong)) !important;
-  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3) !important;
-  border-radius: 0.6rem !important;
-  font-family: 'Inter', sans-serif !important;
+  box-shadow: 0 2px 8px rgba(var(--sbp-green-rgb), 0.28);
 }
 
-/* Glassmorphism Utilities */
+/* ---- Surfaces: replace glassmorphism with calm solid panels -------------- */
 .glass-panel {
-  background: rgba(255, 255, 255, 0.65) !important;
-  backdrop-filter: blur(24px) !important;
-  -webkit-backdrop-filter: blur(24px) !important;
-  border: 1px solid rgba(255, 255, 255, 0.5) !important;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.04) !important;
+  background: var(--sbp-surface);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
-:root.sbpeye-dark .glass-panel {
-  background: rgba(15, 23, 42, 0.65) !important;
-  border: 1px solid rgba(255, 255, 255, 0.08) !important;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3) !important;
+/* Keep the filter rail subtly distinct so the eye separates the three panes. */
+.circular-workspace .circular-filters.glass-panel {
+  background: color-mix(in srgb, var(--sbp-subtle) 60%, var(--sbp-surface));
 }
 
-/* Refined App Header & Nav */
-.app-header {
-  background: transparent !important;
-  border-bottom: none !important;
-  padding: 0 !important;
-  margin-bottom: 0 !important;
-  backdrop-filter: none !important;
-}
-
-.app-nav {
-  margin: 0 auto !important;
-  max-width: 100%;
-  border-radius: 0 !important;
-  border-top: none !important;
-  border-left: none !important;
-  border-right: none !important;
-  padding: 0.5rem 1.25rem !important;
-  background: rgba(255, 255, 255, 0.7) !important;
-  backdrop-filter: blur(20px) !important;
-  border: 1px solid rgba(255, 255, 255, 0.6) !important;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.05) !important;
-}
-
-:root.sbpeye-dark .app-nav {
-  background: rgba(15, 23, 42, 0.7) !important;
-  border: 1px solid rgba(255, 255, 255, 0.08) !important;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4) !important;
-}
-
-/* Micro-animations */
-.animated-card {
-  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.3s ease !important;
-}
-
-.animated-card:hover {
-  transform: translateY(-4px) !important;
-  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04) !important;
-  border-color: var(--sbp-green) !important;
-}
-
-:root.sbpeye-dark .animated-card:hover {
-  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.4), 0 10px 10px -5px rgba(0, 0, 0, 0.2) !important;
-  border-color: var(--sbp-green) !important;
-}
-
-.hover-scale {
-  transition: transform 0.2s ease !important;
-}
-
-.hover-scale:hover {
-  transform: scale(1.02) !important;
-}
-
-/* Overriding Components */
+/* ---- Buttons ------------------------------------------------------------- */
 .p-button {
-  transition: transform 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease !important;
-  border-radius: 0.6rem !important;
+  border-radius: var(--sbp-radius);
+  transition:
+    background-color 0.18s var(--sbp-ease),
+    border-color 0.18s var(--sbp-ease),
+    color 0.18s var(--sbp-ease),
+    box-shadow 0.18s var(--sbp-ease),
+    transform 0.12s var(--sbp-ease);
 }
 
-.p-button:active {
-  transform: scale(0.96) !important;
+/* Force icon-only buttons to be perfectly square so border-radius: 999px
+   actually produces a circle. Aura only defines iconOnlyWidth (not height),
+   so the height drifts to paddingY*2 + icon-size and the button becomes oval.
+   We override Aura's own CSS variables so the fix cascades through all sizes. */
+.p-button.p-button-icon-only {
+  --p-button-icon-only-width: 2rem;
+  --p-button-sm-icon-only-width: 1.75rem;
+  --p-button-lg-icon-only-width: 2.5rem;
+  width: var(--p-button-icon-only-width) !important;
+  height: var(--p-button-icon-only-width) !important;
+  padding: 0 !important;
+  border-radius: 999px;
 }
 
-.p-inputtext, .p-select, .p-textarea {
-  border-radius: 0.6rem !important;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease !important;
+.p-button.p-button-icon-only.p-button-sm {
+  width: var(--p-button-sm-icon-only-width) !important;
+  height: var(--p-button-sm-icon-only-width) !important;
 }
 
-.p-inputtext:focus, .p-select:focus, .p-textarea:focus {
-  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.2) !important;
+.p-button.p-button-icon-only.p-button-lg {
+  width: var(--p-button-lg-icon-only-width) !important;
+  height: var(--p-button-lg-icon-only-width) !important;
 }
 
-.document-route-card {
-  border-radius: 1.5rem !important;
+.p-button:not(:disabled):active {
+  transform: translateY(0.5px) scale(0.985);
 }
 
-.document-pill {
-  transition: all 0.2s ease !important;
+/* Make disabled controls read as intentionally "not yet", not broken. */
+.p-button:disabled,
+.p-button.p-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  box-shadow: none;
 }
 
-.document-pill:hover {
-  transform: translateY(-2px) !important;
-  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.15) !important;
+/* ---- Inputs -------------------------------------------------------------- */
+.p-inputtext,
+.p-select,
+.p-textarea,
+.p-inputnumber-input {
+  border-radius: var(--sbp-radius);
+  transition: border-color 0.18s var(--sbp-ease), box-shadow 0.18s var(--sbp-ease);
 }
 
-/* Soften Borders globally */
-* {
-  border-color: var(--sbp-border);
+.p-inputtext:enabled:focus,
+.p-select:not(.p-disabled).p-focus,
+.p-textarea:enabled:focus,
+.p-inputnumber-input:enabled:focus {
+  box-shadow: 0 0 0 3px rgba(var(--sbp-green-rgb), 0.16);
+  border-color: var(--sbp-green);
 }
 
-.chat-message {
-  border-radius: 1rem !important;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.02) !important;
-  transition: box-shadow 0.2s ease !important;
+/* ---- Header nav: clean solid bar, not a floating glass pill -------------- */
+.p-menubar-item-link,
+.brand {
+  transition: color 0.18s var(--sbp-ease), background-color 0.18s var(--sbp-ease);
 }
 
-.chat-message:hover {
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05) !important;
+/* ---- Calm hover for interactive cards (was a SaaS -4px lift) -------------- */
+.animated-card {
+  transition:
+    background-color 0.18s var(--sbp-ease),
+    border-color 0.18s var(--sbp-ease),
+    box-shadow 0.18s var(--sbp-ease);
 }
 
-:root.sbpeye-dark .chat-message:hover {
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2) !important;
+.session-item.animated-card:hover {
+  border-color: color-mix(in srgb, var(--sbp-green) 30%, var(--sbp-border));
+  background: color-mix(in srgb, var(--sbp-green) 5%, var(--sbp-surface));
 }
 
-.user-message {
-  background: linear-gradient(135deg, rgba(16, 185, 129, 0.1), rgba(16, 185, 129, 0.05)) !important;
-  border-color: rgba(16, 185, 129, 0.2) !important;
+/* ---- Workspace tabs ------------------------------------------------------ */
+.workspace-tab {
+  transition:
+    color 0.18s var(--sbp-ease),
+    background-color 0.18s var(--sbp-ease),
+    border-color 0.18s var(--sbp-ease),
+    box-shadow 0.18s var(--sbp-ease);
 }
 
-:root.sbpeye-dark .user-message {
-  background: linear-gradient(135deg, rgba(16, 185, 129, 0.15), rgba(16, 185, 129, 0.05)) !important;
+/* ---- Circulars page: reduce visual clutter ------------------------------- */
+
+/* Lighten the toolbars so they read as quiet dividers, not banded strips. */
+.results-toolbar,
+.detail-pane-toolbar {
+  background: transparent;
 }
 
-.session-item {
-  border-radius: 0.6rem !important;
-  transition: all 0.2s ease !important;
-}
-
-.session-item:hover {
-  background: var(--sbp-subtle) !important;
-}
-
-.table-shell {
-  border-radius: 1rem !important;
-  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.03) !important;
-}
-
-:root.sbpeye-dark .table-shell {
-  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2) !important;
-}
-
-/* Make lists and grids look like floating cards where applicable */
+/* Result rows: smoother hover + clearer, calmer active state. */
 .circular-result-item {
-  border-bottom: 1px solid var(--sbp-border);
-  transition: background-color 0.2s ease !important;
+  transition: background-color 0.16s var(--sbp-ease), box-shadow 0.16s var(--sbp-ease);
 }
 
 .circular-result-item:hover {
-  background-color: var(--sbp-subtle);
+  background: color-mix(in srgb, var(--sbp-green) 5%, var(--sbp-surface));
+}
+
+/* Pinned section: drop the heavy gold wash for a quiet surface with a thin
+   gold accent. The star + accent bar carry the "pinned" signal. */
+.pinned-results-section {
+  background: var(--sbp-surface);
+  border-bottom: 1px solid var(--sbp-border);
+  box-shadow: none;
+}
+
+.pinned-results-heading {
+  background: color-mix(in srgb, var(--sbp-surface) 94%, var(--sbp-gold) 6%);
+}
+
+.pinned-result-item {
+  background: transparent;
+  box-shadow: inset 3px 0 color-mix(in srgb, var(--sbp-gold) 65%, transparent);
+}
+
+.pinned-result-item:hover {
+  background: color-mix(in srgb, var(--sbp-gold) 6%, var(--sbp-surface));
+}
+
+.pinned-result-item.active {
+  background: color-mix(in srgb, var(--sbp-green) 8%, var(--sbp-surface));
+}
+
+/* Detail header action row was a rainbow of severities (purple/red/green/blue/
+   grey/black). Neutralise to one muted ink; let colour appear only on hover so
+   the document title stays the focal point. */
+.detail-actions .p-button.p-button-icon-only {
+  color: var(--sbp-muted);
+}
+
+.detail-actions .p-button.p-button-icon-only:not(:disabled):hover {
+  color: var(--sbp-green-strong);
+  background: color-mix(in srgb, var(--sbp-green) 10%, transparent);
+}
+
+/* Keep the AI action subtly special — a quiet gold tint, not full purple. */
+.detail-actions .p-button.p-button-icon-only:first-child:not(:disabled):hover {
+  color: var(--sbp-gold);
+  background: color-mix(in srgb, var(--sbp-gold) 12%, transparent);
+}
+
+/* ---- Chat: messages, citations, empty state ------------------------------ */
+.chat-message {
+  border-radius: var(--sbp-radius-lg);
+  animation: sbp-rise-in 0.22s var(--sbp-ease) both;
+}
+
+.user-message {
+  background: color-mix(in srgb, var(--sbp-green) 9%, var(--sbp-surface));
+  border-color: color-mix(in srgb, var(--sbp-green) 26%, var(--sbp-border));
+}
+
+.document-pill {
+  transition: background-color 0.18s var(--sbp-ease), border-color 0.18s var(--sbp-ease);
+}
+
+.chat-empty-state {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 0.5rem;
+  max-width: 34rem;
+  margin: auto;
+  padding: 2rem 1rem;
+  text-align: center;
+  animation: sbp-fade-in 0.3s var(--sbp-ease) both;
+}
+
+.chat-empty-icon {
+  display: grid;
+  place-items: center;
+  width: 3.25rem;
+  height: 3.25rem;
+  margin-bottom: 0.35rem;
+  border-radius: 999px;
+  color: var(--sbp-green);
+  background: color-mix(in srgb, var(--sbp-green) 10%, var(--sbp-surface));
+  font-size: 1.4rem;
+}
+
+.chat-empty-state h2 {
+  margin: 0;
+  color: var(--sbp-text);
+  font-size: 1.12rem;
+}
+
+.chat-empty-state p {
+  margin: 0;
+  max-width: 28rem;
+  color: var(--sbp-muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.chat-empty-prompts {
+  display: grid;
+  gap: 0.45rem;
+  width: 100%;
+  margin-top: 0.6rem;
+}
+
+.chat-empty-prompt {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid var(--sbp-border);
+  border-radius: var(--sbp-radius);
+  color: var(--sbp-text);
+  font: inherit;
+  font-size: 0.86rem;
+  text-align: left;
+  background: var(--sbp-surface);
+  cursor: pointer;
+  transition: background-color 0.18s var(--sbp-ease), border-color 0.18s var(--sbp-ease), transform 0.12s var(--sbp-ease);
+}
+
+.chat-empty-prompt i {
+  color: var(--sbp-green);
+  font-size: 0.8rem;
+}
+
+.chat-empty-prompt:hover {
+  border-color: color-mix(in srgb, var(--sbp-green) 38%, var(--sbp-border));
+  background: color-mix(in srgb, var(--sbp-green) 5%, var(--sbp-surface));
+}
+
+.chat-empty-prompt:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* ---- Detail pane sections: gentle stagger on open ------------------------ */
+.detail-pane-scroll > .detail-section,
+.detail-pane-scroll > .detail-document-header {
+  animation: sbp-fade-in 0.26s var(--sbp-ease) both;
+}
+
+/* ---- Source content: safe, minimal defaults only ------------------------ */
+/* SBP-sourced HTML is left structurally intact — including its own table
+   borders, which are often used for layout. We only set a sane link colour and
+   ensure dark-mode legibility. No borders/widths are imposed on the markup. */
+.sbp-source-content a {
+  color: var(--sbp-green-strong);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.sbpeye-dark .source-frame .sbp-source-content {
+  color: var(--sbp-text);
+}
+
+/* ---- Respect reduced-motion preferences ---------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  .chat-message,
+  .chat-empty-state,
+  .detail-pane-scroll > .detail-section,
+  .detail-pane-scroll > .detail-document-header {
+    animation: none;
+  }
+
+  .p-button,
+  .animated-card,
+  .circular-result-item,
+  .chat-empty-prompt {
+    transition: none;
+  }
 }

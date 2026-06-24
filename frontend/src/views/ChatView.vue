@@ -519,6 +519,18 @@ function sendMessage() {
   void generateMessage(text)
 }
 
+const examplePrompts = [
+  'Summarise the key obligations in the selected circular.',
+  'What are the minimum capital adequacy requirements for banks?',
+  'Which circulars has BPRD issued on Basel III implementation?',
+]
+
+function useExamplePrompt(text: string) {
+  if (sending.value) return
+  inputMessage.value = ''
+  void generateMessage(text)
+}
+
 function saveEditedMessage(message: LocalMessage) {
   const text = editDraft.value.trim()
   if (!text || text === message.content) {
@@ -736,9 +748,28 @@ onMounted(async () => {
                 <span>Loading conversation</span>
               </div>
 
-              <Message v-else-if="!messages.length" severity="secondary" :closable="false">
-                Start a new question or select a saved session.
-              </Message>
+              <div v-else-if="!messages.length" class="chat-empty-state">
+                <span class="chat-empty-icon"><i class="pi pi-comments" /></span>
+                <h2>Ask SBPEye about SBP circulars</h2>
+                <p>
+                  {{ hasContext
+                    ? 'Your selected circulars are attached as context. Ask a grounded question, or try one of these:'
+                    : 'Pin or attach circulars for grounded answers, or ask a general regulatory question. Try one of these:' }}
+                </p>
+                <div class="chat-empty-prompts">
+                  <button
+                    v-for="prompt in examplePrompts"
+                    :key="prompt"
+                    type="button"
+                    class="chat-empty-prompt"
+                    :disabled="sending"
+                    @click="useExamplePrompt(prompt)"
+                  >
+                    <i class="pi pi-arrow-right" />
+                    <span>{{ prompt }}</span>
+                  </button>
+                </div>
+              </div>
 
               <article
                 v-for="(message, index) in messages"

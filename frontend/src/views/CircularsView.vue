@@ -72,9 +72,8 @@ const activeWorkspace = computed(() => workspaces.value.find((workspace) => work
 const defaultWorkspace = computed(() => workspaces.value.find((workspace) => workspace.is_default) || workspaces.value[0] || null)
 const pinnedCirculars = computed(() => activeWorkspace.value?.pinned_circulars || [])
 const pinnedIds = computed(() => new Set(activeWorkspace.value?.pinned_circular_ids || []))
-const pageRowIds = computed(() => new Set(rows.value.map((row) => row.id)))
-const workspaceShelfCirculars = computed(() => pinnedCirculars.value.filter((row) => !pageRowIds.value.has(row.id)))
-const allPageSelected = computed(() => Boolean(rows.value.length) && rows.value.every((row) => selectedIds.value.includes(row.id)))
+const searchRows = computed(() => rows.value.filter((row) => !pinnedIds.value.has(row.id)))
+const allPageSelected = computed(() => Boolean(searchRows.value.length) && searchRows.value.every((row) => selectedIds.value.includes(row.id)))
 const canDeleteActiveWorkspace = computed(() => Boolean(activeWorkspace.value && !activeWorkspace.value.is_default))
 
 const sortOptions: SelectOption[] = [
@@ -392,10 +391,10 @@ function clearFilters() {
 
 function togglePageSelection() {
   if (allPageSelected.value) {
-    const pageIds = new Set(rows.value.map((row) => row.id))
+    const pageIds = new Set(searchRows.value.map((row) => row.id))
     selectedIds.value = selectedIds.value.filter((id) => !pageIds.has(id))
   } else {
-    selectedIds.value = [...new Set([...selectedIds.value, ...rows.value.map((row) => row.id)])]
+    selectedIds.value = [...new Set([...selectedIds.value, ...searchRows.value.map((row) => row.id)])]
   }
 }
 
@@ -523,10 +522,10 @@ onBeforeUnmount(() => searchController?.abort())
       <main class="circular-results-pane glass-panel" style="padding: 1rem;">
         <Message v-if="errorMessage" severity="error" :closable="false">{{ errorMessage }}</Message>
         <div class="circular-result-list" :class="{ loading }">
-          <section v-if="workspaceShelfCirculars.length" class="pinned-results-section" aria-label="Pinned circulars">
+          <section v-if="pinnedCirculars.length" class="pinned-results-section" aria-label="Pinned circulars">
 
             <button
-              v-for="circular in workspaceShelfCirculars"
+              v-for="circular in pinnedCirculars"
               :key="circular.id"
               type="button"
               class="circular-result-item pinned-result-item"
@@ -555,7 +554,7 @@ onBeforeUnmount(() => searchController?.abort())
           </section>
 
           <button
-            v-for="row in rows"
+            v-for="row in searchRows"
             :key="row.id"
             type="button"
             class="circular-result-item"
@@ -581,13 +580,13 @@ onBeforeUnmount(() => searchController?.abort())
               :max-tags="selectedCircularId ? 1 : 3"
             />
           </button>
-          <div v-if="!loading && !rows.length" class="empty-table-state"><i class="pi pi-search" /><strong>No circulars found</strong><span>Adjust the filters and try again.</span></div>
+          <div v-if="!loading && !pinnedCirculars.length && !searchRows.length" class="empty-table-state"><i class="pi pi-search" /><strong>No circulars found</strong><span>Adjust the filters and try again.</span></div>
         </div>
 
         <div class="results-toolbar">
           <div class="results-count"><strong>{{ totalRecords.toLocaleString() }}</strong><span> results</span></div>
           <div class="results-toolbar-actions">
-            <Checkbox :model-value="allPageSelected" binary aria-label="Select page" :disabled="!rows.length" @update:model-value="togglePageSelection" />
+            <Checkbox :model-value="allPageSelected" binary aria-label="Select page" :disabled="!searchRows.length" @update:model-value="togglePageSelection" />
             <span v-if="selectedIds.length">{{ selectedIds.length }} selected</span>
             <div class="results-pagination">
               <Button icon="pi pi-angle-left" text rounded aria-label="Previous page" :disabled="page <= 1 || loading" @click="changePage(-1)" />

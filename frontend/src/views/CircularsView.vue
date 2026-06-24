@@ -72,18 +72,14 @@ const activeWorkspace = computed(() => workspaces.value.find((workspace) => work
 const defaultWorkspace = computed(() => workspaces.value.find((workspace) => workspace.is_default) || workspaces.value[0] || null)
 const pinnedCirculars = computed(() => activeWorkspace.value?.pinned_circulars || [])
 const pinnedIds = computed(() => new Set(activeWorkspace.value?.pinned_circular_ids || []))
-const searchRows = computed(() => rows.value.filter((row) => !pinnedIds.value.has(row.id)))
-const allPageSelected = computed(() => Boolean(searchRows.value.length) && searchRows.value.every((row) => selectedIds.value.includes(row.id)))
+const pageRowIds = computed(() => new Set(rows.value.map((row) => row.id)))
+const workspaceShelfCirculars = computed(() => pinnedCirculars.value.filter((row) => !pageRowIds.value.has(row.id)))
+const allPageSelected = computed(() => Boolean(rows.value.length) && rows.value.every((row) => selectedIds.value.includes(row.id)))
 const canDeleteActiveWorkspace = computed(() => Boolean(activeWorkspace.value && !activeWorkspace.value.is_default))
 
 const sortOptions: SelectOption[] = [
   { label: 'Relevance', value: 'relevance' },
   { label: 'Newest first', value: 'date' },
-]
-const pageSizeOptions = [
-  { label: '20 / page', value: 20 },
-  { label: '50 / page', value: 50 },
-  { label: '100 / page', value: 100 },
 ]
 const departmentOptions = computed<SelectOption[]>(() => [
   { label: 'All departments', value: '' },
@@ -396,10 +392,10 @@ function clearFilters() {
 
 function togglePageSelection() {
   if (allPageSelected.value) {
-    const pageIds = new Set(searchRows.value.map((row) => row.id))
+    const pageIds = new Set(rows.value.map((row) => row.id))
     selectedIds.value = selectedIds.value.filter((id) => !pageIds.has(id))
   } else {
-    selectedIds.value = [...new Set([...selectedIds.value, ...searchRows.value.map((row) => row.id)])]
+    selectedIds.value = [...new Set([...selectedIds.value, ...rows.value.map((row) => row.id)])]
   }
 }
 
@@ -527,10 +523,10 @@ onBeforeUnmount(() => searchController?.abort())
       <main class="circular-results-pane glass-panel" style="padding: 1rem;">
         <Message v-if="errorMessage" severity="error" :closable="false">{{ errorMessage }}</Message>
         <div class="circular-result-list" :class="{ loading }">
-          <section v-if="pinnedCirculars.length" class="pinned-results-section" aria-label="Pinned circulars">
+          <section v-if="workspaceShelfCirculars.length" class="pinned-results-section" aria-label="Pinned circulars">
 
             <button
-              v-for="circular in pinnedCirculars"
+              v-for="circular in workspaceShelfCirculars"
               :key="circular.id"
               type="button"
               class="circular-result-item pinned-result-item"
@@ -559,7 +555,7 @@ onBeforeUnmount(() => searchController?.abort())
           </section>
 
           <button
-            v-for="row in searchRows"
+            v-for="row in rows"
             :key="row.id"
             type="button"
             class="circular-result-item"
@@ -591,16 +587,14 @@ onBeforeUnmount(() => searchController?.abort())
         <div class="results-toolbar">
           <div class="results-count"><strong>{{ totalRecords.toLocaleString() }}</strong><span> results</span></div>
           <div class="results-toolbar-actions">
-            <Checkbox :model-value="allPageSelected" binary aria-label="Select page" :disabled="!searchRows.length" @update:model-value="togglePageSelection" />
+            <Checkbox :model-value="allPageSelected" binary aria-label="Select page" :disabled="!rows.length" @update:model-value="togglePageSelection" />
             <span v-if="selectedIds.length">{{ selectedIds.length }} selected</span>
-            <Select v-model="perPage" :options="pageSizeOptions" option-label="label" option-value="value" size="small" />
+            <div class="results-pagination">
+              <Button icon="pi pi-angle-left" text rounded aria-label="Previous page" :disabled="page <= 1 || loading" @click="changePage(-1)" />
+              <span>Page {{ page }} of {{ totalPages }}</span>
+              <Button icon="pi pi-angle-right" text rounded aria-label="Next page" :disabled="page >= totalPages || loading" @click="changePage(1)" />
+            </div>
           </div>
-        </div>
-
-        <div class="results-pagination">
-          <Button icon="pi pi-angle-left" text rounded aria-label="Previous page" :disabled="page <= 1 || loading" @click="changePage(-1)" />
-          <span>Page {{ page }} of {{ totalPages }}</span>
-          <Button icon="pi pi-angle-right" text rounded aria-label="Next page" :disabled="page >= totalPages || loading" @click="changePage(1)" />
         </div>
       </main>
 

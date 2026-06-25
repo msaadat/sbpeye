@@ -1845,14 +1845,15 @@ a {
 
 .detail-document-header,
 .detail-section {
-  padding: 0.65rem 0.8rem;
+  padding: 0.8rem 0.9rem;
   border-bottom: 1px solid var(--sbp-border);
 }
 
 .detail-document-header {
   display: grid;
-  gap: 0.3rem;
-  background: color-mix(in srgb, var(--sbp-green) 3%, var(--sbp-surface));
+  gap: 0.35rem;
+  border-top: 2px solid var(--sbp-green);
+  background: color-mix(in srgb, var(--sbp-green) 6%, var(--sbp-surface));
 }
 
 .detail-header-topline,
@@ -1870,8 +1871,80 @@ a {
 .detail-document-header h1 {
   margin: 0;
   font-family: inherit;
-  font-size: clamp(1.05rem, 1.35vw, 1.3rem);
+  font-size: clamp(1.1rem, 1.4vw, 1.4rem);
+  font-weight: 650;
   line-height: 1.2;
+}
+
+.detail-eyebrow {
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--sbp-muted);
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.66rem;
+  font-weight: 600;
+  text-transform: capitalize;
+  border: 1px solid var(--sbp-border);
+  background: var(--sbp-subtle);
+  color: var(--sbp-text);
+}
+
+.status-chip .status-dot {
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 999px;
+  background: var(--sbp-muted);
+  flex: 0 0 auto;
+}
+
+.status-chip.status-success {
+  color: var(--sbp-green-strong);
+  border-color: color-mix(in srgb, var(--sbp-green) 32%, var(--sbp-border));
+  background: color-mix(in srgb, var(--sbp-green) 10%, var(--sbp-surface));
+}
+
+.status-chip.status-success .status-dot {
+  background: var(--sbp-green);
+}
+
+.status-chip.status-warn {
+  color: color-mix(in srgb, var(--sbp-gold) 70%, var(--sbp-text));
+  border-color: color-mix(in srgb, var(--sbp-gold) 34%, var(--sbp-border));
+  background: color-mix(in srgb, var(--sbp-gold) 12%, var(--sbp-surface));
+}
+
+.status-chip.status-warn .status-dot {
+  background: var(--sbp-gold);
+}
+
+.status-chip.status-danger {
+  color: #b3261e;
+  border-color: color-mix(in srgb, #d3302a 34%, var(--sbp-border));
+  background: color-mix(in srgb, #d3302a 10%, var(--sbp-surface));
+}
+
+.status-chip.status-danger .status-dot {
+  background: #d3302a;
+}
+
+.sbpeye-dark .status-chip.status-success {
+  color: #aee0cc;
+}
+
+.detail-actions-sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 0.1rem 0.15rem;
+  background: var(--sbp-border);
 }
 
 .detail-badges,
@@ -1932,12 +2005,36 @@ a {
 
 .detail-section {
   display: grid;
-  gap: 0.4rem;
+  gap: 0.55rem;
+}
+
+.intelligence-section,
+.documents-section {
+  background: color-mix(in srgb, var(--sbp-green) 2.5%, var(--sbp-surface));
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--sbp-green) 18%, transparent);
+}
+
+.documents-section {
+  border-top: 1px solid color-mix(in srgb, var(--sbp-green) 8%, var(--sbp-border));
 }
 
 .detail-section h2,
 .detail-section p {
   margin: 0;
+}
+
+.detail-section h2,
+.section-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.section-icon {
+  font-size: 0.74rem;
+  color: var(--sbp-green);
+  padding-left: 0.4rem;
+  border-left: 2px solid color-mix(in srgb, var(--sbp-green) 45%, transparent);
 }
 
 .collapsible-heading {
@@ -1954,7 +2051,7 @@ a {
   cursor: pointer;
 }
 
-.collapsible-heading i {
+.collapsible-heading > i {
   color: var(--sbp-muted);
   font-size: 0.68rem;
 }
@@ -1964,13 +2061,8 @@ a {
   line-height: 1.42;
 }
 
-.summary-section {
-  padding-block: 0.55rem;
-}
-
 .intelligence-section {
-  gap: 0.5rem;
-  padding-block: 0.55rem;
+  gap: 0.55rem;
 }
 
 .pill-group {
@@ -2140,19 +2232,29 @@ a {
   cursor: default;
 }
 
+.source-section {
+  background: var(--sbp-subtle);
+}
+
 .source-section .source-frame {
   width: 100%;
   max-height: none;
   overflow-x: auto;
+  border: 1px solid var(--sbp-border);
+  border-top: 2px solid color-mix(in srgb, var(--sbp-green) 25%, var(--sbp-border));
+  border-radius: var(--sbp-radius);
+  box-shadow: var(--sbp-shadow-sm);
 }
 
 .source-section .sbp-source-content {
   width: 100%;
   min-width: 0;
-  max-width: 100%;
-  padding: 0.85rem;
-  font-size: 0.82rem;
+  max-width: 60rem;
+  margin-inline: auto;
+  padding: clamp(1rem, 2.5vw, 2rem);
+  font-size: 0.86rem;
   font-weight: 400;
+  line-height: 1.6;
   overflow-wrap: normal;
 }
 

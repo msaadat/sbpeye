@@ -9,7 +9,6 @@ import Dialog from 'primevue/dialog'
 import Message from 'primevue/message'
 import Popover from 'primevue/popover'
 import ProgressSpinner from 'primevue/progressspinner'
-import Tag from 'primevue/tag'
 import {
   getAIGenerationJob,
   buildDocumentContentUrl,
@@ -382,8 +381,14 @@ onBeforeUnmount(stopPolling)
       <header class="detail-document-header">
         <div class="detail-header-topline">
           <div class="detail-badges">
-            <Tag v-if="circular.reference" :value="circular.reference" severity="secondary" />
-            <Tag v-if="circular.status" :value="circular.status" :severity="statusSeverity(circular.status)" />
+            <span v-if="circular.reference" class="detail-eyebrow">{{ circular.reference }}</span>
+            <span
+              v-if="circular.status"
+              class="status-chip"
+              :class="`status-${statusSeverity(circular.status)}`"
+            >
+              <span class="status-dot" />{{ circular.status }}
+            </span>
             <span v-for="item in circular.tags" :key="item" class="intelligence-pill tag-pill header-tag-pill">{{ item }}</span>
           </div>
           <Button icon="pi pi-times" text rounded aria-label="Close circular" title="Close" @click="emit('close')" />
@@ -441,6 +446,7 @@ onBeforeUnmount(stopPolling)
               title="Related circulars"
               @click="graphVisible = true"
             />
+            <span class="detail-actions-sep" aria-hidden="true" />
             <Button icon="pi pi-comments" text rounded severity="contrast" aria-label="Open in chat" title="Open in chat" @click="handoffToChat" />
           </div>
         </div>
@@ -485,7 +491,7 @@ onBeforeUnmount(stopPolling)
             :aria-expanded="summaryExpanded"
             @click="summaryExpanded = !summaryExpanded"
           >
-            <span>Summary</span>
+            <span class="section-label"><i class="pi pi-align-left section-icon" />Summary</span>
             <i :class="summaryExpanded ? 'pi pi-chevron-up' : 'pi pi-chevron-down'" />
           </button>
         </h2>
@@ -501,7 +507,7 @@ onBeforeUnmount(stopPolling)
         class="detail-section intelligence-section"
       >
         <div class="pill-group">
-          <h2>Relationships</h2>
+          <h2><i class="pi pi-sitemap section-icon" />Relationships</h2>
           <div class="relationship-groups">
             <div
               v-for="group in relationshipGroups"
@@ -535,8 +541,8 @@ onBeforeUnmount(stopPolling)
         </div>
       </section>
 
-      <section v-if="circular.attachments.length" class="detail-section">
-        <h2>Documents</h2>
+      <section v-if="circular.attachments.length" class="detail-section documents-section">
+        <h2><i class="pi pi-paperclip section-icon" />Documents</h2>
         <div class="document-pills">
           <button
             v-for="attachment in circular.attachments"
@@ -552,7 +558,7 @@ onBeforeUnmount(stopPolling)
       </section>
 
       <section v-if="sourceLoading || sourceError || (source?.type === 'html' && source.content) || isPdf" class="detail-section source-section">
-        <h2>Source content</h2>
+        <h2><i class="pi pi-file section-icon" />Source content</h2>
         <Message v-if="sourceError" severity="warn" :closable="false">{{ sourceError }}</Message>
         <div v-if="sourceLoading" class="preview-loading compact-loading"><ProgressSpinner /><span>Loading source</span></div>
         <div v-else-if="source?.type === 'html' && source.content" class="source-frame">

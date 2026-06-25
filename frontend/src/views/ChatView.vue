@@ -60,8 +60,12 @@ const errorMessage = ref('')
 const messagesEl = ref<HTMLElement | null>(null)
 const attachmentDialogVisible = ref(false)
 const selectedAttachment = ref<ResolvedDocument | null>(null)
+const circularCitationCache = ref<Record<string, CircularSummary | null>>({})
 let searchTimer: number | undefined
 let streamController: AbortController | null = null
+const circularCitationLoads = new Set<string>()
+const uuidPattern = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi
+const citationTokenPattern = /\[{1,2}\s*(circular|attachment)\s*:\s*([a-zA-Z0-9-]+)\s*\|\s*([^\]\n]+?)\s*\]{1,2}/gi
 
 marked.use({
   breaks: true,
@@ -98,20 +102,156 @@ function sessionIconClass(session: ChatSession): string {
   return session.is_default_workspace ? 'pi-home' : 'pi-folder'
 }
 
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[character] || character))
+}
+
+function cacheCircularCitation(circular: CircularSummary) {
+  circularCitationCache.value = {
+    ...circularCitationCache.value,
+    [circular.id.toLowerCase()]: circular,
+  }
+}
+
+function circularCitationLabel(id: string): string {
+  const circular = circularCitationCache.value[id.toLowerCase()]
+  return circular?.reference || circular?.title || 'Circular'
+}
+
+function circularCitationHtml(id: string, label = circularCitationLabel(id)): string {
+  const href = `/circulars/${encodeURIComponent(id)}`
+  return `<a href="${href}" class="document-pill chat-citation-pill" data-document-link="true"><i class="pi pi-file"></i><span>${escapeHtml(label)}</span></a>`
+}
+
+function citationHtml(kind: string, id: string, label: string): string {
+  if (kind === 'circular') {
+    return circularCitationHtml(id, label.trim() || circularCitationLabel(id))
+  }
+
+  const href = `/documents/open?id=${encodeURIComponent(id)}`
+  return `<a href="${href}" class="document-pill chat-citation-pill" data-document-link="true"><i class="pi pi-paperclip"></i><span>${escapeHtml(label.trim() || 'Attachment')}</span></a>`
+}
+
+function normalizeCitationTokens(content: string): string {
+  return content
+    .replace(
+      /\[\[\s*(circular|attachment)\s*:\s*([a-zA-Z0-9-]+)\s*\|\s*([\s\S]*?)\s*\]\]/g,
+      (_match, kind: string, id: string, label: string) => citationHtml(kind, id, label),
+    )
+    .replace(
+      citationTokenPattern,
+      (_match, kind: string, id: string, label: string) => citationHtml(kind, id, label),
+    )
+}
+
+function collectCircularIds(content: string): string[] {
+  const ids = new Set<string>()
+  for (const match of content.matchAll(uuidPattern)) {
+    ids.add(match[0].toLowerCase())
+  }
+  return [...ids]
+}
+
+async function loadCircularCitation(id: string) {
+  const normalized = id.toLowerCase()
+  if (normalized in circularCitationCache.value || circularCitationLoads.has(normalized)) {
+    return
+  }
+
+  circularCitationLoads.add(normalized)
+  try {
+    const circular = await getCircularDetail(normalized)
+    cacheCircularCitation(circular)
+  } catch {
+    circularCitationCache.value = {
+      ...circularCitationCache.value,
+      [normalized]: null,
+    }
+  } finally {
+    circularCitationLoads.delete(normalized)
+  }
+}
+
+function preloadCircularCitations() {
+  for (const message of messages.value) {
+    if (message.role !== 'assistant') continue
+    for (const id of collectCircularIds(message.content)) {
+      void loadCircularCitation(id)
+    }
+  }
+}
+
+function replaceBareCircularIds(root: DocumentFragment) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  const replacements: Text[] = []
+
+  while (walker.nextNode()) {
+    const node = walker.currentNode
+    if (!(node instanceof Text) || !node.nodeValue) {
+      continue
+    }
+
+    const hasCitation = citationTokenPattern.test(node.nodeValue)
+    const hasUuid = uuidPattern.test(node.nodeValue)
+    citationTokenPattern.lastIndex = 0
+    uuidPattern.lastIndex = 0
+    if (!hasCitation && !hasUuid) {
+      uuidPattern.lastIndex = 0
+      continue
+    }
+
+    const parent = node.parentElement
+    if (parent?.closest('a, code, pre')) {
+      uuidPattern.lastIndex = 0
+      continue
+    }
+
+    replacements.push(node)
+    uuidPattern.lastIndex = 0
+  }
+
+  for (const node of replacements) {
+    const text = node.nodeValue || ''
+    const fragment = document.createDocumentFragment()
+    let lastIndex = 0
+    const pattern = citationTokenPattern.test(text) ? citationTokenPattern : uuidPattern
+    citationTokenPattern.lastIndex = 0
+    pattern.lastIndex = 0
+
+    for (const match of text.matchAll(pattern)) {
+      const kind = match[1]
+      const id = pattern === citationTokenPattern ? match[2] : match[0]
+      const label = pattern === citationTokenPattern ? match[3] : undefined
+      const index = match.index || 0
+      if (index > lastIndex) {
+        fragment.append(document.createTextNode(text.slice(lastIndex, index)))
+      }
+
+      const template = document.createElement('template')
+      template.innerHTML = pattern === citationTokenPattern
+        ? citationHtml(kind, id, label || '')
+        : circularCitationHtml(id)
+      fragment.append(template.content)
+      lastIndex = index + match[0].length
+    }
+
+    if (lastIndex < text.length) {
+      fragment.append(document.createTextNode(text.slice(lastIndex)))
+    }
+
+    node.replaceWith(fragment)
+    pattern.lastIndex = 0
+  }
+}
+
 function renderMarkdown(content: string): string {
-  const withCitations = content.replace(
-    /\[\[(circular|attachment):([a-zA-Z0-9-]+)\|([^\]\n]+)\]\]/g,
-    (_match, kind: string, id: string, label: string) => {
-      const href = kind === 'circular'
-        ? `/circulars/${encodeURIComponent(id)}`
-        : `/documents/open?id=${encodeURIComponent(id)}`
-      const icon = kind === 'circular' ? 'pi-file' : 'pi-paperclip'
-      const safeLabel = label.replace(/[&<>"']/g, (character) => ({
-        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-      }[character] || character))
-      return `<a href="${href}" class="document-pill chat-citation-pill" data-document-link="true"><i class="pi ${icon}"></i><span>${safeLabel}</span></a>`
-    },
-  )
+  const withCitations = normalizeCitationTokens(content)
   const sanitized = DOMPurify.sanitize(marked.parse(withCitations) as string, {
     USE_PROFILES: { html: true },
   })
@@ -124,6 +264,7 @@ function renderMarkdown(content: string): string {
       anchor.dataset.documentLink = 'true'
     }
   })
+  replaceBareCircularIds(template.content)
   return template.innerHTML
 }
 
@@ -587,6 +728,12 @@ watch(contextQuery, () => {
     void searchCirculars()
   }, 250)
 })
+
+watch(selectedCirculars, (circulars) => {
+  circulars.forEach(cacheCircularCitation)
+}, { immediate: true, deep: true })
+
+watch(messages, preloadCircularCitations, { deep: true })
 
 onMounted(async () => {
   await loadSessions()

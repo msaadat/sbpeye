@@ -326,6 +326,11 @@ function removeContext(id: string) {
 
 async function scrollToBottom() {
   await nextTick()
+  await new Promise<void>((resolve) => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => resolve())
+    })
+  })
   if (messagesEl.value) {
     messagesEl.value.scrollTop = messagesEl.value.scrollHeight
   }
@@ -352,6 +357,7 @@ async function loadSession(sessionId: string) {
   if (sending.value) return
   sessionLoading.value = true
   errorMessage.value = ''
+  let loaded = false
 
   try {
     const data = await getChatSession(sessionId)
@@ -361,11 +367,15 @@ async function loadSession(sessionId: string) {
     contextQuery.value = ''
     searchResults.value = []
     renamingSessionId.value = null
-    await scrollToBottom()
+    loaded = true
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : 'Unable to load chat session.'
   } finally {
     sessionLoading.value = false
+  }
+
+  if (loaded) {
+    await scrollToBottom()
   }
 }
 
@@ -554,6 +564,30 @@ async function loadCircularContextFromQuery() {
   await router.replace({ path: '/chat' })
 }
 
+async function loadWorkspaceSessionFromQuery(): Promise<boolean> {
+  const raw = route.query.workspace
+  const workspaceId = Array.isArray(raw) ? raw[0] : raw
+  if (!workspaceId) {
+    return false
+  }
+
+  const workspaceSession = sessions.value.find((session) => session.workspace_id === workspaceId)
+  if (!workspaceSession) {
+    toast.add({
+      severity: 'warn',
+      summary: 'Workspace unavailable',
+      detail: 'Unable to load that workspace chat.',
+      life: 5000,
+    })
+    await router.replace({ path: '/chat' })
+    return true
+  }
+
+  await loadSession(workspaceSession.id)
+  await router.replace({ path: '/chat' })
+  return true
+}
+
 async function generateMessage(
   textValue: string,
   replaceMessage?: LocalMessage,
@@ -737,7 +771,9 @@ watch(messages, preloadCircularCitations, { deep: true })
 
 onMounted(async () => {
   await loadSessions()
+  if (await loadWorkspaceSessionFromQuery()) return
   await loadCircularContextFromQuery()
+  await scrollToBottom()
 })
 </script>
 

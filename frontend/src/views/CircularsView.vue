@@ -234,10 +234,11 @@ async function loadWorkspaces() {
     const defaultId = defaultWorkspace.value?.id || ''
     const requestedExists = requestedWorkspaceId && workspaces.value.some((workspace) => workspace.id === requestedWorkspaceId)
     const storedExists = storedWorkspaceId && workspaces.value.some((workspace) => workspace.id === storedWorkspaceId)
+    const shouldRestoreWorkspaceState = !routeHasSearchState() && !selectedCircularId.value
     const workspaceId = requestedExists
       ? requestedWorkspaceId
-      : (!routeHasSearchState() && storedExists ? storedWorkspaceId : defaultId)
-    if (workspaceId) await activateWorkspace(workspaceId, !routeHasSearchState())
+      : (shouldRestoreWorkspaceState && storedExists ? storedWorkspaceId : defaultId)
+    if (workspaceId) await activateWorkspace(workspaceId, shouldRestoreWorkspaceState)
   } catch (error) {
     toast.add({ severity: 'warn', summary: 'Workspaces unavailable', detail: error instanceof Error ? error.message : 'Unable to load research workspaces.', life: 5000 })
   } finally {
@@ -435,8 +436,7 @@ function handoffToChat() {
 }
 
 function handoffWorkspaceToChat() {
-  const circularIds = activeWorkspace.value?.pinned_circular_ids || []
-  if (circularIds.length) void router.push({ path: '/chat', query: { circular_ids: circularIds.join(',') } })
+  if (activeWorkspace.value) void router.push({ path: '/chat', query: { workspace: activeWorkspace.value.id } })
 }
 
 function changePage(offset: number) {
@@ -486,7 +486,7 @@ onBeforeUnmount(() => searchController?.abort())
 
       <div class="workspace-actions">
         <span class="workspace-pinned-summary"><i class="pi pi-bookmark-fill" />{{ pinnedCirculars.length.toLocaleString() }} pinned</span>
-        <Button label="Chat" icon="pi pi-comments" size="small" text :disabled="!pinnedCirculars.length" @click="handoffWorkspaceToChat" />
+        <Button label="Chat" icon="pi pi-comments" size="small" text :disabled="!activeWorkspace" @click="handoffWorkspaceToChat" />
         <Button
           icon="pi pi-trash"
           size="small"

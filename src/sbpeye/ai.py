@@ -222,6 +222,97 @@ def get_provider_definition(provider: str | None) -> ProviderDefinition:
     return PROVIDER_DEFINITIONS[normalize_provider(provider)]
 
 
+GENERIC_CHAT_ERROR = (
+    "Sorry, something went wrong while generating a response. Please try again."
+)
+
+
+def friendly_chat_error(exc: Exception) -> str:
+    """Translate a provider/SDK exception into a clear, user-facing message.
+
+    Always returns a non-empty string so callers can surface it directly. Raw
+    provider payloads (status codes, JSON dumps, stack traces) are never exposed.
+    """
+    status = getattr(exc, "status_code", None)
+    text = str(exc).lower()
+
+    def has(*needles: str) -> bool:
+        return any(needle in text for needle in needles)
+
+    # Request too large / rate limited / context window exceeded.
+    if status in (413, 429) or has(
+        "rate_limit_exceeded",
+        "request too large",
+        "tokens per minute",
+        "requests per minute",
+        "context_length_exceeded",
+        "maximum context length",
+        "reduce your message size",
+    ):
+        return (
+            "This request was too large for the selected model. The provider "
+            "rejected it because the conversation plus the selected circulars' "
+            "context exceeded its token/rate limit. Try selecting fewer "
+            "circulars (or ones with smaller attachments), or ask a more "
+            "specific question."
+        )
+
+    # Authentication / authorization problems.
+    if status in (401, 403) or has(
+        "invalid api key",
+        "incorrect api key",
+        "authentication",
+        "unauthorized",
+        "permission",
+    ):
+        return (
+            "The AI provider rejected the request due to an authentication "
+            "problem. Check that a valid API key is configured for the selected "
+            "provider in Settings."
+        )
+
+    # Model not found / not available.
+    if status == 404 or has(
+        "model not found",
+        "does not exist",
+        "no such model",
+        "model_not_found",
+    ):
+        return (
+            "The configured chat model could not be found at the AI provider. "
+            "Verify the model name in Settings."
+        )
+
+    # Network / connection / timeout issues reaching the provider.
+    if exc.__class__.__name__ in {"APIConnectionError", "APITimeoutError"} or has(
+        "connection error",
+        "connection refused",
+        "timed out",
+        "timeout",
+        "failed to establish",
+        "name resolution",
+        "max retries",
+    ):
+        return (
+            "Could not reach the AI provider. Check your network connection and "
+            "that the provider's base URL is correct in Settings, then try again."
+        )
+
+    # Provider-side server errors.
+    if (isinstance(status, int) and status >= 500) or has(
+        "internal server error",
+        "service unavailable",
+        "bad gateway",
+        "overloaded",
+    ):
+        return (
+            "The AI provider is temporarily unavailable or overloaded. Please "
+            "wait a moment and try again."
+        )
+
+    return GENERIC_CHAT_ERROR
+
+
 def get_provider_api_key(provider: str | None) -> tuple[str, str | None]:
     definition = get_provider_definition(provider)
     return resolve_env_value(

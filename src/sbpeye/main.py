@@ -16,7 +16,7 @@ import uuid
 from .database import PROJECT_ROOT, engine, Base, get_db, SessionLocal, has_vector_store_data
 from .models import AIGenerationJob, Attachment, CachedDocument, SyncStatus, Circular, CircularRelationship, EcoDataSeries, EcoDataEntry, Settings, ChatSession, ChatMessage, ResearchWorkspace, WorkspaceCircular
 from .search import search_engine
-from .ai import AIClient, AIConfig, get_ai_client, get_provider_api_key, get_provider_definition, normalize_provider
+from .ai import AIClient, AIConfig, friendly_chat_error, get_ai_client, get_provider_api_key, get_provider_definition, normalize_provider
 from .circular_ai import GENERATION_ACTIONS, generation_job_payload, run_generation_job
 from .checklist_export import build_checklist_workbook
 from .embeddings import EmbeddingConfig, create_embedding_backend
@@ -1444,7 +1444,7 @@ async def chat_message(request: Request, db: Session = Depends(get_db)):
             selected_circular_ids=circular_ids,
         )
     except Exception as e:
-        response_text = f"Error generating response: {str(e)}"
+        response_text = friendly_chat_error(e)
 
     assistant_msg = ChatMessage(
         id=str(uuid.uuid4()),
@@ -1547,7 +1547,10 @@ async def chat_message_stream(request: Request, db: Session = Depends(get_db)):
             yield sse("done", {"session_id": session_id, "message_id": assistant_msg.id})
         except Exception as e:
             stream_db.rollback()
-            yield sse("error", {"error": str(e), "session_id": session_id})
+            yield sse(
+                "error",
+                {"error": friendly_chat_error(e), "session_id": session_id},
+            )
         finally:
             stream_db.close()
 

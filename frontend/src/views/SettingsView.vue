@@ -48,6 +48,7 @@ const providerOptions: ProviderOption[] = [
   { name: 'LM Studio (Local)', value: 'lmstudio', baseUrl: 'http://localhost:1234/v1', apiKeyEnvVar: 'AI_API_KEY' },
   { name: 'OpenAI', value: 'openai', baseUrl: 'https://api.openai.com/v1', apiKeyEnvVar: 'OPENAI_API_KEY' },
   { name: 'Google Gemini', value: 'google', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/', apiKeyEnvVar: 'GEMINI_API_KEY' },
+  { name: 'Mistral AI', value: 'mistral', baseUrl: 'https://api.mistral.ai/v1', apiKeyEnvVar: 'MISTRAL_API_KEY' },
   { name: 'Groq', value: 'groq', baseUrl: 'https://api.groq.com/openai/v1', apiKeyEnvVar: 'GROQ_API_KEY' },
   { name: 'OpenRouter', value: 'openrouter', baseUrl: 'https://openrouter.ai/api/v1', apiKeyEnvVar: 'OPENROUTER_API_KEY' },
   { name: 'Custom OpenAI-Compatible', value: 'custom', baseUrl: 'http://localhost:1234/v1', apiKeyEnvVar: 'AI_API_KEY' },

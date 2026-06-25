@@ -180,6 +180,12 @@ PROVIDER_DEFINITIONS = {
         default_base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
         api_key_env_vars=("GEMINI_API_KEY", "GOOGLE_API_KEY", "AI_API_KEY"),
     ),
+    "mistral": ProviderDefinition(
+        value="mistral",
+        label="Mistral AI",
+        default_base_url="https://api.mistral.ai/v1",
+        api_key_env_vars=("MISTRAL_API_KEY", "AI_API_KEY"),
+    ),
     "groq": ProviderDefinition(
         value="groq",
         label="Groq",
@@ -206,6 +212,8 @@ def normalize_provider(provider: str | None) -> str:
     aliases = {
         "gemini": "google",
         "lm_studio": "lmstudio",
+        "mistralai": "mistral",
+        "mistral_ai": "mistral",
     }
     return aliases.get(value, value if value in PROVIDER_DEFINITIONS else "custom")
 

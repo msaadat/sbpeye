@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from openai import BadRequestError, OpenAI
+from openai import APIError, BadRequestError, OpenAI
 
 from sqlalchemy.orm import Session
 
@@ -393,6 +393,63 @@ class AIClient:
             temperature=temperature,
         )
         return response.choices[0].message.content or ""
+
+    @staticmethod
+    def _is_tool_choice_none_error(exc: Exception) -> bool:
+        return "Tool choice is none, but model called a tool" in str(exc)
+
+    @staticmethod
+    def _tool_iteration_limit_message() -> str:
+        return (
+            "I could not complete the answer because the model kept requesting "
+            "additional database tool calls after the lookup limit was reached. "
+            "Please retry the question, or narrow it to the selected circulars."
+        )
+
+    def _tool_result_synthesis_messages(
+        self,
+        messages: list[dict[str, str]],
+        full_messages: list[dict[str, Any]],
+        circulars_context: str | None,
+    ) -> list[dict[str, str]]:
+        tool_sections: list[str] = []
+        remaining_chars = max(4000, self.config.max_context_tokens * 4)
+        for item in full_messages:
+            if item.get("role") != "tool":
+                continue
+            content = str(item.get("content") or "")
+            if not content:
+                continue
+            if len(content) > remaining_chars:
+                content = content[:remaining_chars]
+            tool_sections.append(content)
+            remaining_chars -= len(content)
+            if remaining_chars <= 0:
+                break
+
+        synthesis_context = [
+            "Selected circular context:",
+            circulars_context or "No selected circular context was provided.",
+        ]
+        if tool_sections:
+            synthesis_context.extend([
+                "Database lookup results already gathered:",
+                "\n\n".join(tool_sections),
+            ])
+
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "You are an expert assistant for SBP circulars and regulations. "
+                    "No tools are available in this step. Answer using only the "
+                    "provided selected context and database lookup results. Preserve "
+                    "any exact citation tokens you use."
+                ),
+            },
+            *messages,
+            {"role": "user", "content": "\n\n".join(synthesis_context)},
+        ]
 
     def summarize(self, title: str, content_text: str) -> str:
         system = "You are a concise financial regulations analyst. Summarize the following SBP circular in 3-5 sentences, focusing on the key regulatory changes, requirements, and impact on banks/DFIs/MFBs. Be factual and specific."
@@ -998,6 +1055,12 @@ SOURCE BLOCK:
                     department=department if department else None,
                     tag=tag if tag else None,
                 )
+                relaxed_department = False
+                if not results and department:
+                    results, _ = search_engine.search(
+                        query, db, limit=limit, tag=tag if tag else None
+                    )
+                    relaxed_department = bool(results)
                 out = []
                 for r in results:
                     c = r["circular"]
@@ -1012,7 +1075,11 @@ SOURCE BLOCK:
                         "url": c.url,
                         "citation": f"[[circular:{c.id}|{c.reference or c.title}]]",
                     })
-                return json.dumps({"results": out, "count": len(out)})
+                return json.dumps({
+                    "results": out,
+                    "count": len(out),
+                    "department_filter_relaxed": relaxed_department,
+                })
 
             elif name == "get_latest_circulars":
                 from .models import Circular
@@ -1043,8 +1110,35 @@ SOURCE BLOCK:
                 ref = arguments.get("circular_reference", "").strip()
                 if not ref:
                     return json.dumps({"error": "No circular reference provided"})
-                # Try exact reference match first, then title ILIKE
-                c = db.query(Circular).filter(Circular.reference == ref).first()
+                from .search import SearchEngine, search_engine
+
+                has_year = bool(re.search(r"\b(?:19\d{2}|20\d{2})\b", ref))
+                ref_matches = SearchEngine._search_by_reference(ref, db, limit=5)
+                if len(ref_matches) > 1 and not has_year:
+                    return json.dumps({
+                        "error": (
+                            "Ambiguous circular reference. Include the year to "
+                            "retrieve a specific circular."
+                        ),
+                        "candidates": [
+                            {
+                                "title": item.title,
+                                "reference": item.reference,
+                                "department": item.department,
+                                "date": item.date.strftime("%Y-%m-%d") if item.date else None,
+                                "citation": (
+                                    f"[[circular:{item.id}|{item.reference or item.title}]]"
+                                ),
+                            }
+                            for item in ref_matches
+                        ],
+                    })
+
+                c = ref_matches[0] if ref_matches else None
+                # Try exact reference match, then title ILIKE, when the query is
+                # not a parsed circular reference.
+                if not c:
+                    c = db.query(Circular).filter(Circular.reference == ref).first()
                 if not c:
                     c = db.query(Circular).filter(
                         or_(
@@ -1052,6 +1146,9 @@ SOURCE BLOCK:
                             Circular.reference.ilike(f"%{ref}%"),
                         )
                     ).first()
+                if not c:
+                    results, _ = search_engine.search(ref, db, limit=1)
+                    c = results[0]["circular"] if results else None
                 if not c:
                     return json.dumps({"error": f"Circular not found: {ref}"})
                 return json.dumps({
@@ -1185,12 +1282,21 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
                     "content": result,
                 })
 
-        # Fallback if max iterations reached
-        final_response = self._client.chat.completions.create(
-            model=self.config.effective_chat_model,
-            messages=full_messages,
-            temperature=0.3,
+        # Fallback if max iterations reached. Use a fresh synthesis prompt so
+        # models that keep requesting tools do not see prior tool-call messages.
+        synthesis_messages = self._tool_result_synthesis_messages(
+            messages, full_messages, circulars_context
         )
+        try:
+            final_response = self._client.chat.completions.create(
+                model=self.config.effective_chat_model,
+                messages=synthesis_messages,
+                temperature=0.3,
+            )
+        except APIError as exc:
+            if self._is_tool_choice_none_error(exc):
+                return self._tool_iteration_limit_message()
+            raise
         return final_response.choices[0].message.content or ""
 
     def stream_chat(
@@ -1266,18 +1372,27 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
                     "content": result,
                 })
 
-        final_stream = self._client.chat.completions.create(
-            model=self.config.effective_chat_model,
-            messages=full_messages,
-            temperature=0.3,
-            stream=True,
+        synthesis_messages = self._tool_result_synthesis_messages(
+            messages, full_messages, circulars_context
         )
-        for chunk in final_stream:
-            if not chunk.choices:
-                continue
-            content = chunk.choices[0].delta.content
-            if content:
-                yield content
+        try:
+            final_stream = self._client.chat.completions.create(
+                model=self.config.effective_chat_model,
+                messages=synthesis_messages,
+                temperature=0.3,
+                stream=True,
+            )
+            for chunk in final_stream:
+                if not chunk.choices:
+                    continue
+                content = chunk.choices[0].delta.content
+                if content:
+                    yield content
+        except APIError as exc:
+            if self._is_tool_choice_none_error(exc):
+                yield self._tool_iteration_limit_message()
+                return
+            raise
 
     def test_connection(self) -> dict:
         try:

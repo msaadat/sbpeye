@@ -439,9 +439,11 @@ class SearchEngine:
         doc_type   = (match.group(2) or "").lower().strip()
         num_raw    = match.group(3).lstrip("0") or "0"  # "08" -> "8"
         year       = match.group(4)                      # None when omitted
-
-        # Build both padded and unpadded variants so "8" matches "08" and vice-versa
-        num_padded = num_raw.zfill(2)
+        if not year:
+            # Users and model tools often cite references as
+            # "Circular No. 04 dated March 08, 2018" rather than "of 2018".
+            year_match = re.search(r"\b(19\d{2}|20\d{2})\b", query)
+            year = year_match.group(1) if year_match else None
 
         # Determine whether the query pins a specific type.
         # "circular letter" / "cir let" → must contain "letter"
@@ -453,17 +455,14 @@ class SearchEngine:
 
         from sqlalchemy import or_, extract
 
-        # Search both `reference` and `title` columns to catch circulars that
-        # store the reference only in the title.
-        def _col_conditions(col):
-            return [
-                col.ilike(f"%{dept_code}%{num_raw}%"),
-                col.ilike(f"%{dept_code}%{num_padded}%"),
-            ]
-
-        conditions = _col_conditions(Circular.reference) + _col_conditions(Circular.title)
-
-        q_obj = db.query(Circular).filter(or_(*conditions))
+        # Search broadly in SQL, then parse candidate references in Python.
+        # A raw LIKE for "04" also matches "14" and "24".
+        q_obj = db.query(Circular).filter(
+            or_(
+                Circular.reference.ilike(f"%{dept_code}%"),
+                Circular.title.ilike(f"%{dept_code}%"),
+            )
+        )
 
         # Enforce document-type constraint so "Circular No. 08" ≠ "Circular Letter No. 08"
         if is_letter:
@@ -482,7 +481,29 @@ class SearchEngine:
         if year:
             q_obj = q_obj.filter(extract("year", Circular.date) == int(year))
 
-        return q_obj.order_by(Circular.date.desc()).limit(limit).all()
+        candidates = q_obj.order_by(Circular.date.desc()).limit(max(limit * 20, 100)).all()
+
+        def reference_matches(text: str | None) -> bool:
+            for candidate in REFERENCE_PATTERN.finditer(text or ""):
+                candidate_dept = candidate.group(1).upper()
+                candidate_type = (candidate.group(2) or "").lower().strip()
+                candidate_num = candidate.group(3).lstrip("0") or "0"
+                candidate_is_letter = bool(re.search(r"let", candidate_type))
+                candidate_is_plain = bool(candidate_type) and not candidate_is_letter
+                if candidate_dept != dept_code or candidate_num != num_raw:
+                    continue
+                if is_letter and not candidate_is_letter:
+                    continue
+                if is_plain and candidate_is_letter:
+                    continue
+                return True
+            return False
+
+        return [
+            circular
+            for circular in candidates
+            if reference_matches(circular.reference) or reference_matches(circular.title)
+        ][:limit]
 
     # ------------------------------------------------------------------
     # Snippet generation
@@ -614,7 +635,13 @@ class SearchEngine:
             if end_year:
                 q_obj = q_obj.filter(extract('year', Circular.date) <= end_year)
             if department and department.strip():
-                q_obj = q_obj.filter(Circular.department == department)
+                dept = department.strip()
+                q_obj = q_obj.filter(
+                    or_(
+                        Circular.department == dept,
+                        Circular.department.ilike(f"%{dept}%"),
+                    )
+                )
             if tag and tag.strip():
                 q_obj = q_obj.filter(
                     or_(

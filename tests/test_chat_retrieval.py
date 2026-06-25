@@ -14,6 +14,7 @@ from sbpeye.chat_retrieval import (
 from sbpeye.database import Base
 from sbpeye.main import _truncate_chat_messages, get_chat_session
 from sbpeye.models import Attachment, ChatMessage, ChatSession, Circular
+from sbpeye.search import SearchEngine
 
 
 def make_session():
@@ -168,6 +169,116 @@ def test_selected_document_tool_cannot_accept_a_different_scope(monkeypatch):
     ))
 
     assert payload == {"results": [], "count": 0}
+
+
+def test_search_department_filter_accepts_partial_department(monkeypatch):
+    import sbpeye.search as search_module
+
+    monkeypatch.setattr(search_module, "collection", FailingCollection())
+    monkeypatch.setattr(search_module, "embedding_backend", FailingEmbeddings())
+    db = make_session()
+    db.add_all([
+        Circular(
+            id="dmmd",
+            reference="DMMD Circular No. 04",
+            title="Maintenance of Statutory Cash Reserve Requirement",
+            department="Domestic Markets & Monetary Management (DMMD)",
+            date=datetime(2018, 3, 8),
+            content_text="Cash reserve requirement applies.",
+        ),
+        Circular(
+            id="bprd",
+            reference="BPRD Circular No. 01",
+            title="Other requirement",
+            department="Banking Policy & Regulations (BPRD)",
+            date=datetime(2018, 3, 8),
+            content_text="Cash reserve requirement applies.",
+        ),
+    ])
+    db.commit()
+
+    results, _ = SearchEngine().search(
+        "cash reserve requirement",
+        db,
+        department="Domestic Markets & Monetary Management",
+    )
+
+    assert [item["circular"].id for item in results] == ["dmmd"]
+
+
+def test_reference_search_understands_dated_year():
+    db = make_session()
+    db.add_all([
+        Circular(
+            id="old",
+            reference="DMMD Circular No. 04",
+            title="Maintenance of Statutory Cash Reserve Requirement",
+            department="Domestic Markets & Monetary Management (DMMD)",
+            date=datetime(2018, 3, 8),
+            content_text="Old CRR circular.",
+        ),
+        Circular(
+            id="new",
+            reference="DMMD Circular No. 04",
+            title="Policy Rate",
+            department="Domestic Markets & Monetary Management (DMMD)",
+            date=datetime(2025, 5, 5),
+            content_text="New policy circular.",
+        ),
+        Circular(
+            id="other-number",
+            reference="DMMD Circular No. 24",
+            title="Special Cash Reserve Account",
+            department="Domestic Markets & Monetary Management (DMMD)",
+            date=datetime(2018, 11, 30),
+            content_text="Different circular.",
+        ),
+    ])
+    db.commit()
+
+    results = SearchEngine._search_by_reference(
+        "DMMD Circular No. 04 dated March 08, 2018",
+        db,
+        limit=5,
+    )
+
+    assert [item.id for item in results] == ["old"]
+
+
+def test_circular_details_reports_ambiguous_reference():
+    db = make_session()
+    db.add_all([
+        Circular(
+            id="old",
+            reference="DMMD Circular No. 04",
+            title="Old circular",
+            department="Domestic Markets & Monetary Management (DMMD)",
+            date=datetime(2018, 3, 8),
+            content_text="Old CRR circular.",
+        ),
+        Circular(
+            id="new",
+            reference="DMMD Circular No. 04",
+            title="New circular",
+            department="Domestic Markets & Monetary Management (DMMD)",
+            date=datetime(2025, 5, 5),
+            content_text="New policy circular.",
+        ),
+    ])
+    db.commit()
+    client = AIClient(AIConfig())
+
+    payload = json.loads(client._execute_tool(
+        "get_circular_details",
+        {"circular_reference": "DMMD Circular No. 04"},
+        db,
+    ))
+
+    assert payload["error"].startswith("Ambiguous circular reference")
+    assert [item["date"] for item in payload["candidates"]] == [
+        "2025-05-05",
+        "2018-03-08",
+    ]
 
 
 def test_session_context_is_authoritative_including_empty_selection():

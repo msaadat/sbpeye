@@ -355,6 +355,38 @@ def relationships(url, dept, year, limit, refresh, verbose, delay):
         db.close()
 
 
+@circulars.command("resolve-targets")
+@click.option("--verbose", "-v", is_flag=True, help="Print each resolved relationship")
+def resolve_targets(verbose):
+    """Fill blank target_ids in existing relationships using the current resolver."""
+    db = SessionLocal()
+    try:
+        pending = (
+            db.query(CircularRelationship)
+            .filter(
+                CircularRelationship.target_id.is_(None),
+                CircularRelationship.target_reference.isnot(None),
+            )
+            .all()
+        )
+        click.echo(f"Found {len(pending)} relationship(s) with no target_id.")
+        resolved = 0
+        for rel in pending:
+            source = db.get(Circular, rel.source_id)
+            if not source:
+                continue
+            target = resolve_reference_in_context(db, source, rel.target_reference)
+            if target:
+                rel.target_id = target.id
+                resolved += 1
+                if verbose:
+                    click.echo(f"  resolved: [{rel.id}] {rel.target_reference!r} -> {target.id}")
+        db.commit()
+        click.echo(f"Resolved {resolved} / {len(pending)} relationship(s).")
+    finally:
+        db.close()
+
+
 @circulars.command()
 @click.argument("circular_id")
 @click.option("--depth", type=int, default=0, help="Max hops from seed (0=unlimited)")

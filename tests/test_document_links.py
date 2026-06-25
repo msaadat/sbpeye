@@ -153,3 +153,51 @@ def test_resolve_reference_in_context_uses_content_year():
     assert resolve_reference_in_context(db, source, "DMMD Circular no. 20").id == "c20-2011"
     assert resolve_reference_in_context(db, source, "DMMD Circular no. 21").id == "c21-2011"
     assert resolve_reference_in_context(db, source, "DMMD Circular no. 22").id == "c22-2011"
+
+
+def _make_bsd(circular_id: str, number: int, year: int) -> Circular:
+    return Circular(
+        id=circular_id,
+        title=f"BSD Circular No. {number} of {year}",
+        department="BSD",
+        date=datetime(year, 5, 22),
+        url=f"https://www.sbp.org.pk/bsd/{year}/{circular_id}.htm",
+        reference=f"BSD Circular No. {number} of {year}",
+        content_text="Body",
+    )
+
+
+def test_expanded_dept_name_resolves():
+    """A plain-text reference using the full department name — e.g.
+    "Banking Supervision Department Circular No. 04 of May 22, 2004" — SHOULD resolve to
+    the corresponding BSD circular.  Currently it fails because the regex
+    `CIRCULAR_REFERENCE_RE` captures only the last word ("Department") as the prefix
+    instead of recognising the full department name as equivalent to "BSD"."""
+    db = make_session()
+    source = Circular(
+        id="source",
+        title="Some BSD circular",
+        department="BSD",
+        date=datetime(2010, 1, 1),
+        url="https://www.sbp.org.pk/source.htm",
+        reference="Some BSD Circular",
+        content_text="",
+    )
+    db.add_all([
+        source,
+        _make_bsd("bsd-04-2004", 4, 2004),
+        _make_bsd("bsd-05-2004", 5, 2004),
+    ])
+    db.commit()
+
+    html = (
+        "<p>Please refer to Banking Supervision Department Circular No. 04 of May 22, 2004 "
+        "and BSD Circular No. 05 of 2004 for details.</p>"
+    )
+    result = rewrite_document_links(html, source, db)
+    soup = BeautifulSoup(result, "html.parser")
+    links = soup.find_all("a")
+
+    assert len(links) == 2
+    assert links[0]["href"] == "/circulars/bsd-04-2004"
+    assert links[1]["href"] == "/circulars/bsd-05-2004"

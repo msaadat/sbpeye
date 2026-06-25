@@ -11,14 +11,46 @@ from .models import Attachment, Circular
 
 
 DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx"}
+
+_DEPT_FULL_NAME_TO_ABBR: dict[str, str] = {
+    "banking policy regulations department": "BPRD",
+    "financial institutions resolution department": "FIRD",
+    "digital innovation settlements department": "DISD",
+    "agriculture credit financial inclusion": "ACFID",
+    "banking conduct policy department": "BCPD",
+    "islamic finance development department": "IFDD",
+    "banking supervision department": "BSD",
+    "islamic finance policy department": "IFPD",
+    "consumer protection department": "CPD",
+    "cyber risk management department": "CRMD",
+    "currency management department": "CMD",
+    "currency accounts department": "CAD",
+    "agriculture credit department": "ACD",
+    "domestic markets monetary management": "DMMD",
+    "financial stability department": "FSD",
+    "banking surveillance department": "BSRVD",
+    "payment systems department": "PSD",
+    "payment systems oversight": "PSD",
+    "treasury operations department": "TOD",
+    "sme finance department": "SMEFD",
+    "microfinance department": "MFD",
+}
+
+_full_name_alts = "|".join(
+    re.escape(k) for k in sorted(_DEPT_FULL_NAME_TO_ABBR, key=len, reverse=True)
+)
 CIRCULAR_REFERENCE_RE = re.compile(
-    r"\b(?P<prefix>[A-Z][A-Z&]{1,12})\s+Circular"
-    r"(?P<letter>\s+Letter)?\s+No\.?\s*"
+    rf"\b(?P<prefix>{_full_name_alts}|[A-Z][A-Z&]{{1,12}})\s+Circular"
+    r"(?P<letter>\s+Letter)?\s+(?:No\.?\s*)?"
     r"(?P<number>\d{1,3})"
     r"(?P<more>(?:\s*,\s*\d{1,3}|\s+and\s+\d{1,3})*)"
     r"(?:\s+of\s+(?P<year>(?:19|20)\d{2}))?",
     re.IGNORECASE,
 )
+
+
+def _normalize_prefix(prefix: str) -> str:
+    return _DEPT_FULL_NAME_TO_ABBR.get(prefix.lower(), prefix.upper())
 DATED_YEAR_RE = re.compile(
     r"\bdated\s+"
     r"(?:[A-Z][a-z]+\s+\d{1,2}(?:st|nd|rd|th)?,?\s+|\d{1,2}(?:st|nd|rd|th)?\s+[A-Z][a-z]+,?\s+)"
@@ -66,7 +98,7 @@ def _reference_parts(text: str | None, inferred_year: int | None = None) -> dict
         return None
     explicit_year = int(match.group("year")) if match.group("year") else None
     return {
-        "prefix": match.group("prefix").upper(),
+        "prefix": _normalize_prefix(match.group("prefix")),
         "is_letter": bool(match.group("letter")),
         "number": int(match.group("number")),
         "year": explicit_year or inferred_year,
@@ -179,7 +211,7 @@ def iter_circular_references(text: str):
     identical reference parsing and year inference.
     """
     for match in CIRCULAR_REFERENCE_RE.finditer(text):
-        prefix = match.group("prefix").upper()
+        prefix = _normalize_prefix(match.group("prefix"))
         is_letter = bool(match.group("letter"))
         explicit_year = int(match.group("year")) if match.group("year") else None
         year = explicit_year or _nearby_dated_year(text, match.end())

@@ -154,7 +154,14 @@ async function syncRoute() {
 }
 
 function orderWorkspaces(items: ResearchWorkspace[]): ResearchWorkspace[] {
-  return [...items].sort((a, b) => Number(Boolean(b.is_default)) - Number(Boolean(a.is_default)))
+  return [...items].sort((a, b) => {
+    const defaultDelta = Number(Boolean(b.is_default)) - Number(Boolean(a.is_default))
+    if (defaultDelta !== 0) return defaultDelta
+    const createdA = Date.parse(a.created_at || '') || 0
+    const createdB = Date.parse(b.created_at || '') || 0
+    if (createdA !== createdB) return createdA - createdB
+    return a.id.localeCompare(b.id)
+  })
 }
 
 function upsertWorkspace(workspace: ResearchWorkspace) {

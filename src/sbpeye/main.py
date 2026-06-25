@@ -1352,7 +1352,8 @@ async def list_research_workspaces(db: Session = Depends(get_db)):
     _ensure_default_workspace(db)
     workspaces = db.query(ResearchWorkspace).order_by(
         ResearchWorkspace.is_default.desc(),
-        func.coalesce(ResearchWorkspace.updated_at, ResearchWorkspace.created_at).desc()
+        ResearchWorkspace.created_at.asc(),
+        ResearchWorkspace.id.asc(),
     ).all()
     return [_workspace_payload(workspace, include_circulars=False) for workspace in workspaces]
 

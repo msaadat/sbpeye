@@ -6,13 +6,16 @@ import ConfirmDialog from 'primevue/confirmdialog'
 import Message from 'primevue/message'
 import Toast from 'primevue/toast'
 import SbpNewsPanel from '@/components/SbpNewsPanel.vue'
-import { getAppStatus, type AppStatus } from '@/lib/api'
+import { getAppStatus, getLlmStatus, type AppStatus, type LlmStatus } from '@/lib/api'
 
 const route = useRoute()
 const darkMode = ref(localStorage.getItem('sbpeye-theme') === 'dark')
 const status = ref<AppStatus | null>(null)
 const statusLoading = ref(false)
 const statusError = ref('')
+const llmStatus = ref<LlmStatus | null>(null)
+const llmLoading = ref(false)
+const llmError = ref('')
 
 const navItems = computed(() => [
   {
@@ -85,6 +88,83 @@ async function loadStatus() {
   }
 }
 
+async function loadLlmStatus() {
+  llmLoading.value = true
+  llmError.value = ''
+
+  try {
+    llmStatus.value = await getLlmStatus()
+  } catch (error) {
+    llmStatus.value = null
+    llmError.value = error instanceof Error ? error.message : 'Unable to check LLM backend'
+  } finally {
+    llmLoading.value = false
+  }
+}
+
+const LLM_STATE_LABELS: Record<string, string> = {
+  online: 'LLM backend online',
+  rate_limited: 'LLM backend rate limited',
+  auth_error: 'LLM backend authentication failed',
+  not_found: 'LLM model not found',
+  offline: 'LLM backend unreachable',
+  server_error: 'LLM provider unavailable',
+  error: 'LLM backend error',
+}
+
+const llmStatusIcon = computed(() => {
+  if (llmLoading.value) {
+    return 'pi-spin pi-spinner'
+  }
+  if (llmError.value || !llmStatus.value) {
+    return 'pi-question-circle'
+  }
+  switch (llmStatus.value.state) {
+    case 'online':
+      return 'pi-bolt'
+    case 'rate_limited':
+      return 'pi-clock'
+    default:
+      return 'pi-exclamation-triangle'
+  }
+})
+
+const llmStatusTone = computed(() => {
+  if (llmLoading.value) {
+    return 'is-checking'
+  }
+  if (llmError.value || !llmStatus.value) {
+    return 'is-unknown'
+  }
+  if (llmStatus.value.state === 'online') {
+    return 'is-online'
+  }
+  if (llmStatus.value.state === 'rate_limited') {
+    return 'is-warn'
+  }
+  return 'is-error'
+})
+
+const llmStatusLabel = computed(() => {
+  if (llmLoading.value) {
+    return 'Checking LLM backend'
+  }
+  if (llmError.value || !llmStatus.value) {
+    return 'LLM backend status unavailable'
+  }
+  return LLM_STATE_LABELS[llmStatus.value.state] ?? 'LLM backend status'
+})
+
+const llmStatusDetail = computed(() => {
+  if (llmLoading.value || llmError.value || !llmStatus.value) {
+    return ''
+  }
+  const provider = llmStatus.value.provider ? `${llmStatus.value.provider}` : ''
+  const model = llmStatus.value.model ? ` · ${llmStatus.value.model}` : ''
+  const detail = llmStatus.value.detail ? `\n${llmStatus.value.detail}` : ''
+  return `${provider}${model}${detail}`.trim()
+})
+
 function syncThemeClass() {
   document.documentElement.classList.toggle('sbpeye-dark', darkMode.value)
   localStorage.setItem('sbpeye-theme', darkMode.value ? 'dark' : 'light')
@@ -98,6 +178,7 @@ function toggleTheme() {
 onMounted(() => {
   syncThemeClass()
   void loadStatus()
+  void loadLlmStatus()
 })
 </script>
 
@@ -142,6 +223,17 @@ onMounted(() => {
             }"
           />
         </div>
+
+        <button
+          type="button"
+          class="sidebar-status llm-status"
+          :class="llmStatusTone"
+          :title="llmStatusDetail ? `${llmStatusLabel}\n${llmStatusDetail}` : llmStatusLabel"
+          :aria-label="llmStatusLabel"
+          @click="loadLlmStatus"
+        >
+          <i class="pi" :class="llmStatusIcon" />
+        </button>
 
         <SbpNewsPanel />
 

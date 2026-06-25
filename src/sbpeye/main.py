@@ -193,6 +193,27 @@ async def get_app_status(db: Session = Depends(get_db)):
     }
 
 
+@app.get("/api/llm/status")
+async def get_llm_status(db: Session = Depends(get_db)):
+    """Probe the configured LLM backend's availability.
+
+    Checked on demand (e.g. on page refresh) rather than on a schedule, since a
+    local or free-tier backend can go offline or get rate-limited at any time.
+    """
+    try:
+        client = get_ai_client(db)
+    except Exception as exc:
+        return {
+            "available": False,
+            "state": "error",
+            "detail": "AI backend is not configured",
+            "provider": None,
+            "model": None,
+            "error": str(exc),
+        }
+    return client.check_availability()
+
+
 def _get_ecodata_entries(db: Session, force_refresh: bool = False) -> list[dict]:
     sync_status = db.query(SyncStatus).order_by(SyncStatus.id.desc()).first()
     ecodata_time = sync_status.ecodata_index_time if sync_status else None

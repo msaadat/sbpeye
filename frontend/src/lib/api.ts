@@ -34,6 +34,24 @@ export interface AppStatus {
   last_sync_raw?: string | null
 }
 
+export type LlmStatusState =
+  | 'online'
+  | 'rate_limited'
+  | 'auth_error'
+  | 'not_found'
+  | 'offline'
+  | 'server_error'
+  | 'error'
+
+export interface LlmStatus {
+  available: boolean
+  state: LlmStatusState
+  detail: string
+  provider?: string | null
+  model?: string | null
+  error?: string
+}
+
 export interface PaginatedResponse<T> {
   items: T[]
   total: number
@@ -395,6 +413,10 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
 
 export async function getAppStatus(): Promise<AppStatus> {
   return requestJson<AppStatus>('/app/status')
+}
+
+export async function getLlmStatus(): Promise<LlmStatus> {
+  return requestJson<LlmStatus>('/llm/status')
 }
 
 export async function getSbpNews(): Promise<SbpNewsResponse> {

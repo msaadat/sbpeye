@@ -173,6 +173,30 @@ a {
   cursor: help;
 }
 
+.llm-status {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.llm-status.is-checking,
+.llm-status.is-unknown {
+  color: var(--sbp-muted);
+}
+
+.llm-status.is-online {
+  color: #16a34a;
+}
+
+.llm-status.is-warn {
+  color: #d97706;
+}
+
+.llm-status.is-error {
+  color: #dc2626;
+}
+
 /* ---- App body (the right column) ---- */
 .app-body {
   display: flex;

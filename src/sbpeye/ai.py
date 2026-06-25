@@ -313,6 +313,47 @@ def friendly_chat_error(exc: Exception) -> str:
     return GENERIC_CHAT_ERROR
 
 
+def classify_provider_state(exc: Exception) -> tuple[str, str]:
+    """Map a provider/SDK exception to a coarse availability state and short detail.
+
+    States: ``rate_limited``, ``auth_error``, ``not_found``, ``offline``,
+    ``server_error``, ``error``. The detail is a short, user-facing phrase.
+    """
+    status = getattr(exc, "status_code", None)
+    text = str(exc).lower()
+
+    def has(*needles: str) -> bool:
+        return any(needle in text for needle in needles)
+
+    if status in (413, 429) or has(
+        "rate_limit", "rate limit", "too many requests",
+        "tokens per minute", "requests per minute", "quota",
+    ):
+        return "rate_limited", "Rate limited or quota exceeded"
+
+    if status in (401, 403) or has(
+        "invalid api key", "incorrect api key", "authentication",
+        "unauthorized", "permission",
+    ):
+        return "auth_error", "Authentication failed — check API key"
+
+    if status == 404 or has("model not found", "model_not_found", "no such model"):
+        return "not_found", "Configured model not found"
+
+    if exc.__class__.__name__ in {"APIConnectionError", "APITimeoutError"} or has(
+        "connection error", "connection refused", "timed out", "timeout",
+        "failed to establish", "name resolution", "max retries",
+    ):
+        return "offline", "Provider unreachable"
+
+    if (isinstance(status, int) and status >= 500) or has(
+        "internal server error", "service unavailable", "bad gateway", "overloaded",
+    ):
+        return "server_error", "Provider temporarily unavailable"
+
+    return "error", "Provider check failed"
+
+
 def get_provider_api_key(provider: str | None) -> tuple[str, str | None]:
     definition = get_provider_definition(provider)
     return resolve_env_value(
@@ -1507,6 +1548,33 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
                 yield self._tool_iteration_limit_message()
                 return
             raise
+
+    def check_availability(self) -> dict:
+        """Lightweight reachability/auth probe for the configured provider.
+
+        Uses ``models.list()`` (with a short timeout and no retries) so it does
+        not consume chat tokens or count against tight generation rate limits.
+        Returns a coarse state the sidebar can render without exposing raw
+        provider payloads.
+        """
+        try:
+            self._client.with_options(timeout=5.0, max_retries=0).models.list()
+        except Exception as exc:
+            state, detail = classify_provider_state(exc)
+            return {
+                "available": False,
+                "state": state,
+                "detail": detail,
+                "provider": self.config.provider,
+                "model": self.config.effective_chat_model,
+            }
+        return {
+            "available": True,
+            "state": "online",
+            "detail": "Backend reachable",
+            "provider": self.config.provider,
+            "model": self.config.effective_chat_model,
+        }
 
     def test_connection(self) -> dict:
         try:

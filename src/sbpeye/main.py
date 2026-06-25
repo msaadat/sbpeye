@@ -44,315 +44,35 @@ from .scraper.pdf_summarizer import summarize_pdf, is_summarizable
 from datetime import datetime, timedelta
 
 
-def _parse_year(val: str | None) -> int | None:
-    return int(val) if val else None
-
-
-def _format_timestamp(value: datetime | str | None) -> str:
-    if isinstance(value, datetime):
-        return value.strftime("%d %b %Y %H:%M")
-    return value or "Never"
-
-
-def _safe_json_list(value: str | None) -> list:
-    if not value:
-        return []
-    try:
-        parsed = json.loads(value)
-        return parsed if isinstance(parsed, list) else []
-    except (json.JSONDecodeError, TypeError):
-        return []
-
-
-def _safe_json_object(value: str | None) -> dict | None:
-    if not value:
-        return None
-    try:
-        parsed = json.loads(value)
-        return parsed if isinstance(parsed, dict) else None
-    except (json.JSONDecodeError, TypeError):
-        return None
-
-
-def _normalize_circular_ids(value) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return list(dict.fromkeys(
-        item.strip() for item in value if isinstance(item, str) and item.strip()
-    ))
-
-
-def _isoformat(value: datetime | None) -> str | None:
-    return value.isoformat() if value else None
-
-
-def _summary_preview(value: str | None, limit: int = 200) -> str | None:
-    if not value:
-        return None
-    text = value
-    text = _re.sub(r"```.*?```", " ", text, flags=_re.DOTALL)
-    text = _re.sub(r"`([^`]*)`", r"\1", text)
-    text = _re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", text)
-    text = _re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
-    text = _re.sub(r"^#{1,6}\s*", "", text, flags=_re.MULTILINE)
-    text = _re.sub(r"^>\s*", "", text, flags=_re.MULTILINE)
-    text = _re.sub(r"^\s*[-*+]\s+", "", text, flags=_re.MULTILINE)
-    text = _re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
-    text = _re.sub(r"\*([^*]+)\*", r"\1", text)
-    text = _re.sub(r"_([^_]+)_", r"\1", text)
-    text = _re.sub(r"\s+", " ", text).strip()
-    if len(text) <= limit:
-        return text
-    clipped = text[:limit].rsplit(" ", 1)[0].strip()
-    return (clipped or text[:limit].strip()) + "..."
-
-
-def _circular_summary(
-    circular: Circular,
-    snippet: str | None = None,
-    match_source: str = "circular",
-    attachment_id: str | None = None,
-    attachment_filename: str | None = None,
-    source_ref: str | None = None,
-    source_page: int | None = None,
-) -> dict:
-    return {
-        "id": circular.id,
-        "title": circular.title,
-        "department": circular.department,
-        "reference": circular.reference,
-        "date": circular.date.strftime("%Y-%m-%d") if circular.date else None,
-        "url": circular.url,
-        "summary": _summary_preview(circular.summary),
-        "tags": _safe_json_list(circular.tags),
-        "status": circular.status or "active",
-        "snippet": snippet or "",
-        "match_source": match_source,
-        "attachment_id": attachment_id,
-        "attachment_filename": attachment_filename,
-        "source_ref": source_ref,
-        "source_page": source_page,
-    }
-
-
-def _workspace_search_state(value: str | None) -> dict:
-    return _safe_json_object(value) or {}
-
-
-def _sorted_workspace_pinned_links(workspace: ResearchWorkspace) -> list[WorkspaceCircular]:
-    def _sort_key(link: WorkspaceCircular) -> tuple:
-        circular_date = link.circular.date if link.circular and link.circular.date else datetime.min
-        added_at = link.added_at or datetime.min
-        title = (link.circular.title if link.circular and link.circular.title else "").lower()
-        circular_id = link.circular_id or ""
-        return (circular_date, added_at, title, circular_id)
-
-    return sorted(
-        [
-            link
-            for link in list(workspace.pinned_circulars or [])
-            if link.circular is not None
-        ],
-        key=_sort_key,
-        reverse=True,
-    )
-
-
-DEFAULT_WORKSPACE_ID = "default"
-DEFAULT_WORKSPACE_NAME = "Default"
-WORKSPACE_CHAT_SESSION_PREFIX = "workspace:"
-
-
-def _ensure_default_workspace(db: Session) -> ResearchWorkspace:
-    workspace = db.query(ResearchWorkspace).filter(
-        ResearchWorkspace.is_default == 1
-    ).first()
-    if workspace:
-        return workspace
-
-    workspace = db.query(ResearchWorkspace).filter(
-        ResearchWorkspace.id == DEFAULT_WORKSPACE_ID
-    ).first()
-    if workspace:
-        workspace.is_default = 1
-        if not workspace.name:
-            workspace.name = DEFAULT_WORKSPACE_NAME
-        workspace.updated_at = datetime.utcnow()
-        db.commit()
-        db.refresh(workspace)
-        return workspace
-
-    workspace = ResearchWorkspace(
-        id=DEFAULT_WORKSPACE_ID,
-        name=DEFAULT_WORKSPACE_NAME,
-        is_default=1,
-        search_state=json.dumps({}),
-    )
-    db.add(workspace)
-    db.commit()
-    db.refresh(workspace)
-    return workspace
-
-
-def _workspace_payload(workspace: ResearchWorkspace, include_circulars: bool = True) -> dict:
-    pinned_links = _sorted_workspace_pinned_links(workspace)
-    pinned_circulars = [
-        _circular_summary(link.circular)
-        for link in pinned_links
-    ] if include_circulars else []
-
-    return {
-        "id": workspace.id,
-        "name": workspace.name,
-        "is_default": bool(workspace.is_default),
-        "search_state": _workspace_search_state(workspace.search_state),
-        "last_circular_id": workspace.last_circular_id,
-        "pinned_circular_ids": [
-            link.circular_id for link in pinned_links
-        ],
-        "pinned_circulars": pinned_circulars,
-        "pinned_count": len(pinned_links),
-        "created_at": _isoformat(workspace.created_at),
-        "updated_at": _isoformat(workspace.updated_at or workspace.created_at),
-    }
-
-
-def _workspace_chat_session_id(workspace_id: str) -> str:
-    return f"{WORKSPACE_CHAT_SESSION_PREFIX}{workspace_id}"
-
-
-def _workspace_id_from_chat_session(session_id: str | None) -> str | None:
-    if not isinstance(session_id, str):
-        return None
-    if not session_id.startswith(WORKSPACE_CHAT_SESSION_PREFIX):
-        return None
-    workspace_id = session_id[len(WORKSPACE_CHAT_SESSION_PREFIX):]
-    return workspace_id or None
-
-
-def _workspace_circular_ids(workspace: ResearchWorkspace) -> list[str]:
-    return [
-        link.circular_id
-        for link in _sorted_workspace_pinned_links(workspace)
-    ]
-
-
-def _workspace_circular_summaries(workspace: ResearchWorkspace) -> list[dict]:
-    return [
-        _circular_summary(link.circular)
-        for link in _sorted_workspace_pinned_links(workspace)
-    ]
-
-
-def _chat_session_payload(session: ChatSession) -> dict:
-    return {
-        "id": session.id,
-        "title": session.title,
-        "session_type": "chat",
-        "created_at": _isoformat(session.created_at),
-        "updated_at": _isoformat(session.updated_at or session.created_at),
-    }
-
-
-def _workspace_chat_session_payload(
-    workspace: ResearchWorkspace,
-    session: ChatSession | None = None,
-) -> dict:
-    return {
-        "id": _workspace_chat_session_id(workspace.id),
-        "title": workspace.name,
-        "session_type": "workspace",
-        "workspace_id": workspace.id,
-        "is_default_workspace": bool(workspace.is_default),
-        "pinned_count": len(list(workspace.pinned_circulars or [])),
-        "circular_ids": _workspace_circular_ids(workspace),
-        "created_at": _isoformat(session.created_at if session else workspace.created_at),
-        "updated_at": _isoformat(
-            (session.updated_at or session.created_at) if session else (workspace.updated_at or workspace.created_at)
-        ),
-    }
-
-
-def _get_workspace_for_chat_session(
-    db: Session,
-    session_id: str | None,
-) -> ResearchWorkspace | None:
-    workspace_id = _workspace_id_from_chat_session(session_id)
-    if not workspace_id:
-        return None
-    if workspace_id == DEFAULT_WORKSPACE_ID:
-        return _ensure_default_workspace(db)
-    return db.query(ResearchWorkspace).filter(
-        ResearchWorkspace.id == workspace_id
-    ).first()
-
-
-def _settings_payload(config: AIConfig, embedding: EmbeddingConfig) -> dict:
-    ai_secret = AIConfig.secret_state(config.provider)
-    embedding_secret = EmbeddingConfig.secret_state(embedding.provider)
-    return {
-        "provider": config.provider,
-        "base_url": config.base_url,
-        "api_key": "",
-        "api_key_configured": ai_secret["api_key_configured"],
-        "api_key_env_var": ai_secret["api_key_env_var"],
-        "model": config.model,
-        "chat_model": config.chat_model,
-        "max_context_tokens": config.max_context_tokens,
-        "ai_provider": config.provider,
-        "ai_base_url": config.base_url,
-        "ai_api_key": "",
-        "ai_model": config.model,
-        "ai_chat_model": config.chat_model,
-        "ai_max_context_tokens": config.max_context_tokens,
-        "embedding_provider": embedding.provider,
-        "embedding_model": embedding.model,
-        "embedding_base_url": embedding.base_url,
-        "embedding_api_key": "",
-        "embedding_api_key_configured": embedding_secret["api_key_configured"],
-        "embedding_api_key_env_var": embedding_secret["api_key_env_var"],
-        "managed_env_file": str(managed_env_path().name),
-    }
-
-
-def _delete_setting_key(db: Session, key: str) -> bool:
-    row = db.query(Settings).filter(Settings.key == key).first()
-    if not row:
-        return False
-    db.delete(row)
-    return True
-
-
-def _purge_legacy_secret_settings(db: Session) -> bool:
-    changed = False
-    for key in ("ai_api_key", "embedding_api_key"):
-        changed = _delete_setting_key(db, key) or changed
-    if changed:
-        db.commit()
-    return changed
-
-
-def _save_ai_secret(provider: str, api_key: str | None, clear_secret: bool) -> None:
-    definition = get_provider_definition(provider)
-    secret_state = AIConfig.secret_state(provider)
-    target_env_var = definition.api_key_env_vars[0]
-    if clear_secret:
-        unset_managed_env_value(str(secret_state["api_key_env_var"]))
-        return
-    if api_key is None or not api_key.strip():
-        return
-    set_managed_env_value(target_env_var, api_key.strip())
-
-
-def _save_embedding_secret(api_key: str | None, clear_secret: bool) -> None:
-    target_env_var = "EMBEDDING_API_KEY"
-    secret_state = EmbeddingConfig.secret_state()
-    if clear_secret:
-        unset_managed_env_value(str(secret_state["api_key_env_var"]))
-        return
-    if api_key is None or not api_key.strip():
-        return
-    set_managed_env_value(target_env_var, api_key.strip())
+from .api.serializers import (
+    DEFAULT_WORKSPACE_ID,
+    DEFAULT_WORKSPACE_NAME,
+    WORKSPACE_CHAT_SESSION_PREFIX,
+    _chat_session_payload,
+    _circular_summary,
+    _document_payload,
+    _ensure_default_workspace,
+    _format_timestamp,
+    _get_workspace_for_chat_session,
+    _isoformat,
+    _normalize_circular_ids,
+    _parse_year,
+    _safe_json_list,
+    _safe_json_object,
+    _save_ai_secret,
+    _save_embedding_secret,
+    _settings_payload,
+    _sorted_workspace_pinned_links,
+    _summary_preview,
+    _workspace_chat_session_id,
+    _workspace_chat_session_payload,
+    _workspace_circular_ids,
+    _workspace_circular_summaries,
+    _workspace_id_from_chat_session,
+    _workspace_payload,
+    _workspace_search_state,
+)
+from .scraper.news import scrape_sbp_news
 
 
 def _lazy_index_circular(circular_id: str) -> None:
@@ -372,8 +92,6 @@ def _lazy_index_circular(circular_id: str) -> None:
     finally:
         db.close()
 
-
-SBP_BASE = "https://www.sbp.org.pk"
 
 
 def fail_interrupted_ai_jobs() -> None:
@@ -396,11 +114,6 @@ def fail_interrupted_ai_jobs() -> None:
 @asynccontextmanager
 async def app_lifespan(_app: FastAPI):
     fail_interrupted_ai_jobs()
-    db = SessionLocal()
-    try:
-        _purge_legacy_secret_settings(db)
-    finally:
-        db.close()
     yield
 
 
@@ -995,87 +708,12 @@ async def get_circular_relationships(circular_id: str, db: Session = Depends(get
     }
 
 
-def _normalize_title(text: str) -> str:
-    return _re.sub(r'\s+', ' ', text).strip()
-
-
-def _scrape_sbp_news(db: Session | None = None) -> dict:
-    resp = http_requests.get(f"{SBP_BASE}/index.html", headers=HEADERS, timeout=15)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.content, "html.parser")
-
-    press_releases = []
-    whats_new = []
-
-    pr_div = soup.find("div", id="PressRelease3")
-    if pr_div:
-        for li in pr_div.find_all("li"):
-            a = li.find("a")
-            if not a:
-                continue
-            title = _normalize_title(a.get_text(strip=True))
-            href = a.get("href", "")
-            if not title or not href:
-                continue
-            if title.lower() in ("more", "clarifications/rebuttals"):
-                continue
-            if href.endswith("-U.pdf") or "urdu" in title.lower():
-                continue
-            url = urljoin(SBP_BASE + "/", href)
-            if db and db.query(Circular).filter(Circular.url == url).first():
-                url = f"/view_circular?cir={url}"
-            press_releases.append({"title": title, "url": url})
-            if len(press_releases) >= 5:
-                break
-
-    for table in soup.find_all("table"):
-        table_text = table.get_text()[:200].lower()
-        if "what" in table_text and "new" in table_text:
-            box = table.find("div", class_="box")
-            if not box:
-                continue
-            for li in box.find_all("li"):
-                a = li.find("a")
-                if not a:
-                    continue
-                title = _normalize_title(a.get_text(strip=True))
-                href = a.get("href", "")
-                if not title or not href:
-                    continue
-                if title.lower() == "more":
-                    continue
-                url = urljoin(SBP_BASE + "/", href)
-                if db and db.query(Circular).filter(Circular.url == url).first():
-                    url = f"/view_circular?cir={url}"
-                whats_new.append({"title": title, "url": url})
-                if len(whats_new) >= 5:
-                    break
-            break
-
-    return {"press_releases": press_releases, "whats_new": whats_new}
-
-
 @app.get("/api/sbp_news")
 async def get_sbp_news(db: Session = Depends(get_db)):
     try:
-        return _scrape_sbp_news(db)
+        return scrape_sbp_news(db)
     except Exception as e:
         return {"press_releases": [], "whats_new": [], "error": str(e)}
-
-
-def _document_payload(attachment: Attachment | CachedDocument) -> dict:
-    local_path = PROJECT_ROOT / attachment.local_path if attachment.local_path else None
-    return {
-        "id": attachment.id,
-        "circular_id": getattr(attachment, "circular_id", None),
-        "filename": attachment.filename,
-        "file_type": attachment.file_type,
-        "original_url": attachment.original_url,
-        "cached": bool(local_path and local_path.is_file()),
-        "content_url": f"/api/documents/{attachment.id}/content",
-        "extraction_status": getattr(attachment, "extraction_status", None),
-        "error": getattr(attachment, "extraction_error", None) or getattr(attachment, "error", None),
-    }
 
 
 @app.post("/api/documents/resolve")
@@ -1262,7 +900,6 @@ async def settings_page():
 
 @app.get("/api/settings")
 async def get_settings(db: Session = Depends(get_db)):
-    _purge_legacy_secret_settings(db)
     config = AIConfig.from_db(db) or AIConfig.from_env()
     embedding = EmbeddingConfig.from_db(db)
     return _settings_payload(config, embedding)
@@ -1306,7 +943,6 @@ async def save_settings(request: Request, db: Session = Depends(get_db)):
         api_key=data.get("embedding_api_key"),
         clear_secret=bool(data.get("clear_embedding_api_key")),
     )
-    _purge_legacy_secret_settings(db)
     config = AIConfig.from_db(db) or AIConfig.from_env()
     embedding = EmbeddingConfig.from_db(db)
     context_message = (
@@ -1587,16 +1223,7 @@ async def get_chat_session(session_id: str, db: Session = Depends(get_db)):
     messages = db.query(ChatMessage).filter(
         ChatMessage.session_id == session_id
     ).order_by(ChatMessage.created_at, ChatMessage.id).all()
-    if session.circular_ids is not None:
-        circular_ids = _normalize_circular_ids(_safe_json_list(session.circular_ids))
-    else:
-        # Legacy sessions predate authoritative session context. Preserve their
-        # historical selection until the next message stores current UI state.
-        circular_ids = list(dict.fromkeys(
-            cid
-            for message in messages
-            for cid in _normalize_circular_ids(_safe_json_list(message.circular_ids))
-        ))
+    circular_ids = _normalize_circular_ids(_safe_json_list(session.circular_ids))
     circulars = db.query(Circular).filter(Circular.id.in_(circular_ids)).all() if circular_ids else []
     circular_by_id = {circular.id: circular for circular in circulars}
     return {
@@ -1733,19 +1360,13 @@ def _build_chat_circulars_context(
     return context
 
 
-@app.post("/api/chat")
-async def chat_message(request: Request, db: Session = Depends(get_db)):
-    data = await request.json()
-    message = data.get("message", "")
-    circular_ids = _normalize_circular_ids(data.get("circular_ids", []))
-    session_id = data.get("session_id")
-    workspace = _get_workspace_for_chat_session(db, session_id)
+def get_or_create_chat_session(db, session_id, message, circular_ids, workspace):
+    """Resolve (and persist) the ChatSession for a chat turn.
 
-    if not message.strip():
-        return JSONResponse({"error": "Message cannot be empty"}, status_code=400)
-    if _workspace_id_from_chat_session(session_id) and not workspace:
-        return JSONResponse({"error": "Workspace not found"}, status_code=404)
-
+    Returns ``(session, session_id, circular_ids)``. A new id is minted when none was
+    supplied or the referenced session is missing; workspace sessions always adopt the
+    workspace name and its pinned circulars as the authoritative selection.
+    """
     if workspace:
         circular_ids = _workspace_circular_ids(workspace)
         session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
@@ -1778,6 +1399,25 @@ async def chat_message(request: Request, db: Session = Depends(get_db)):
             db.add(session)
     session.circular_ids = json.dumps(circular_ids)
     session.updated_at = datetime.utcnow()
+    return session, session_id, circular_ids
+
+
+@app.post("/api/chat")
+async def chat_message(request: Request, db: Session = Depends(get_db)):
+    data = await request.json()
+    message = data.get("message", "")
+    circular_ids = _normalize_circular_ids(data.get("circular_ids", []))
+    session_id = data.get("session_id")
+    workspace = _get_workspace_for_chat_session(db, session_id)
+
+    if not message.strip():
+        return JSONResponse({"error": "Message cannot be empty"}, status_code=400)
+    if _workspace_id_from_chat_session(session_id) and not workspace:
+        return JSONResponse({"error": "Workspace not found"}, status_code=404)
+
+    session, session_id, circular_ids = get_or_create_chat_session(
+        db, session_id, message, circular_ids, workspace
+    )
 
     user_msg = ChatMessage(
         id=str(uuid.uuid4()),
@@ -1838,38 +1478,9 @@ async def chat_message_stream(request: Request, db: Session = Depends(get_db)):
             {"error": "A session is required to replace a message"}, status_code=400
         )
 
-    if workspace:
-        circular_ids = _workspace_circular_ids(workspace)
-        session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
-        if not session:
-            session = ChatSession(
-                id=session_id,
-                title=workspace.name,
-                circular_ids=json.dumps(circular_ids),
-            )
-            db.add(session)
-        else:
-            session.title = workspace.name
-    elif not session_id:
-        session_id = str(uuid.uuid4())
-        session = ChatSession(
-            id=session_id,
-            title=message[:80],
-            circular_ids=json.dumps(circular_ids),
-        )
-        db.add(session)
-    else:
-        session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
-        if not session:
-            session_id = str(uuid.uuid4())
-            session = ChatSession(
-                id=session_id,
-                title=message[:80],
-                circular_ids=json.dumps(circular_ids),
-            )
-            db.add(session)
-    session.circular_ids = json.dumps(circular_ids)
-    session.updated_at = datetime.utcnow()
+    session, session_id, circular_ids = get_or_create_chat_session(
+        db, session_id, message, circular_ids, workspace
+    )
 
     if replace_message_id:
         user_msg = _truncate_chat_messages(

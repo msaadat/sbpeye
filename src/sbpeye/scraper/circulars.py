@@ -771,47 +771,107 @@ def _delete_document_chunks(
         collection.delete(ids=ids)
 
 
+def circular_document(circular: Circular) -> dict:
+    """The text document fed to the chunker for a circular's own HTML body."""
+    return {
+        "doc_id": circular.id,
+        "doc_type": "circular",
+        "doc_label": f"{circular.department} - {circular.display_name}",
+        "text": circular.content_text or "",
+        "file_type": "html",
+    }
+
+
+def attachment_document(attachment: Attachment) -> dict:
+    """The text document fed to the chunker for an extracted attachment."""
+    return {
+        "doc_id": attachment.id,
+        "doc_type": "attachment",
+        "doc_label": attachment.filename,
+        "text": attachment.content_text or "",
+        "file_type": attachment.file_type or "",
+    }
+
+
+def _chunk_page_fields(chunk: dict) -> dict:
+    """Optional page bounds, omitted entirely when the chunk has none (HTML source)."""
+    fields = {}
+    if chunk["page_start"]:
+        fields["page_start"] = chunk["page_start"]
+    if chunk["page_end"]:
+        fields["page_end"] = chunk["page_end"]
+    return fields
+
+
+def circular_chunk_metadata(circular: Circular, chunk: dict, index: int) -> dict:
+    """Chroma metadata for one chunk of a circular's body text."""
+    return {
+        "circular_id": circular.id,
+        "doc_type": "circular",
+        "title": circular.title or "",
+        "url": circular.url or "",
+        "department": circular.department or "",
+        "chunk_index": index,
+        "ref": chunk["ref"],
+        "unit_id": chunk["unit_id"],
+        "source_start": chunk["source_start"],
+        "source_end": chunk["source_end"],
+        **_chunk_page_fields(chunk),
+    }
+
+
+def attachment_chunk_metadata(attachment: Attachment, chunk: dict, index: int) -> dict:
+    """Chroma metadata for one chunk of an attachment, tagged back to its circular."""
+    return {
+        "circular_id": attachment.circular_id,
+        "attachment_id": attachment.id,
+        "doc_type": "attachment",
+        "title": attachment.filename,
+        "filename": attachment.filename,
+        "url": attachment.original_url,
+        "department": attachment.circular.department or "",
+        "chunk_index": index,
+        "ref": chunk["ref"],
+        "unit_id": chunk["unit_id"],
+        "source_start": chunk["source_start"],
+        "source_end": chunk["source_end"],
+        **_chunk_page_fields(chunk),
+    }
+
+
+def _replace_document_chunks(document: dict, *, metadata_for, delete_kwargs: dict) -> int:
+    """Re-chunk, embed, and atomically swap one document's chunks in the live collection.
+
+    `metadata_for(chunk, index)` builds the per-chunk Chroma metadata. Returns the
+    number of chunks written.
+    """
+    reference_chunks = prepare_reference_chunks(document)
+    chunks = [item["text"] for item in reference_chunks]
+    doc_id = document["doc_id"]
+    chunk_ids = [f"{doc_id}__chunk_{i}" for i in range(len(chunks))]
+    metadatas = [metadata_for(item, i) for i, item in enumerate(reference_chunks)]
+    embeddings = embedding_backend.embed_documents(chunks)
+    with _CHROMA_WRITE_LOCK:
+        _delete_document_chunks(**delete_kwargs)
+        collection.add(
+            documents=chunks,
+            embeddings=embeddings,
+            metadatas=metadatas,
+            ids=chunk_ids,
+        )
+    return len(chunks)
+
+
 def _index_circular(circular: Circular, verbose: bool = False) -> None:
     """Replace one circular's Chroma chunks without touching attachments."""
     try:
-        document = {
-            "doc_id": circular.id,
-            "doc_type": "circular",
-            "doc_label": f"{circular.department} - {circular.reference or circular.title}",
-            "text": circular.content_text or "",
-            "file_type": "html",
-        }
-        reference_chunks = prepare_reference_chunks(document)
-        chunks = [item["text"] for item in reference_chunks]
-        chunk_ids = [f"{circular.id}__chunk_{i}" for i in range(len(chunks))]
-        chunk_metas = [
-            {
-                "circular_id": circular.id,
-                "doc_type": "circular",
-                "title": circular.title or "",
-                "url": circular.url or "",
-                "department": circular.department or "",
-                "chunk_index": i,
-                "ref": item["ref"],
-                "unit_id": item["unit_id"],
-                "source_start": item["source_start"],
-                "source_end": item["source_end"],
-                **({"page_start": item["page_start"]} if item["page_start"] else {}),
-                **({"page_end": item["page_end"]} if item["page_end"] else {}),
-            }
-            for i, item in enumerate(reference_chunks)
-        ]
-        embeddings = embedding_backend.embed_documents(chunks)
-        with _CHROMA_WRITE_LOCK:
-            _delete_document_chunks(circular_id=circular.id)
-            collection.add(
-                documents=chunks,
-                embeddings=embeddings,
-                metadatas=chunk_metas,
-                ids=chunk_ids,
-            )
+        count = _replace_document_chunks(
+            circular_document(circular),
+            metadata_for=lambda chunk, i: circular_chunk_metadata(circular, chunk, i),
+            delete_kwargs={"circular_id": circular.id},
+        )
         if verbose:
-            print(f"  [CHROMA] Indexed ({len(chunks)} chunk(s))")
+            print(f"  [CHROMA] Indexed ({count} chunk(s))")
     except Exception as e:
         logging.exception("ChromaDB indexing failed for %s", circular.url)
         if verbose:
@@ -826,50 +886,17 @@ def vectorize_attachment(
         return False
 
     try:
-        document = {
-            "doc_id": attachment.id,
-            "doc_type": "attachment",
-            "doc_label": attachment.filename,
-            "text": attachment.content_text,
-            "file_type": attachment.file_type or "",
-        }
-        reference_chunks = prepare_reference_chunks(document)
-        chunks = [item["text"] for item in reference_chunks]
-        chunk_ids = [f"{attachment.id}__chunk_{i}" for i in range(len(chunks))]
-        metadata = [
-            {
-                "circular_id": attachment.circular_id,
-                "attachment_id": attachment.id,
-                "doc_type": "attachment",
-                "title": attachment.filename,
-                "filename": attachment.filename,
-                "url": attachment.original_url,
-                "department": attachment.circular.department or "",
-                "chunk_index": index,
-                "ref": item["ref"],
-                "unit_id": item["unit_id"],
-                "source_start": item["source_start"],
-                "source_end": item["source_end"],
-                **({"page_start": item["page_start"]} if item["page_start"] else {}),
-                **({"page_end": item["page_end"]} if item["page_end"] else {}),
-            }
-            for index, item in enumerate(reference_chunks)
-        ]
-        embeddings = embedding_backend.embed_documents(chunks)
-        with _CHROMA_WRITE_LOCK:
-            _delete_document_chunks(attachment_id_value=attachment.id)
-            collection.add(
-                documents=chunks,
-                embeddings=embeddings,
-                metadatas=metadata,
-                ids=chunk_ids,
-            )
+        count = _replace_document_chunks(
+            attachment_document(attachment),
+            metadata_for=lambda chunk, i: attachment_chunk_metadata(attachment, chunk, i),
+            delete_kwargs={"attachment_id_value": attachment.id},
+        )
         attachment.is_vectorized = 1
         db.commit()
         if verbose:
             print(
                 f"  [CHROMA] Indexed attachment: {attachment.filename} "
-                f"({len(chunks)} chunks)"
+                f"({count} chunks)"
             )
         return True
     except Exception:

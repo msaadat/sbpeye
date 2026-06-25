@@ -23,6 +23,11 @@ class Circular(Base):
     relationships_generated_at = Column(DateTime, nullable=True)
     attachments_scanned_at = Column(DateTime, nullable=True)
 
+    @property
+    def display_name(self) -> str:
+        """Human label for a circular: its reference, or the title when unreferenced."""
+        return self.reference or self.title
+
     amends = relationship("CircularRelationship", foreign_keys="[CircularRelationship.source_id]", back_populates="source")
     amended_by = relationship("CircularRelationship", foreign_keys="[CircularRelationship.target_id]", back_populates="target")
     attachments = relationship(
@@ -171,6 +176,17 @@ class Settings(Base):
 
     key = Column(String, primary_key=True, index=True)
     value = Column(Text)
+
+
+def upsert_settings(db, values: dict[str, str]) -> None:
+    """Insert or update the given Settings key/value rows, then commit."""
+    for key, value in values.items():
+        row = db.query(Settings).filter(Settings.key == key).first()
+        if row:
+            row.value = value
+        else:
+            db.add(Settings(key=key, value=value))
+    db.commit()
 
 class ChatSession(Base):
     __tablename__ = "chat_sessions"

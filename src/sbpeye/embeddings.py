@@ -82,34 +82,32 @@ class EmbeddingConfig:
         )
 
     @classmethod
+    def _from_settings_values(cls, values: dict, fallback: "EmbeddingConfig") -> "EmbeddingConfig":
+        """Build a config from stored ``embedding_*`` settings, falling back to env."""
+        return cls(
+            provider=values.get("embedding_provider", fallback.provider).strip().lower(),
+            model=values.get("embedding_model", fallback.model).strip(),
+            base_url=values.get("embedding_base_url", fallback.base_url).strip(),
+            api_key=fallback.api_key,
+        )
+
+    @classmethod
     def from_db(cls, db) -> "EmbeddingConfig":
         from .models import Settings
 
-        config = cls.from_env()
         rows = db.query(Settings).filter(Settings.key.like("embedding_%")).all()
-        values = {row.key: row.value for row in rows}
-        return cls(
-            provider=values.get("embedding_provider", config.provider).strip().lower(),
-            model=values.get("embedding_model", config.model).strip(),
-            base_url=values.get("embedding_base_url", config.base_url).strip(),
-            api_key=config.api_key,
+        return cls._from_settings_values(
+            {row.key: row.value for row in rows}, cls.from_env()
         )
 
     def save_to_db(self, db) -> None:
-        from .models import Settings
+        from .models import upsert_settings
 
-        values = {
+        upsert_settings(db, {
             "embedding_provider": self.provider,
             "embedding_model": self.model,
             "embedding_base_url": self.base_url,
-        }
-        for key, value in values.items():
-            row = db.query(Settings).filter(Settings.key == key).first()
-            if row:
-                row.value = value
-            else:
-                db.add(Settings(key=key, value=value))
-        db.commit()
+        })
 
     @classmethod
     def from_database(cls, engine) -> "EmbeddingConfig":
@@ -122,13 +120,7 @@ class EmbeddingConfig:
         except Exception:
             return config
 
-        values = {key: value for key, value in rows}
-        return cls(
-            provider=values.get("embedding_provider", config.provider).strip().lower(),
-            model=values.get("embedding_model", config.model).strip(),
-            base_url=values.get("embedding_base_url", config.base_url).strip(),
-            api_key=config.api_key,
-        )
+        return cls._from_settings_values({key: value for key, value in rows}, config)
 
     @classmethod
     def secret_state(cls, provider: str | None = None) -> dict[str, str | bool]:

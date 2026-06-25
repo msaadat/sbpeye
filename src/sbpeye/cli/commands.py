@@ -412,7 +412,7 @@ def graph(circular_id, depth, limit, refresh, verbose, delay):
             if not seed:
                 raise click.ClickException(f"Circular not found: {circular_id}")
             seeds = [seed]
-            print(f"Graph expansion from: {seed.reference or seed.title}")
+            print(f"Graph expansion from: {seed.display_name}")
         else:
             query = db.query(Circular).filter(
                 Circular.content_text.is_not(None),
@@ -526,7 +526,7 @@ def graph(circular_id, depth, limit, refresh, verbose, delay):
         db.commit()
 
         if circular_id:
-            print(f"\nDone. Seed: {seeds[0].reference or seeds[0].title}")
+            print(f"\nDone. Seed: {seeds[0].display_name}")
         else:
             print("\nDone. Batch graph expansion complete.")
         print(f"  Graph nodes visited:   {len(visited)}")
@@ -686,6 +686,12 @@ def reindex_cmd(dry_run):
     """Re-index all circulars and extracted attachments into ChromaDB."""
     from sbpeye.database import chroma_client, embedding_backend, embedding_config
     from sbpeye.checklist import prepare_reference_chunks
+    from sbpeye.scraper.circulars import (
+        attachment_chunk_metadata,
+        attachment_document,
+        circular_chunk_metadata,
+        circular_document,
+    )
 
     COLLECTION_NAME = "circulars"
     BATCH_SIZE = 50
@@ -699,23 +705,12 @@ def reindex_cmd(dry_run):
         if dry_run:
             total_chunks = 0
             for c in circulars:
-                circular_document = {
-                    "doc_id": c.id,
-                    "doc_type": "circular",
-                    "doc_label": f"{c.department} - {c.reference or c.title}",
-                    "text": c.content_text or "",
-                    "file_type": "html",
-                }
-                total_chunks += len(prepare_reference_chunks(circular_document))
+                total_chunks += len(prepare_reference_chunks(circular_document(c)))
                 for attachment in c.attachments:
                     if attachment.content_text and attachment.content_text.strip():
-                        total_chunks += len(prepare_reference_chunks({
-                            "doc_id": attachment.id,
-                            "doc_type": "attachment",
-                            "doc_label": attachment.filename,
-                            "text": attachment.content_text,
-                            "file_type": attachment.file_type or "",
-                        }))
+                        total_chunks += len(
+                            prepare_reference_chunks(attachment_document(attachment))
+                        )
             print(
                 f"Would create {total_chunks} chunks "
                 f"(avg {total_chunks/max(total, 1):.1f} per circular)"
@@ -761,62 +756,21 @@ def reindex_cmd(dry_run):
 
         for i, c in enumerate(circulars):
             try:
-                chunks = prepare_reference_chunks({
-                    "doc_id": c.id,
-                    "doc_type": "circular",
-                    "doc_label": f"{c.department} - {c.reference or c.title}",
-                    "text": c.content_text or "",
-                    "file_type": "html",
-                })
-
+                chunks = prepare_reference_chunks(circular_document(c))
                 for ci, chunk in enumerate(chunks):
                     batch_docs.append(chunk["text"])
                     batch_ids.append(f"{c.id}__chunk_{ci}")
-                    batch_metas.append({
-                        "circular_id": c.id,
-                        "doc_type": "circular",
-                        "title": c.title or "",
-                        "url": c.url or "",
-                        "department": c.department or "",
-                        "chunk_index": ci,
-                        "ref": chunk["ref"],
-                        "unit_id": chunk["unit_id"],
-                        "source_start": chunk["source_start"],
-                        "source_end": chunk["source_end"],
-                        **({"page_start": chunk["page_start"]} if chunk["page_start"] else {}),
-                        **({"page_end": chunk["page_end"]} if chunk["page_end"] else {}),
-                    })
+                    batch_metas.append(circular_chunk_metadata(c, chunk, ci))
 
                 for attachment in c.attachments:
                     if not attachment.content_text or not attachment.content_text.strip():
                         attachment.is_vectorized = 0
                         continue
-                    attachment_chunks = prepare_reference_chunks({
-                        "doc_id": attachment.id,
-                        "doc_type": "attachment",
-                        "doc_label": attachment.filename,
-                        "text": attachment.content_text,
-                        "file_type": attachment.file_type or "",
-                    })
+                    attachment_chunks = prepare_reference_chunks(attachment_document(attachment))
                     for ci, chunk in enumerate(attachment_chunks):
                         batch_docs.append(chunk["text"])
                         batch_ids.append(f"{attachment.id}__chunk_{ci}")
-                        batch_metas.append({
-                            "circular_id": c.id,
-                            "attachment_id": attachment.id,
-                            "doc_type": "attachment",
-                            "title": attachment.filename,
-                            "filename": attachment.filename,
-                            "url": attachment.original_url,
-                            "department": c.department or "",
-                            "chunk_index": ci,
-                            "ref": chunk["ref"],
-                            "unit_id": chunk["unit_id"],
-                            "source_start": chunk["source_start"],
-                            "source_end": chunk["source_end"],
-                            **({"page_start": chunk["page_start"]} if chunk["page_start"] else {}),
-                            **({"page_end": chunk["page_end"]} if chunk["page_end"] else {}),
-                        })
+                        batch_metas.append(attachment_chunk_metadata(attachment, chunk, ci))
                     attachment.is_vectorized = 1
                     indexed_attachments += 1
 
@@ -902,87 +856,120 @@ def _year_filter(query, year):
     return query.filter(extract("year", Circular.date).in_([int(y) for y in year]))
 
 
-def _run_summarize(db, client, url, dept, year, limit, refresh, verbose, delay):
-    query = _url_filter(db.query(Circular), url)
-    query = _dept_filter(query, dept)
-    query = _year_filter(query, year)
-    if not refresh:
-        query = query.filter((Circular.summary == None) | (Circular.summary == ""))  # noqa: E711
-    circulars = query.order_by(Circular.date.desc()).all()
+def _scope_query(db, url, dept, year):
+    """Circular query filtered by the shared --url/--dept/--year batch options."""
+    return _year_filter(_dept_filter(_url_filter(db.query(Circular), url), dept), year)
 
-    if url and not circulars:
-        print(f"No circular found with URL: {url}")
-        return
 
-    if limit > 0:
-        circulars = circulars[:limit]
+class _BatchOutcome:
+    """What a per-circular batch step accomplished, for progress reporting."""
 
-    print(f"Summarizing {len(circulars)} circulars...")
+    __slots__ = ("detail", "count")
+
+    def __init__(self, detail: str = "", count: int = 0):
+        self.detail = detail  # verbose one-line summary of the result
+        self.count = count    # extra items produced (e.g. relationships created)
+
+
+def _run_ai_batch(db, circulars, *, process, skip=None,
+                  verbose=False, delay=0.0, sleep_in_loop=True):
+    """Drive an AI batch task over `circulars`: commit/rollback, progress, delay.
+
+    `skip(c)` returns True to bypass a circular (and is responsible for any
+    skip-specific logging). `process(c)` performs the work, mutates the row, and
+    returns a `_BatchOutcome`; the driver commits on success and rolls back on error.
+    Returns `(processed, total_count)`.
+    """
     processed = 0
+    total = 0
     for c in circulars:
-        if not c.content_text:
-            if verbose:
-                print(f"  [SKIP] No content: {c.title[:60]}")
+        if skip is not None and skip(c):
             continue
         try:
-            summary = client.summarize(c.title, c.content_text)
-            c.summary = summary
-            c.summary_generated_at = datetime.utcnow()
+            outcome = process(c)
             db.commit()
             processed += 1
+            total += outcome.count
             if verbose:
-                print(f"  [{processed}] {c.title[:60]}: {summary[:80]}...")
+                print(f"  [{processed}] {c.title[:60]}: {outcome.detail}")
             else:
                 print(f"  [{processed}/{len(circulars)}] {c.title[:60]}")
         except Exception as e:
             print(f"  [ERROR] {c.title[:60]}: {e}")
             db.rollback()
-        time.sleep(delay)
+        if sleep_in_loop:
+            time.sleep(delay)
+    return processed, total
 
+
+def _select_circulars(query, url, limit):
+    """Order by date desc, report an empty single-URL run, and apply --limit."""
+    circulars = query.order_by(Circular.date.desc()).all()
+    if url and not circulars:
+        print(f"No circular found with URL: {url}")
+        return None
+    if limit > 0:
+        circulars = circulars[:limit]
+    return circulars
+
+
+def _run_summarize(db, client, url, dept, year, limit, refresh, verbose, delay):
+    query = _scope_query(db, url, dept, year)
+    if not refresh:
+        query = query.filter((Circular.summary == None) | (Circular.summary == ""))  # noqa: E711
+    circulars = _select_circulars(query, url, limit)
+    if circulars is None:
+        return
+
+    def skip(c):
+        if not c.content_text:
+            if verbose:
+                print(f"  [SKIP] No content: {c.title[:60]}")
+            return True
+        return False
+
+    def process(c):
+        summary = client.summarize(c.title, c.content_text)
+        c.summary = summary
+        c.summary_generated_at = datetime.utcnow()
+        return _BatchOutcome(detail=f"{summary[:80]}...")
+
+    print(f"Summarizing {len(circulars)} circulars...")
+    processed, _ = _run_ai_batch(
+        db, circulars, process=process, skip=skip,
+        verbose=verbose, delay=delay,
+    )
     print(f"\nSummarized {processed}/{len(circulars)} circulars.")
 
 
 def _run_tags(db, client, url, dept, year, limit, refresh, verbose, delay):
-    query = _url_filter(db.query(Circular), url)
-    query = _dept_filter(query, dept)
-    query = _year_filter(query, year)
+    query = _scope_query(db, url, dept, year)
     if not refresh:
         query = query.filter((Circular.tags == None) | (Circular.tags == ""))  # noqa: E711
-    circulars = query.order_by(Circular.date.desc()).all()
-
-    if url and not circulars:
-        print(f"No circular found with URL: {url}")
+    circulars = _select_circulars(query, url, limit)
+    if circulars is None:
         return
 
-    if limit > 0:
-        circulars = circulars[:limit]
-
-    print(f"Tagging {len(circulars)} circulars...")
-    processed = 0
-    for c in circulars:
+    def skip(c):
         has_pdf_text = any(
             (attachment.file_type or "").lower() == "pdf"
             and attachment.extraction_status == "extracted"
             and bool(attachment.content_text)
             for attachment in c.attachments
         )
-        if not c.content_text and not has_pdf_text:
-            continue
-        try:
-            tag_list = client.generate_tags(c.title, c.content_text)
-            c.tags = json.dumps(tag_list)
-            c.tags_generated_at = datetime.utcnow()
-            db.commit()
-            processed += 1
-            if verbose:
-                print(f"  [{processed}] {c.title[:60]}: {tag_list}")
-            else:
-                print(f"  [{processed}/{len(circulars)}] {c.title[:60]}")
-        except Exception as e:
-            print(f"  [ERROR] {c.title[:60]}: {e}")
-            db.rollback()
-        time.sleep(delay)
+        return not c.content_text and not has_pdf_text
 
+    def process(c):
+        tag_list = client.generate_tags(c.title, c.content_text)
+        c.tags = json.dumps(tag_list)
+        c.tags_generated_at = datetime.utcnow()
+        return _BatchOutcome(detail=f"{tag_list}")
+
+    print(f"Tagging {len(circulars)} circulars...")
+    processed, _ = _run_ai_batch(
+        db, circulars, process=process, skip=skip,
+        verbose=verbose, delay=delay,
+    )
     print(f"\nTagged {processed}/{len(circulars)} circulars.")
 
 
@@ -1093,10 +1080,7 @@ def _run_attachment_checklist(db, client, attachment_id, verbose, delay):
 
 
 def _run_checklist(db, client, url, dept, year, limit, refresh, verbose, delay):
-    query = _url_filter(db.query(Circular), url)
-    query = _dept_filter(query, dept)
-    query = _year_filter(query, year)
-    circulars = query.order_by(Circular.date.desc()).all()
+    circulars = _scope_query(db, url, dept, year).order_by(Circular.date.desc()).all()
     if not refresh:
         def has_current_checklist(circular):
             try:
@@ -1118,47 +1102,37 @@ def _run_checklist(db, client, url, dept, year, limit, refresh, verbose, delay):
     if limit > 0:
         circulars = circulars[:limit]
 
-    print(f"Generating checklists for {len(circulars)} circulars...")
-    processed = 0
-    for c in circulars:
+    def skip(c):
         has_pdf_file = any(
             (attachment.file_type or "").lower() == "pdf"
             and bool(attachment.local_path)
             and (PROJECT_ROOT / attachment.local_path).is_file()
             for attachment in c.attachments
         )
-        if not c.content_text and not has_pdf_file:
-            continue
-        try:
-            checklist = client.generate_checklist(c, delay=delay)
-            c.compliance_checklist = json.dumps(checklist)
-            c.checklist_generated_at = datetime.utcnow()
-            db.commit()
-            processed += 1
-            if verbose:
-                items = checklist["checklist_items"]
-                required_count = sum(item.get("classification") == "required" for item in items)
-                print(
-                    f"  [{processed}] {c.title[:60]}: "
-                    f"{len(items)} checklist items, "
-                    f"{required_count} required, "
-                    f"status={checklist['status']}"
-                )
-            else:
-                print(f"  [{processed}/{len(circulars)}] {c.title[:60]}")
-        except Exception as e:
-            print(f"  [ERROR] {c.title[:60]}: {e}")
-            db.rollback()
+        return not c.content_text and not has_pdf_file
 
+    def process(c):
+        checklist = client.generate_checklist(c, delay=delay)
+        c.compliance_checklist = json.dumps(checklist)
+        c.checklist_generated_at = datetime.utcnow()
+        items = checklist["checklist_items"]
+        required_count = sum(item.get("classification") == "required" for item in items)
+        return _BatchOutcome(
+            detail=f"{len(items)} checklist items, {required_count} required, "
+            f"status={checklist['status']}"
+        )
+
+    print(f"Generating checklists for {len(circulars)} circulars...")
+    # The per-call delay is handled inside generate_checklist, so the driver does not sleep.
+    processed, _ = _run_ai_batch(
+        db, circulars, process=process,
+        skip=skip, verbose=verbose, delay=delay, sleep_in_loop=False,
+    )
     print(f"\nGenerated checklists for {processed}/{len(circulars)} circulars.")
 
 
 def _run_relationships(db, client, url, dept, year, limit, refresh, verbose, delay):
-    query = _url_filter(db.query(Circular), url)
-    query = _dept_filter(query, dept)
-    query = _year_filter(query, year)
-
-    all_matching = query.all()
+    all_matching = _scope_query(db, url, dept, year).all()
     if url and not all_matching:
         print(f"No circular found with URL: {url}")
         return
@@ -1179,42 +1153,31 @@ def _run_relationships(db, client, url, dept, year, limit, refresh, verbose, del
     if limit > 0:
         circulars = circulars[:limit]
 
+    def process(c):
+        rels = client.extract_relationships(c.title, c.reference or "", c.content_text)
+        all_rels = []
+        for rel_type in ("amends", "supersedes", "cancels", "adds_to", "clarifies"):
+            for target_ref in rels.get(rel_type, []):
+                target_circular = resolve_reference_in_context(db, c, target_ref)
+                rel = CircularRelationship(
+                    source_id=c.id,
+                    target_id=target_circular.id if target_circular else None,
+                    target_reference=target_ref,
+                    type=rel_type,
+                )
+                db.add(rel)
+                all_rels.append(rel)
+
+        all_rels.extend(apply_blanket_supersession(db, client, c, rels))
+
+        c.relationships_generated_at = datetime.utcnow()
+        return _BatchOutcome(detail=f"{len(all_rels)} relationships", count=len(all_rels))
+
     print(f"Extracting relationships for {len(circulars)} circulars...")
-    processed = 0
-    total_rels = 0
-    for c in circulars:
-        if not c.content_text:
-            continue
-        try:
-            rels = client.extract_relationships(c.title, c.reference or "", c.content_text)
-            all_rels = []
-            for rel_type in ("amends", "supersedes", "cancels", "adds_to", "clarifies"):
-                for target_ref in rels.get(rel_type, []):
-                    target_circular = resolve_reference_in_context(db, c, target_ref)
-                    rel = CircularRelationship(
-                        source_id=c.id,
-                        target_id=target_circular.id if target_circular else None,
-                        target_reference=target_ref,
-                        type=rel_type,
-                    )
-                    db.add(rel)
-                    all_rels.append(rel)
-
-            all_rels.extend(apply_blanket_supersession(db, client, c, rels))
-
-            c.relationships_generated_at = datetime.utcnow()
-            db.commit()
-            total_rels += len(all_rels)
-            processed += 1
-            if verbose:
-                print(f"  [{processed}] {c.title[:60]}: {len(all_rels)} relationships")
-            else:
-                print(f"  [{processed}/{len(circulars)}] {c.title[:60]}")
-        except Exception as e:
-            print(f"  [ERROR] {c.title[:60]}: {e}")
-            db.rollback()
-        time.sleep(delay)
-
+    processed, total_rels = _run_ai_batch(
+        db, circulars, process=process,
+        skip=lambda c: not c.content_text, verbose=verbose, delay=delay,
+    )
     print(f"\nExtracted {total_rels} relationships from {processed}/{len(circulars)} circulars.")
 
 

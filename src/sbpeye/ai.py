@@ -273,20 +273,14 @@ class AIConfig:
             return None
 
     def save_to_db(self, db):
-        from .models import Settings
-        for key, value in [
-            ("ai_provider", normalize_provider(self.provider)),
-            ("ai_base_url", self.base_url),
-            ("ai_model", self.model),
-            ("ai_chat_model", self.chat_model),
-            ("ai_max_context_tokens", str(self.max_context_tokens)),
-        ]:
-            existing = db.query(Settings).filter(Settings.key == key).first()
-            if existing:
-                existing.value = value
-            else:
-                db.add(Settings(key=key, value=value))
-        db.commit()
+        from .models import upsert_settings
+        upsert_settings(db, {
+            "ai_provider": normalize_provider(self.provider),
+            "ai_base_url": self.base_url,
+            "ai_model": self.model,
+            "ai_chat_model": self.chat_model,
+            "ai_max_context_tokens": str(self.max_context_tokens),
+        })
 
     @classmethod
     def secret_state(cls, provider: str | None) -> dict[str, str | bool]:
@@ -451,16 +445,21 @@ class AIClient:
             {"role": "user", "content": "\n\n".join(synthesis_context)},
         ]
 
+    def _truncate_context(self, content_text: str) -> str:
+        """Clip document text to the configured context budget before prompting."""
+        limit = self.config.max_context_tokens
+        return content_text[:limit] if len(content_text) > limit else content_text
+
     def summarize(self, title: str, content_text: str) -> str:
         system = "You are a concise financial regulations analyst. Summarize the following SBP circular in 3-5 sentences, focusing on the key regulatory changes, requirements, and impact on banks/DFIs/MFBs. Be factual and specific."
-        truncated = content_text[: self.config.max_context_tokens] if len(content_text) > self.config.max_context_tokens else content_text
+        truncated = self._truncate_context(content_text)
         user = f"Title: {title}\n\nContent:\n{truncated}"
         result = self._complete(system, user, temperature=0.2)
         return result.strip()
 
     def generate_tags(self, title: str, content_text: str) -> list[str]:
         system = f"You are a financial regulations classifier. Select the most relevant tags from the following taxonomy that apply to the given SBP circular.\n\nTaxonomy: {json.dumps(TAG_TAXONOMY)}\n\nReturn ONLY a JSON object with a 'tags' key containing a list of 1-5 selected tag strings from the taxonomy."
-        truncated = content_text[: self.config.max_context_tokens] if len(content_text) > self.config.max_context_tokens else content_text
+        truncated = self._truncate_context(content_text)
         user = f"Title: {title}\n\nContent:\n{truncated}"
         result = self._complete(
             system,
@@ -923,7 +922,7 @@ SOURCE BLOCK:
             "subject (e.g. 'Cash Reserve Requirement'). If there is no such blanket clause, set "
             "'supersedes_all_previous' to false and 'subject' to an empty string."
         )
-        truncated = content_text[: self.config.max_context_tokens] if len(content_text) > self.config.max_context_tokens else content_text
+        truncated = self._truncate_context(content_text)
         user = f"Title: {title}\nReference: {reference}\n\nContent:\n{truncated}"
         relationship_properties = {
             key: {"type": "array", "items": {"type": "string"}}
@@ -1073,7 +1072,7 @@ SOURCE BLOCK:
                         "status": c.status or "active",
                         "tags": json.loads(c.tags) if c.tags else [],
                         "url": c.url,
-                        "citation": f"[[circular:{c.id}|{c.reference or c.title}]]",
+                        "citation": f"[[circular:{c.id}|{c.display_name}]]",
                     })
                 return json.dumps({
                     "results": out,
@@ -1100,7 +1099,7 @@ SOURCE BLOCK:
                         "status": c.status or "active",
                         "tags": json.loads(c.tags) if c.tags else [],
                         "url": c.url,
-                        "citation": f"[[circular:{c.id}|{c.reference or c.title}]]",
+                        "citation": f"[[circular:{c.id}|{c.display_name}]]",
                     })
                 return json.dumps({"results": out, "count": len(out)})
 
@@ -1127,7 +1126,7 @@ SOURCE BLOCK:
                                 "department": item.department,
                                 "date": item.date.strftime("%Y-%m-%d") if item.date else None,
                                 "citation": (
-                                    f"[[circular:{item.id}|{item.reference or item.title}]]"
+                                    f"[[circular:{item.id}|{item.display_name}]]"
                                 ),
                             }
                             for item in ref_matches
@@ -1162,7 +1161,7 @@ SOURCE BLOCK:
                     "compliance_checklist": compact_required_checklist(c.compliance_checklist),
                     "status": c.status or "active",
                     "content_preview": (c.content_text or "")[:2000],
-                    "citation": f"[[circular:{c.id}|{c.reference or c.title}]]",
+                    "citation": f"[[circular:{c.id}|{c.display_name}]]",
                     "attachment_citations": [
                         f"[[attachment:{item.id}|{item.filename}]]"
                         for item in c.attachments
@@ -1187,7 +1186,7 @@ SOURCE BLOCK:
                         "status": c.status or "active",
                         "tags": json.loads(c.tags) if c.tags else [],
                         "url": c.url,
-                        "citation": f"[[circular:{c.id}|{c.reference or c.title}]]",
+                        "citation": f"[[circular:{c.id}|{c.display_name}]]",
                     })
                 return json.dumps({"results": out, "count": len(out)})
 
@@ -1223,6 +1222,50 @@ IMPORTANT RULES:
 Never expose IDs outside those tokens, alter a token, invent a token, or turn plain-text references into links.
 3. If you need more details on a circular found in a search, use the get_circular_details tool with the circular reference or title."""
 
+    def _chat_full_messages(
+        self,
+        messages: list[dict[str, str]],
+        circulars_context: str | None,
+        selected_circular_ids: list[str] | None,
+    ) -> list[dict]:
+        """Prepend the (context-aware) system prompt to the conversation."""
+        system_prompt = self._chat_system_prompt(
+            circulars_context if selected_circular_ids else None
+        )
+        return [{"role": "system", "content": system_prompt}] + messages
+
+    def _apply_tool_calls(
+        self,
+        full_messages: list[dict],
+        assistant_content: str,
+        tool_call_dicts: list[dict],
+        db: Session,
+        selected_circular_ids: list[str] | None,
+    ) -> None:
+        """Record the assistant's tool requests, run each tool, and append its result.
+
+        `tool_call_dicts` are normalized to the OpenAI on-the-wire shape so the streaming
+        and non-streaming paths share this loop.
+        """
+        full_messages.append({
+            "role": "assistant",
+            "content": assistant_content,
+            "tool_calls": tool_call_dicts,
+        })
+        for tc in tool_call_dicts:
+            try:
+                args = json.loads(tc["function"]["arguments"])
+            except json.JSONDecodeError:
+                args = {}
+            result = self._execute_tool(
+                tc["function"]["name"], args, db, selected_circular_ids
+            )
+            full_messages.append({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": result,
+            })
+
     def chat(
         self,
         messages: list[dict[str, str]],
@@ -1230,10 +1273,9 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
         circulars_context: str | None = None,
         selected_circular_ids: list[str] | None = None,
     ) -> str:
-        system_prompt = self._chat_system_prompt(
-            circulars_context if selected_circular_ids else None
+        full_messages = self._chat_full_messages(
+            messages, circulars_context, selected_circular_ids
         )
-        full_messages = [{"role": "system", "content": system_prompt}] + messages
 
         max_iterations = 5
         for _ in range(max_iterations):
@@ -1250,37 +1292,23 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
             if not msg.tool_calls:
                 return msg.content or ""
 
-            # Append the assistant's tool_calls request
-            full_messages.append({
-                "role": "assistant",
-                "content": msg.content or "",
-                "tool_calls": [
+            self._apply_tool_calls(
+                full_messages,
+                msg.content or "",
+                [
                     {
                         "id": tc.id,
                         "type": "function",
                         "function": {
                             "name": tc.function.name,
                             "arguments": tc.function.arguments,
-                        }
+                        },
                     }
                     for tc in msg.tool_calls
-                ]
-            })
-
-            # Execute each tool and append results
-            for tc in msg.tool_calls:
-                try:
-                    args = json.loads(tc.function.arguments)
-                except json.JSONDecodeError:
-                    args = {}
-                result = self._execute_tool(
-                    tc.function.name, args, db, selected_circular_ids
-                )
-                full_messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": result,
-                })
+                ],
+                db,
+                selected_circular_ids,
+            )
 
         # Fallback if max iterations reached. Use a fresh synthesis prompt so
         # models that keep requesting tools do not see prior tool-call messages.
@@ -1306,10 +1334,9 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
         circulars_context: str | None = None,
         selected_circular_ids: list[str] | None = None,
     ):
-        system_prompt = self._chat_system_prompt(
-            circulars_context if selected_circular_ids else None
+        full_messages = self._chat_full_messages(
+            messages, circulars_context, selected_circular_ids
         )
-        full_messages = [{"role": "system", "content": system_prompt}] + messages
 
         max_iterations = 5
         for _ in range(max_iterations):
@@ -1352,25 +1379,13 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
             if not tool_calls:
                 return
 
-            full_messages.append({
-                "role": "assistant",
-                "content": "".join(content_parts),
-                "tool_calls": [tool_calls[index] for index in sorted(tool_calls)],
-            })
-
-            for tc in [tool_calls[index] for index in sorted(tool_calls)]:
-                try:
-                    args = json.loads(tc["function"]["arguments"])
-                except json.JSONDecodeError:
-                    args = {}
-                result = self._execute_tool(
-                    tc["function"]["name"], args, db, selected_circular_ids
-                )
-                full_messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc["id"],
-                    "content": result,
-                })
+            self._apply_tool_calls(
+                full_messages,
+                "".join(content_parts),
+                [tool_calls[index] for index in sorted(tool_calls)],
+                db,
+                selected_circular_ids,
+            )
 
         synthesis_messages = self._tool_result_synthesis_messages(
             messages, full_messages, circulars_context

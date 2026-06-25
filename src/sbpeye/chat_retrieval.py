@@ -103,7 +103,7 @@ class ScopedChatRetriever:
     def attachment_manifest(self) -> str:
         sections: list[str] = []
         for circular in self.circulars:
-            circular_label = circular.reference or circular.title
+            circular_label = circular.display_name
             citation = f"[[circular:{circular.id}|{circular_label}]]"
             lines = [
                 f"Circular: {citation}",

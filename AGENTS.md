@@ -45,19 +45,21 @@ SBPEye/
 │   ├── database.py                 # DB engine, session factory, ChromaDB client, migrations
 │   ├── search.py                   # Hybrid search engine (BM25 + ChromaDB + RRF)
 │   ├── ai.py                       # AI client module (LM Studio, OpenAI, Google Gemini)
+│   ├── api/
+│   │   ├── __init__.py
+│   │   └── serializers.py          # Pure payload/serialization + workspace/settings helpers
 │   ├── scraper/
 │   │   ├── __init__.py
 │   │   ├── circulars.py            # SBP circulars scraper
 │   │   ├── ecodata.py              # Economic data scraper
 │   │   ├── ecodata_index.py       # EcoData index page scraper
-│   │   ├── llm.py                  # LLM helper (delegates to ai.py)
+│   │   ├── news.py                 # SBP homepage news scraper
 │   │   └── pdf_summarizer.py       # PDF summarization for EcoData
 │   ├── cli/
 │   │   ├── __init__.py
 │   │   └── commands.py             # Click CLI: sync, summarize, tags, checklist, relationships, status
-│   ├── templates/                  # Legacy Jinja2 templates (to be removed)
-│   └── static/                     # Legacy static files (to be removed)
-└── test_circulars.py               # Legacy test harness (use CLI instead)
+│   └── static/                     # Built Vue SPA served at the root route (static/spa/)
+└── tests/                          # pytest suite
 ```
 
 ## Database Models (models.py)
@@ -146,17 +148,6 @@ sbpeye dry-run --dept bprd --year 2025  # Preview what would be scraped
 | GET | `/api/settings` | Get current AI settings |
 | POST | `/api/settings` | Save AI settings |
 | POST | `/api/settings/test` | Test AI connection |
-
-### HTMX Partial Routes (to be eliminated after SPA migration)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/partials/news` | News cards |
-| GET | `/partials/departments` | Department cards grid |
-| GET | `/partials/years` | Year cards for a department |
-| GET | `/partials/circulars` | Circular list |
-| GET | `/partials/search` | Search results with pagination. Supports `tag` filter |
-| GET | `/partials/ecodata_table` | EcoData table |
-| GET | `/partials/ecodata_summary` | PDF summary modal content |
 
 ## Running the Project
 

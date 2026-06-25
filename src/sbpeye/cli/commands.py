@@ -11,6 +11,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 from sbpeye.database import PROJECT_ROOT, engine, Base, SessionLocal
 from sbpeye.models import Attachment, Circular, CircularRelationship
 from sbpeye.ai import get_ai_client
+from sbpeye.link_routing import resolve_reference_in_context
+from sbpeye.supersession import apply_blanket_supersession
 
 
 @click.group()
@@ -349,6 +351,134 @@ def relationships(url, dept, year, limit, refresh, verbose, delay):
     try:
         client = get_ai_client(db)
         _run_relationships(db, client, url, dept, year, limit, refresh, verbose, delay)
+    finally:
+        db.close()
+
+
+@circulars.command()
+@click.argument("circular_id")
+@click.option("--depth", type=int, default=0, help="Max hops from seed (0=unlimited)")
+@click.option("--refresh", is_flag=True, help="Re-extract even if relationships already exist")
+@click.option("--verbose", "-v", is_flag=True, help="Print each extracted relationship")
+@click.option("--delay", type=float, default=1.5, help="Delay between API calls in seconds")
+def graph(circular_id, depth, refresh, verbose, delay):
+    """Generate relationships for a circular and all transitively related circulars.
+
+    Runs BFS starting from CIRCULAR_ID, extracting relationships at each hop and
+    expanding to newly discovered neighbors until the full reachable graph is covered
+    (or --depth hops are exhausted).
+    """
+    db = SessionLocal()
+    try:
+        client = get_ai_client(db)
+        seed = db.get(Circular, circular_id)
+        if not seed:
+            raise click.ClickException(f"Circular not found: {circular_id}")
+
+        print(f"Graph expansion from: {seed.reference or seed.title}")
+        if depth:
+            print(f"Max depth: {depth}")
+
+        queue: list[tuple[str, int]] = [(seed.id, 0)]
+        visited: set[str] = set()
+        processed = 0
+        skipped = 0
+        total_rels = 0
+
+        while queue:
+            current_id, current_depth = queue.pop(0)
+            if current_id in visited:
+                continue
+            visited.add(current_id)
+
+            if depth and current_depth > depth:
+                continue
+
+            circular = db.get(Circular, current_id)
+            if not circular:
+                continue
+
+            depth_tag = f"[d{current_depth}] " if current_depth else ""
+            label = circular.reference or circular.title[:60]
+
+            already_done = db.query(CircularRelationship).filter(
+                CircularRelationship.source_id == current_id
+            ).count() > 0
+
+            if already_done and not refresh:
+                skipped += 1
+                if verbose:
+                    print(f"  [skip] {depth_tag}{label}")
+            elif not circular.content_text:
+                if verbose:
+                    print(f"  [no-content] {depth_tag}{label}")
+            else:
+                try:
+                    if refresh and already_done:
+                        db.query(CircularRelationship).filter(
+                            CircularRelationship.source_id == current_id
+                        ).delete(synchronize_session=False)
+
+                    rels = client.extract_relationships(
+                        circular.title, circular.reference or "", circular.content_text
+                    )
+                    new_rels: list[tuple[str, str, Circular | None]] = []
+                    for rel_type in ("amends", "supersedes", "cancels", "adds_to", "clarifies"):
+                        for target_ref in rels.get(rel_type, []):
+                            target = resolve_reference_in_context(db, circular, target_ref)
+                            db.add(CircularRelationship(
+                                source_id=circular.id,
+                                target_id=target.id if target else None,
+                                target_reference=target_ref,
+                                type=rel_type,
+                            ))
+                            new_rels.append((rel_type, target_ref, target))
+
+                    for target in apply_blanket_supersession(db, client, circular, rels):
+                        new_rels.append(("supersedes", "(all previous on subject)", target))
+
+                    circular.relationships_generated_at = datetime.utcnow()
+                    db.commit()
+                    total_rels += len(new_rels)
+                    processed += 1
+                    print(f"  [{processed}] {depth_tag}{label}: {len(new_rels)} relationship(s)")
+                    if verbose:
+                        for rel_type, ref, target in new_rels:
+                            resolved = f"→ {target.reference or target.id}" if target else "(unresolved)"
+                            print(f"       {rel_type}: {ref!r} {resolved}")
+                    time.sleep(delay)
+                except Exception as exc:
+                    print(f"  [error] {depth_tag}{label}: {exc}")
+                    db.rollback()
+
+            # Expand neighbors from relationships now in DB
+            if not depth or current_depth < depth:
+                out_ids = [
+                    r.target_id
+                    for r in db.query(CircularRelationship).filter(
+                        CircularRelationship.source_id == current_id,
+                        CircularRelationship.target_id.isnot(None),
+                    )
+                ]
+                in_ids = [
+                    r.source_id
+                    for r in db.query(CircularRelationship).filter(
+                        CircularRelationship.target_id == current_id,
+                    )
+                ]
+                for nid in out_ids + in_ids:
+                    if nid and nid not in visited:
+                        queue.append((nid, current_depth + 1))
+
+        from sbpeye.circular_ai import _recompute_statuses
+        _recompute_statuses(db)
+        db.commit()
+
+        print(f"\nDone. Seed: {seed.reference or seed.title}")
+        print(f"  Graph nodes visited:   {len(visited)}")
+        print(f"  Circulars processed:   {processed}")
+        print(f"  Skipped (cached):      {skipped}")
+        print(f"  Total relationships:   {total_rels}")
     finally:
         db.close()
 
@@ -718,25 +848,6 @@ def _year_filter(query, year):
     return query.filter(extract("year", Circular.date).in_([int(y) for y in year]))
 
 
-def _resolve_reference(db, ref_text: str) -> Circular | None:
-    ref_lower = ref_text.lower().strip()
-    if not ref_lower:
-        return None
-    from sqlalchemy import or_
-    matches = db.query(Circular).filter(
-        or_(
-            Circular.reference.ilike(f"%{ref_lower}%"),
-            Circular.title.ilike(f"%{ref_lower}%"),
-        )
-    ).limit(5).all()
-    if len(matches) == 1:
-        return matches[0]
-    for m in matches:
-        if m.reference and m.reference.lower() == ref_lower:
-            return m
-    return None
-
-
 def _run_summarize(db, client, url, dept, year, limit, refresh, verbose, delay):
     query = _url_filter(db.query(Circular), url)
     query = _dept_filter(query, dept)
@@ -1025,7 +1136,7 @@ def _run_relationships(db, client, url, dept, year, limit, refresh, verbose, del
             all_rels = []
             for rel_type in ("amends", "supersedes", "cancels", "adds_to", "clarifies"):
                 for target_ref in rels.get(rel_type, []):
-                    target_circular = _resolve_reference(db, target_ref)
+                    target_circular = resolve_reference_in_context(db, c, target_ref)
                     rel = CircularRelationship(
                         source_id=c.id,
                         target_id=target_circular.id if target_circular else None,
@@ -1034,6 +1145,8 @@ def _run_relationships(db, client, url, dept, year, limit, refresh, verbose, del
                     )
                     db.add(rel)
                     all_rels.append(rel)
+
+            all_rels.extend(apply_blanket_supersession(db, client, c, rels))
 
             c.relationships_generated_at = datetime.utcnow()
             db.commit()

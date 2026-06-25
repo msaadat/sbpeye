@@ -1,5 +1,6 @@
 from pathlib import Path
 import re
+from typing import NamedTuple
 from urllib.parse import urldefrag, urlencode, urlparse
 
 from bs4 import BeautifulSoup, NavigableString
@@ -14,12 +15,13 @@ CIRCULAR_REFERENCE_RE = re.compile(
     r"\b(?P<prefix>[A-Z][A-Z&]{1,12})\s+Circular"
     r"(?P<letter>\s+Letter)?\s+No\.?\s*"
     r"(?P<number>\d{1,3})"
+    r"(?P<more>(?:\s*,\s*\d{1,3}|\s+and\s+\d{1,3})*)"
     r"(?:\s+of\s+(?P<year>(?:19|20)\d{2}))?",
     re.IGNORECASE,
 )
 DATED_YEAR_RE = re.compile(
     r"\bdated\s+"
-    r"(?:[A-Z][a-z]+\s+\d{1,2},?\s+|\d{1,2}\s+[A-Z][a-z]+,?\s+)"
+    r"(?:[A-Z][a-z]+\s+\d{1,2}(?:st|nd|rd|th)?,?\s+|\d{1,2}(?:st|nd|rd|th)?\s+[A-Z][a-z]+,?\s+)"
     r"(?P<year>(?:19|20)\d{2})\b",
     re.IGNORECASE,
 )
@@ -83,16 +85,11 @@ def _candidate_year(circular: Circular) -> int | None:
     return None
 
 
-def _resolve_circular_reference(
-    reference_text: str,
+def _resolve_circular_reference_from_parts(
+    parts: dict,
     current: Circular,
     db: Session,
-    inferred_year: int | None = None,
 ) -> Circular | None:
-    parts = _reference_parts(reference_text, inferred_year)
-    if not parts:
-        return None
-
     query = db.query(Circular).filter(
         or_(
             Circular.reference.ilike(f"{parts['prefix']}%Circular%"),
@@ -130,13 +127,112 @@ def _resolve_circular_reference(
     return None
 
 
+def _resolve_circular_reference(
+    reference_text: str,
+    current: Circular,
+    db: Session,
+    inferred_year: int | None = None,
+) -> Circular | None:
+    parts = _reference_parts(reference_text, inferred_year)
+    if not parts:
+        return None
+    return _resolve_circular_reference_from_parts(parts, current, db)
+
+
 def _nearby_dated_year(text: str, start: int) -> int | None:
     match = DATED_YEAR_RE.search(text[start:start + 90])
     return int(match.group("year")) if match else None
 
 
+class CircularReference(NamedTuple):
+    """A single circular number found in text, with its display span and inferred year.
+
+    Grouped references such as "DMMD Circular No. 20, 21 and 22 dated November 03, 2011"
+    yield one entry per number (20, 21, 22), all sharing the prefix and the trailing date.
+    For the first number the display span covers the whole "<prefix> Circular No. <n>" label;
+    for the grouped numbers it covers just the bare number.
+    """
+
+    prefix: str
+    is_letter: bool
+    number: int
+    year: int | None
+    label_start: int
+    label_end: int
+
+
+def _grouped_numbers(match: re.Match) -> list[tuple[int, int, int]]:
+    """Return (number, start, end) spans for the primary and grouped numbers in a match."""
+    numbers = [(int(match.group("number")), match.start("number"), match.end("number"))]
+    more = match.group("more")
+    if more:
+        base = match.start("more")
+        for item in re.finditer(r"\d{1,3}", more):
+            numbers.append((int(item.group()), base + item.start(), base + item.end()))
+    return numbers
+
+
+def iter_circular_references(text: str):
+    """Yield a CircularReference for every individual circular number mentioned in `text`.
+
+    Used by both inline-link rendering and relationship resolution so the two paths share
+    identical reference parsing and year inference.
+    """
+    for match in CIRCULAR_REFERENCE_RE.finditer(text):
+        prefix = match.group("prefix").upper()
+        is_letter = bool(match.group("letter"))
+        explicit_year = int(match.group("year")) if match.group("year") else None
+        year = explicit_year or _nearby_dated_year(text, match.end())
+        for index, (number, num_start, num_end) in enumerate(_grouped_numbers(match)):
+            label_start = match.start() if index == 0 else num_start
+            yield CircularReference(prefix, is_letter, number, year, label_start, num_end)
+
+
+def infer_reference_year(
+    content_text: str | None,
+    prefix: str,
+    is_letter: bool,
+    number: int,
+) -> int | None:
+    """Infer the year of a circular reference from where it is mentioned in `content_text`."""
+    for reference in iter_circular_references(content_text or ""):
+        if (
+            reference.prefix == prefix
+            and reference.is_letter == is_letter
+            and reference.number == number
+        ):
+            return reference.year
+    return None
+
+
+def resolve_reference_in_context(
+    db: Session,
+    current: Circular,
+    reference_text: str,
+) -> Circular | None:
+    """Resolve a free-text circular reference, inferring the year from `current`'s content.
+
+    Mirrors inline-link resolution: a bare reference like "DMMD Circular no. 20" is
+    disambiguated by the year of the nearby "dated ..." text in the source content, so
+    relationship targets resolve to the same circular the inline link points to.
+    """
+    parts = _reference_parts(reference_text)
+    if not parts:
+        return None
+    if parts["year"] is None:
+        # Prefer a year written into the reference itself ("... dated May 08, 2003",
+        # "... of October 8, 2008"), then fall back to inferring it from where the
+        # reference is mentioned in the source content.
+        embedded = re.search(r"\b(?:19|20)\d{2}\b", reference_text)
+        year = int(embedded.group()) if embedded else infer_reference_year(
+            current.content_text, parts["prefix"], parts["is_letter"], parts["number"]
+        )
+        parts = {**parts, "year": year}
+    return _resolve_circular_reference_from_parts(parts, current, db)
+
+
 def _link_plain_circular_references(soup: BeautifulSoup, circular: Circular, db: Session) -> None:
-    resolved: dict[str, Circular | None] = {}
+    resolved: dict[tuple, Circular | None] = {}
     for text_node in list(soup.find_all(string=CIRCULAR_REFERENCE_RE)):
         parent = text_node.parent
         if parent and parent.name in {"a", "script", "style", "textarea"}:
@@ -145,27 +241,33 @@ def _link_plain_circular_references(soup: BeautifulSoup, circular: Circular, db:
         text = str(text_node)
         replacements = []
         last_end = 0
-        for match in CIRCULAR_REFERENCE_RE.finditer(text):
-            reference_text = match.group(0)
-            inferred_year = _nearby_dated_year(text, match.end())
-            normalized_reference = re.sub(r"\s+", " ", reference_text).strip().lower()
-            key = f"{normalized_reference}|{inferred_year or ''}"
+        for reference in iter_circular_references(text):
+            key = (reference.prefix, reference.is_letter, reference.number, reference.year)
             if key not in resolved:
-                resolved[key] = _resolve_circular_reference(reference_text, circular, db, inferred_year)
+                resolved[key] = _resolve_circular_reference_from_parts(
+                    {
+                        "prefix": reference.prefix,
+                        "is_letter": reference.is_letter,
+                        "number": reference.number,
+                        "year": reference.year,
+                    },
+                    circular,
+                    db,
+                )
             target = resolved[key]
             if not target:
                 continue
 
-            if match.start() > last_end:
-                replacements.append(NavigableString(text[last_end:match.start()]))
+            if reference.label_start > last_end:
+                replacements.append(NavigableString(text[last_end:reference.label_start]))
             anchor = soup.new_tag("a", href=f"/circulars/{target.id}")
             anchor["class"] = "document-pill circular-reference-pill"
             anchor["data-document-link"] = "true"
             anchor["data-document-kind"] = "circular"
             anchor["title"] = target.title
-            anchor.string = reference_text
+            anchor.string = text[reference.label_start:reference.label_end]
             replacements.append(anchor)
-            last_end = match.end()
+            last_end = reference.label_end
 
         if not replacements:
             continue

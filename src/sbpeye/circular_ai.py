@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from .ai import get_ai_client
 from .database import SessionLocal
+from .link_routing import resolve_reference_in_context
 from .models import AIGenerationJob, Circular, CircularRelationship
 
 
@@ -13,10 +14,16 @@ GENERATION_FEATURES = ("summary", "tags", "checklist", "relationships")
 GENERATION_ACTIONS = (*GENERATION_FEATURES, "all")
 
 
-def _resolve_reference(db: Session, reference: str) -> Circular | None:
+def _resolve_reference(
+    db: Session, reference: str, current: Circular | None = None
+) -> Circular | None:
     reference = reference.strip()
     if not reference:
         return None
+    if current is not None:
+        target = resolve_reference_in_context(db, current, reference)
+        if target is not None:
+            return target
     matches = db.query(Circular).filter(
         or_(
             Circular.reference.ilike(f"%{reference}%"),
@@ -80,7 +87,7 @@ def _compute_outputs(
     return outputs
 
 
-def _persist_outputs(db: Session, circular: Circular, outputs: dict) -> None:
+def _persist_outputs(db: Session, circular: Circular, outputs: dict, client=None) -> None:
     generated_at = datetime.utcnow()
     if "summary" in outputs:
         circular.summary = outputs["summary"]
@@ -98,13 +105,16 @@ def _persist_outputs(db: Session, circular: Circular, outputs: dict) -> None:
         relationships = outputs["relationships"]
         for relationship_type in ("amends", "supersedes", "cancels", "adds_to", "clarifies"):
             for target_reference in relationships.get(relationship_type, []):
-                target = _resolve_reference(db, str(target_reference))
+                target = _resolve_reference(db, str(target_reference), current=circular)
                 db.add(CircularRelationship(
                     source_id=circular.id,
                     target_id=target.id if target else None,
                     target_reference=str(target_reference),
                     type=relationship_type,
                 ))
+        if client is not None:
+            from .supersession import apply_blanket_supersession
+            apply_blanket_supersession(db, client, circular, relationships)
         circular.relationships_generated_at = generated_at
         db.flush()
         _recompute_statuses(db)
@@ -142,7 +152,7 @@ def run_generation_job(job_id: str) -> None:
             job.feature,
             progress_callback=update_progress,
         )
-        _persist_outputs(db, circular, outputs)
+        _persist_outputs(db, circular, outputs, client=client)
         job.status = "succeeded"
         if "checklist" in outputs:
             job.result_status = outputs["checklist"].get("status")

@@ -1954,13 +1954,6 @@ a {
   gap: 0.28rem;
 }
 
-.intelligence-pills {
-  display: flex;
-  align-items: center;
-  gap: 0.28rem;
-  flex-wrap: wrap;
-}
-
 .intelligence-pill {
   display: inline-flex;
   align-items: center;
@@ -1996,23 +1989,96 @@ a {
   font-weight: 500;
 }
 
-.relationship-pill {
-  font: inherit;
-  cursor: pointer;
+.relationship-groups {
+  display: grid;
+  gap: 0.5rem;
 }
 
-.relationship-pill strong {
-  color: var(--sbp-green);
-  font-size: 0.65rem;
+.relationship-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.28rem;
+}
+
+.relationship-group-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.12rem 0.42rem;
+  border-radius: 999px;
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
+  color: var(--sbp-green-strong);
+  background: color-mix(in srgb, var(--sbp-green) 14%, var(--sbp-surface));
+  border: 1px solid color-mix(in srgb, var(--sbp-green) 30%, transparent);
 }
 
-.relationship-pill.incoming-pill strong {
+.relationship-group-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.1rem;
+  padding: 0 0.2rem;
+  border-radius: 999px;
+  font-size: 0.58rem;
+  color: var(--sbp-surface);
+  background: color-mix(in srgb, var(--sbp-green-strong) 80%, var(--sbp-text));
+}
+
+.relationship-group.incoming .relationship-group-chip {
   color: var(--sbp-gold);
+  background: color-mix(in srgb, var(--sbp-gold) 12%, var(--sbp-surface));
+  border-color: color-mix(in srgb, var(--sbp-gold) 30%, transparent);
 }
 
-.relationship-pill:disabled {
+.relationship-group.incoming .relationship-group-count {
+  background: color-mix(in srgb, var(--sbp-gold) 75%, var(--sbp-text));
+}
+
+.relationship-ref-pill {
+  font-size: 0.7rem;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.relationship-ref-pill:not(:disabled):hover {
+  border-color: var(--sbp-green);
+  background: color-mix(in srgb, var(--sbp-green) 8%, var(--sbp-subtle));
+}
+
+.relationship-ref-pill:not(:disabled):focus-visible {
+  outline: 2px solid var(--sbp-green);
+  outline-offset: 2px;
+}
+
+.relationship-group.incoming .relationship-ref-pill:not(:disabled):hover {
+  border-color: var(--sbp-gold);
+  background: color-mix(in srgb, var(--sbp-gold) 8%, var(--sbp-subtle));
+}
+
+.relationship-ref-pill:disabled {
   cursor: default;
+  opacity: 0.6;
+}
+
+.relationship-show-more {
+  padding: 0.18rem 0.42rem;
+  border: 1px dashed var(--sbp-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--sbp-text-muted, var(--sbp-text));
+  font-size: 0.66rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.relationship-show-more:hover {
+  border-color: var(--sbp-green);
+  color: var(--sbp-green-strong);
 }
 
 .compact-checklist {

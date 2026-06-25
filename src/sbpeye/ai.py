@@ -852,13 +852,28 @@ SOURCE BLOCK:
         }
 
     def extract_relationships(self, title: str, reference: str, content_text: str) -> dict:
-        system = "You are a financial regulations analyst. Extract any mentions of this circular relating to previous circulars — whether it amends, supersedes, cancels, adds to, or clarifies them. Return ONLY valid JSON with these keys: 'amends' (list of reference strings), 'supersedes' (list), 'cancels' (list), 'adds_to' (list), 'clarifies' (list). Each reference string should be as close to the original format as possible, e.g. 'BPRD Circular No. 12 of 2023'."
+        system = (
+            "You are a financial regulations analyst. Extract any mentions of this circular relating to "
+            "previous circulars — whether it amends, supersedes, cancels, adds to, or clarifies them. Return "
+            "ONLY valid JSON with these keys: 'amends' (list of reference strings), 'supersedes' (list), "
+            "'cancels' (list), 'adds_to' (list), 'clarifies' (list). Each reference string should be as close "
+            "to the original format as possible, e.g. 'BPRD Circular No. 12 of 2023'.\n"
+            "Also detect BLANKET supersession: when the circular supersedes, withdraws, repeals, or "
+            "consolidates ALL previous/earlier instructions on a subject WITHOUT naming specific circulars "
+            "(e.g. 'This will supersede all previous instructions issued on the subject', 'all earlier "
+            "instructions stand withdrawn', 'consolidated the existing instructions on the subject'). In that "
+            "case set 'supersedes_all_previous' to true and set 'subject' to a short noun phrase naming that "
+            "subject (e.g. 'Cash Reserve Requirement'). If there is no such blanket clause, set "
+            "'supersedes_all_previous' to false and 'subject' to an empty string."
+        )
         truncated = content_text[: self.config.max_context_tokens] if len(content_text) > self.config.max_context_tokens else content_text
         user = f"Title: {title}\nReference: {reference}\n\nContent:\n{truncated}"
         relationship_properties = {
             key: {"type": "array", "items": {"type": "string"}}
             for key in ("amends", "supersedes", "cancels", "adds_to", "clarifies")
         }
+        relationship_properties["supersedes_all_previous"] = {"type": "boolean"}
+        relationship_properties["subject"] = {"type": "string"}
         result = self._complete(
             system,
             user,
@@ -882,7 +897,67 @@ SOURCE BLOCK:
             if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
                 raise ValueError(f"The model returned invalid {key} relationships.")
             relationships[key] = values
+        relationships["supersedes_all_previous"] = bool(parsed.get("supersedes_all_previous", False))
+        subject = parsed.get("subject", "")
+        relationships["subject"] = subject.strip() if isinstance(subject, str) else ""
         return relationships
+
+    def select_superseded(
+        self,
+        current_title: str,
+        subject: str,
+        candidates: list[dict],
+    ) -> list[str]:
+        """Given a blanket supersession on `subject`, decide which candidate circulars it covers.
+
+        `candidates` is a list of {"id", "title", "date", "snippet"} dicts. Returns the subset of
+        candidate ids that genuinely concern the same subject and are therefore superseded.
+        """
+        if not candidates:
+            return []
+        system = (
+            "You are a financial regulations analyst. A newer circular supersedes ALL previous "
+            "instructions on a stated subject. From the list of older candidate circulars, identify "
+            "ONLY those that concern the SAME subject and are therefore superseded. Be strict: include a "
+            "candidate only if its title/content clearly addresses the same subject. Exclude circulars on "
+            "merely adjacent or broader topics. Return ONLY valid JSON: "
+            '{"superseded_ids": [list of candidate id strings]}.'
+        )
+        lines = [
+            f"Superseding circular title: {current_title}",
+            f"Subject superseded: {subject}",
+            "",
+            "Candidates (older circulars):",
+        ]
+        for candidate in candidates:
+            entry = f"- id={candidate['id']} | date={candidate.get('date', '')} | title={candidate['title']}"
+            snippet = candidate.get("snippet")
+            if snippet:
+                entry += f" | snippet={snippet}"
+            lines.append(entry)
+        valid_ids = [candidate["id"] for candidate in candidates]
+        result = self._complete(
+            system,
+            "\n".join(lines),
+            temperature=0.0,
+            json_schema={
+                "type": "object",
+                "properties": {
+                    "superseded_ids": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["superseded_ids"],
+                "additionalProperties": False,
+            },
+        )
+        try:
+            parsed = json.loads(result)
+        except json.JSONDecodeError as exc:
+            raise ValueError("The model returned invalid JSON for superseded selection.") from exc
+        selected = parsed.get("superseded_ids", []) if isinstance(parsed, dict) else []
+        if not isinstance(selected, list):
+            return []
+        allowed = set(valid_ids)
+        return [str(item) for item in selected if str(item) in allowed]
 
     def _execute_tool(
         self,

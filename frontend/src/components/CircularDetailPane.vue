@@ -5,6 +5,7 @@ import { useToast } from 'primevue/usetoast'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import Button from 'primevue/button'
+import Dialog from 'primevue/dialog'
 import Message from 'primevue/message'
 import Popover from 'primevue/popover'
 import ProgressSpinner from 'primevue/progressspinner'
@@ -29,6 +30,7 @@ import {
 } from '@/lib/api'
 
 const PdfPreviewDialog = defineAsyncComponent(() => import('@/components/PdfPreviewDialog.vue'))
+const CircularGraph = defineAsyncComponent(() => import('@/components/CircularGraph.vue'))
 
 type PreviewAttachment = Pick<CircularAttachment, 'id' | 'filename' | 'file_type'>
 
@@ -56,6 +58,7 @@ const selectedAttachment = ref<PreviewAttachment | null>(null)
 const summaryExpanded = ref(false)
 const generationPopover = ref<InstanceType<typeof Popover> | null>(null)
 const activeJob = ref<AIGenerationJob | null>(null)
+const graphVisible = ref(false)
 let pollTimer: ReturnType<typeof setTimeout> | null = null
 let pollEpoch = 0
 
@@ -94,6 +97,39 @@ function relationshipLabel(value?: string | null): string {
   return (value || 'Related').replace(/[_-]+/g, ' ').replace(/\b\w/g, (match) => match.toUpperCase())
 }
 
+const INCOMING_LABELS: Record<string, string> = {
+  supersedes: 'Superseded by',
+  amends: 'Amended by',
+  cancels: 'Cancelled by',
+  clarifies: 'Clarified by',
+  adds_to: 'Added to by',
+}
+
+const TYPE_ORDER = ['supersedes', 'amends', 'cancels', 'clarifies', 'adds_to']
+const COLLAPSE_THRESHOLD = 12
+
+interface RelationGroupItem {
+  id: string | null
+  label: string
+}
+
+interface RelationGroup {
+  key: string
+  direction: 'outgoing' | 'incoming'
+  type: string
+  label: string
+  items: RelationGroupItem[]
+}
+
+const expandedGroups = ref<Set<string>>(new Set())
+
+function toggleGroup(key: string) {
+  const next = new Set(expandedGroups.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  expandedGroups.value = next
+}
+
 function relationTarget(relation: CircularRelationship, direction: 'outgoing' | 'incoming'): CircularRelationshipTarget | null {
   return direction === 'incoming' ? relation.source || null : relation.target || null
 }
@@ -102,6 +138,53 @@ function unresolvedReference(relation: CircularRelationship, direction: 'outgoin
   return direction === 'incoming'
     ? relation.source_id || 'Unresolved source circular'
     : relation.target_reference || relation.target_id || 'Unresolved target circular'
+}
+
+function buildGroups(relations: CircularRelationship[], direction: 'outgoing' | 'incoming'): RelationGroup[] {
+  const groups = new Map<string, RelationGroup>()
+  for (const relation of relations) {
+    const type = relation.type || 'related'
+    const key = `${direction}:${type}`
+    let group = groups.get(key)
+    if (!group) {
+      group = {
+        key,
+        direction,
+        type,
+        label: direction === 'incoming' ? INCOMING_LABELS[type] ?? relationshipLabel(type) : relationshipLabel(type),
+        items: [],
+      }
+      groups.set(key, group)
+    }
+    const target = relationTarget(relation, direction)
+    group.items.push({
+      id: target?.id ?? null,
+      label: target?.reference || target?.title || unresolvedReference(relation, direction),
+    })
+  }
+  return [...groups.values()]
+}
+
+const relationshipGroups = computed<RelationGroup[]>(() => {
+  const relationships = circular.value?.relationships
+  if (!relationships) return []
+  const groups = [
+    ...buildGroups(relationships.outgoing, 'outgoing'),
+    ...buildGroups(relationships.incoming, 'incoming'),
+  ]
+  const rank = (type: string) => {
+    const index = TYPE_ORDER.indexOf(type)
+    return index === -1 ? TYPE_ORDER.length : index
+  }
+  return groups.sort((a, b) => {
+    if (a.direction !== b.direction) return a.direction === 'outgoing' ? -1 : 1
+    return rank(a.type) - rank(b.type)
+  })
+})
+
+function visibleItems(group: RelationGroup): RelationGroupItem[] {
+  if (expandedGroups.value.has(group.key) || group.items.length <= COLLAPSE_THRESHOLD) return group.items
+  return group.items.slice(0, COLLAPSE_THRESHOLD)
 }
 
 function openRelationship(id?: string | null) {
@@ -153,6 +236,14 @@ function generationLabel(feature: GenerationFeature, label: string): string {
 }
 
 const allGenerated = computed(() => generationFeatures.every(({ feature }) => hasGenerated(feature)))
+const hasRelationships = computed(() =>
+  Boolean(circular.value?.relationships.outgoing.length || circular.value?.relationships.incoming.length),
+)
+
+function navigateFromGraph(id: string) {
+  graphVisible.value = false
+  void router.push({ path: `/circulars/${id}`, query: router.currentRoute.value.query })
+}
 
 function stopPolling() {
   pollEpoch += 1
@@ -219,6 +310,7 @@ async function loadCircular() {
   stopPolling()
   activeJob.value = null
   summaryExpanded.value = false
+  expandedGroups.value = new Set()
   loading.value = true
   sourceLoading.value = true
   errorMessage.value = ''
@@ -339,6 +431,16 @@ onBeforeUnmount(stopPolling)
               title="View on SBP website"
             />
             <Button icon="pi pi-refresh" text rounded severity="secondary" :loading="refreshingSource" aria-label="Refresh from SBP" title="Refresh local copy from SBP" @click="refreshFromSbp" />
+            <Button
+              v-if="hasRelationships"
+              icon="pi pi-sitemap"
+              text
+              rounded
+              severity="secondary"
+              aria-label="View relationship graph"
+              title="Related circulars"
+              @click="graphVisible = true"
+            />
             <Button icon="pi pi-comments" text rounded severity="contrast" aria-label="Open in chat" title="Open in chat" @click="handoffToChat" />
           </div>
         </div>
@@ -398,31 +500,37 @@ onBeforeUnmount(stopPolling)
         v-if="circular.relationships.outgoing.length || circular.relationships.incoming.length"
         class="detail-section intelligence-section"
       >
-        <div v-if="circular.relationships.outgoing.length || circular.relationships.incoming.length" class="pill-group">
+        <div class="pill-group">
           <h2>Relationships</h2>
-          <div class="intelligence-pills">
-            <button
-              v-for="relation in circular.relationships.outgoing"
-              :key="`out-${relation.type}-${relation.target_id || relation.target_reference}`"
-              type="button"
-              class="intelligence-pill relationship-pill"
-              :disabled="!relationTarget(relation, 'outgoing')?.id"
-              @click="openRelationship(relationTarget(relation, 'outgoing')?.id)"
+          <div class="relationship-groups">
+            <div
+              v-for="group in relationshipGroups"
+              :key="group.key"
+              class="relationship-group"
+              :class="{ incoming: group.direction === 'incoming' }"
             >
-              <strong>{{ relationshipLabel(relation.type) }}</strong>
-              {{ relationTarget(relation, 'outgoing')?.reference || relationTarget(relation, 'outgoing')?.title || unresolvedReference(relation, 'outgoing') }}
-            </button>
-            <button
-              v-for="relation in circular.relationships.incoming"
-              :key="`in-${relation.type}-${relation.source_id}`"
-              type="button"
-              class="intelligence-pill relationship-pill incoming-pill"
-              :disabled="!relationTarget(relation, 'incoming')?.id"
-              @click="openRelationship(relationTarget(relation, 'incoming')?.id)"
-            >
-              <strong>{{ relationshipLabel(relation.type) }}</strong>
-              {{ relationTarget(relation, 'incoming')?.reference || relationTarget(relation, 'incoming')?.title || unresolvedReference(relation, 'incoming') }}
-            </button>
+              <span class="relationship-group-chip">
+                {{ group.label }}<span class="relationship-group-count">{{ group.items.length }}</span>
+              </span>
+              <button
+                v-for="(item, index) in visibleItems(group)"
+                :key="`${group.key}-${index}`"
+                type="button"
+                class="intelligence-pill relationship-ref-pill"
+                :disabled="!item.id"
+                @click="openRelationship(item.id)"
+              >
+                {{ item.label }}
+              </button>
+              <button
+                v-if="group.items.length > COLLAPSE_THRESHOLD"
+                type="button"
+                class="relationship-show-more"
+                @click="toggleGroup(group.key)"
+              >
+                {{ expandedGroups.has(group.key) ? 'Show less' : `+${group.items.length - COLLAPSE_THRESHOLD} more` }}
+              </button>
+            </div>
           </div>
         </div>
       </section>
@@ -463,5 +571,17 @@ onBeforeUnmount(stopPolling)
       :title="selectedAttachment.filename"
       :document-id="selectedAttachment.id"
     />
+
+    <Dialog
+      v-if="circular"
+      v-model:visible="graphVisible"
+      :header="`Related — ${circular.reference || circular.title}`"
+      modal
+      :style="{ width: '90vw', maxWidth: '1100px', height: '75vh' }"
+      :content-style="{ height: 'calc(75vh - 60px)', padding: 0 }"
+      :draggable="false"
+    >
+      <CircularGraph :circular="circular" @navigate="navigateFromGraph" />
+    </Dialog>
   </aside>
 </template>

@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@primeuix/themes": "^1.0",
+    "@vue-flow/core": "^1.48.2",
     "dompurify": "^3.4.10",
     "marked": "^15",
     "pdfjs-dist": "^6.0.227",
@@ -27,5 +28,10 @@
     "typescript": "~5.8",
     "vite": "^6.3",
     "vue-tsc": "^2.2"
+  },
+  "allowScripts": {
+    "@vue-flow/core@1.48.2": true,
+    "vue-demi@0.14.10": true,
+    "esbuild@0.25.12": true
   }
 }

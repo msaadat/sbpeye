@@ -388,36 +388,57 @@ def resolve_targets(verbose):
 
 
 @circulars.command()
-@click.argument("circular_id")
+@click.argument("circular_id", required=False)
 @click.option("--depth", type=int, default=0, help="Max hops from seed (0=unlimited)")
+@click.option("--limit", "-l", type=int, default=0, help="Max circulars to process (0=unlimited)")
 @click.option("--refresh", is_flag=True, help="Re-extract even if relationships already exist")
 @click.option("--verbose", "-v", is_flag=True, help="Print each extracted relationship")
 @click.option("--delay", type=float, default=1.5, help="Delay between API calls in seconds")
-def graph(circular_id, depth, refresh, verbose, delay):
-    """Generate relationships for a circular and all transitively related circulars.
+def graph(circular_id, depth, limit, refresh, verbose, delay):
+    """Generate relationships for circular graph expansion.
 
-    Runs BFS starting from CIRCULAR_ID, extracting relationships at each hop and
-    expanding to newly discovered neighbors until the full reachable graph is covered
-    (or --depth hops are exhausted).
+    With CIRCULAR_ID, runs BFS from that seed, extracting relationships at each hop
+    and expanding to newly discovered neighbors until the full reachable graph is
+    covered (or --depth hops are exhausted).
+
+    Without CIRCULAR_ID, processes all circulars that have not already had
+    relationships generated. Use --limit to process them in batches.
     """
     db = SessionLocal()
     try:
         client = get_ai_client(db)
-        seed = db.get(Circular, circular_id)
-        if not seed:
-            raise click.ClickException(f"Circular not found: {circular_id}")
-
-        print(f"Graph expansion from: {seed.reference or seed.title}")
+        if circular_id:
+            seed = db.get(Circular, circular_id)
+            if not seed:
+                raise click.ClickException(f"Circular not found: {circular_id}")
+            seeds = [seed]
+            print(f"Graph expansion from: {seed.reference or seed.title}")
+        else:
+            query = db.query(Circular).filter(
+                Circular.content_text.is_not(None),
+                Circular.content_text != "",
+            )
+            if not refresh:
+                query = query.filter(Circular.relationships_generated_at.is_(None))
+            seeds = query.order_by(Circular.date.desc()).all()
+            print(f"Graph expansion for {len(seeds)} circular(s)")
+            if not refresh:
+                print("Mode: ungraphed only")
         if depth:
             print(f"Max depth: {depth}")
+        if limit:
+            print(f"Process limit: {limit}")
 
-        queue: list[tuple[str, int]] = [(seed.id, 0)]
+        queue: list[tuple[str, int]] = [(seed.id, 0) for seed in seeds]
         visited: set[str] = set()
         processed = 0
         skipped = 0
         total_rels = 0
 
         while queue:
+            if limit > 0 and processed >= limit:
+                break
+
             current_id, current_depth = queue.pop(0)
             if current_id in visited:
                 continue
@@ -433,9 +454,7 @@ def graph(circular_id, depth, refresh, verbose, delay):
             depth_tag = f"[d{current_depth}] " if current_depth else ""
             label = circular.reference or circular.title[:60]
 
-            already_done = db.query(CircularRelationship).filter(
-                CircularRelationship.source_id == current_id
-            ).count() > 0
+            already_done = circular.relationships_generated_at is not None
 
             if already_done and not refresh:
                 skipped += 1
@@ -506,7 +525,10 @@ def graph(circular_id, depth, refresh, verbose, delay):
         _recompute_statuses(db)
         db.commit()
 
-        print(f"\nDone. Seed: {seed.reference or seed.title}")
+        if circular_id:
+            print(f"\nDone. Seed: {seeds[0].reference or seeds[0].title}")
+        else:
+            print("\nDone. Batch graph expansion complete.")
         print(f"  Graph nodes visited:   {len(visited)}")
         print(f"  Circulars processed:   {processed}")
         print(f"  Skipped (cached):      {skipped}")

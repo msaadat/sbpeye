@@ -59,6 +59,7 @@ const summaryExpanded = ref(false)
 const generationPopover = ref<InstanceType<typeof Popover> | null>(null)
 const activeJob = ref<AIGenerationJob | null>(null)
 const graphVisible = ref(false)
+const detailTab = ref<'document' | 'details'>('document')
 let pollTimer: ReturnType<typeof setTimeout> | null = null
 let pollEpoch = 0
 
@@ -295,6 +296,14 @@ const allGenerated = computed(() => generationFeatures.every(({ feature }) => ha
 const hasRelationships = computed(() =>
   Boolean(circular.value?.relationships.outgoing.length || circular.value?.relationships.incoming.length),
 )
+const hasIntelligence = computed(() =>
+  Boolean(
+    circular.value?.summary ||
+      hasRelationships.value ||
+      entityGroups.value.length ||
+      circular.value?.attachments.length,
+  ),
+)
 
 function navigateFromGraph(id: string) {
   graphVisible.value = false
@@ -366,6 +375,7 @@ async function loadCircular() {
   stopPolling()
   activeJob.value = null
   summaryExpanded.value = false
+  detailTab.value = 'document'
   expandedGroups.value = new Set()
   loading.value = true
   sourceLoading.value = true
@@ -434,7 +444,7 @@ onBeforeUnmount(stopPolling)
 
     <Message v-else-if="errorMessage" severity="error" :closable="false">{{ errorMessage }}</Message>
 
-    <div v-else-if="circular" class="detail-pane-scroll">
+    <div v-else-if="circular" class="detail-pane-layout">
       <header class="detail-document-header">
         <div class="detail-header-topline">
           <div class="detail-badges">
@@ -540,117 +550,153 @@ onBeforeUnmount(stopPolling)
         </div>
       </Popover>
 
-      <section v-if="circular.summary" class="detail-section summary-section">
-        <h2>
-          <button
-            type="button"
-            class="collapsible-heading"
-            :aria-expanded="summaryExpanded"
-            @click="summaryExpanded = !summaryExpanded"
-          >
-            <span class="section-label"><i class="pi pi-align-left section-icon" />Summary</span>
-            <i :class="summaryExpanded ? 'pi pi-chevron-up' : 'pi pi-chevron-down'" />
-          </button>
-        </h2>
-        <div
-          v-show="summaryExpanded"
-          class="detail-copy markdown-body summary-markdown"
-          v-html="renderMarkdown(circular.summary)"
-        />
-      </section>
+      <div v-if="hasIntelligence" class="detail-tabbar" role="tablist" aria-label="Detail view">
+        <button
+          type="button"
+          role="tab"
+          :aria-selected="detailTab === 'document'"
+          :class="{ active: detailTab === 'document' }"
+          @click="detailTab = 'document'"
+        >
+          <i class="pi pi-file" />Document
+        </button>
+        <button
+          type="button"
+          role="tab"
+          :aria-selected="detailTab === 'details'"
+          :class="{ active: detailTab === 'details' }"
+          @click="detailTab = 'details'"
+        >
+          <i class="pi pi-sparkles" />Details
+        </button>
+      </div>
 
-      <section
-        v-if="circular.relationships.outgoing.length || circular.relationships.incoming.length"
-        class="detail-section intelligence-section"
-      >
-        <div class="pill-group">
-          <h2><i class="pi pi-sitemap section-icon" />Relationships</h2>
-          <div class="relationship-groups">
-            <div
-              v-for="group in relationshipGroups"
-              :key="group.key"
-              class="relationship-group"
-              :class="{ incoming: group.direction === 'incoming' }"
-            >
-              <span class="relationship-group-chip">
-                {{ group.label }}<span class="relationship-group-count">{{ group.items.length }}</span>
-              </span>
+      <div class="detail-body" :data-tab="detailTab">
+        <div class="detail-main">
+          <section v-if="sourceLoading || sourceError || (source?.type === 'html' && source.content) || isPdf" class="detail-section source-section">
+            <Message v-if="sourceError" severity="warn" :closable="false">{{ sourceError }}</Message>
+            <div v-if="sourceLoading" class="preview-loading compact-loading"><ProgressSpinner /><span>Loading source</span></div>
+            <div v-else-if="source?.type === 'html' && source.content" class="source-frame">
+              <div class="sbp-source-content" v-html="source.content" @click="handleSourceClick" />
+            </div>
+            <button v-else-if="isPdf" type="button" class="pdf-source-compact" @click="pdfDialogVisible = true">
+              <i class="pi pi-file-pdf" /><span><strong>PDF source</strong><small>Open the document preview</small></span><i class="pi pi-angle-right" />
+            </button>
+          </section>
+          <div v-else class="detail-section detail-source-empty">
+            <i class="pi pi-file-o" />
+            <span>No source content available for this circular.</span>
+          </div>
+        </div>
+
+        <aside v-if="hasIntelligence" class="detail-rail" aria-label="Circular intelligence">
+          <section v-if="circular.summary" class="detail-section summary-section">
+            <h2>
               <button
-                v-for="(item, index) in visibleItems(group)"
-                :key="`${group.key}-${index}`"
                 type="button"
-                class="intelligence-pill relationship-ref-pill"
-                :disabled="!item.id"
-                @click="openRelationship(item.id)"
+                class="collapsible-heading"
+                :aria-expanded="summaryExpanded"
+                @click="summaryExpanded = !summaryExpanded"
               >
-                {{ item.label }}
+                <span class="section-label"><i class="pi pi-align-left section-icon" />Summary</span>
+                <i :class="summaryExpanded ? 'pi pi-chevron-up' : 'pi pi-chevron-down'" />
               </button>
+            </h2>
+            <div
+              v-show="summaryExpanded"
+              class="detail-copy markdown-body summary-markdown"
+              v-html="renderMarkdown(circular.summary)"
+            />
+          </section>
+
+          <section
+            v-if="circular.relationships.outgoing.length || circular.relationships.incoming.length"
+            class="detail-section intelligence-section"
+          >
+            <div class="pill-group">
+              <h2><i class="pi pi-sitemap section-icon" />Relationships</h2>
+              <div class="relationship-groups">
+                <div
+                  v-for="group in relationshipGroups"
+                  :key="group.key"
+                  class="relationship-group"
+                  :class="{ incoming: group.direction === 'incoming' }"
+                >
+                  <span class="relationship-group-chip">
+                    {{ group.label }}<span class="relationship-group-count">{{ group.items.length }}</span>
+                  </span>
+                  <button
+                    v-for="(item, index) in visibleItems(group)"
+                    :key="`${group.key}-${index}`"
+                    type="button"
+                    class="intelligence-pill relationship-ref-pill"
+                    :disabled="!item.id"
+                    @click="openRelationship(item.id)"
+                  >
+                    {{ item.label }}
+                  </button>
+                  <button
+                    v-if="group.items.length > COLLAPSE_THRESHOLD"
+                    type="button"
+                    class="relationship-show-more"
+                    @click="toggleGroup(group.key)"
+                  >
+                    {{ expandedGroups.has(group.key) ? 'Show less' : `+${group.items.length - COLLAPSE_THRESHOLD} more` }}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section v-if="entityGroups.length" class="detail-section entities-section">
+            <h2><i class="pi pi-percentage section-icon" />Regulatory Values</h2>
+            <div class="entity-groups">
+              <div v-for="group in entityGroups" :key="group.type" class="entity-group">
+                <span class="entity-group-label">{{ group.label }}</span>
+                <ul class="entity-list">
+                  <li v-for="entity in group.items" :key="entity.id" class="entity-item">
+                    <div class="entity-line">
+                      <span class="entity-metric">{{ entity.metric || '—' }}</span>
+                      <span class="entity-value">
+                        {{ formatEntityValue(entity) }}
+                        <span v-if="entity.unit && entity.unit !== '%' && !entity.value_text?.includes(entity.unit)" class="entity-unit">{{ entity.unit }}</span>
+                      </span>
+                    </div>
+                    <div
+                      v-if="entity.subject || (entity.effective_date && entity.entity_type !== 'deadline' && entity.entity_type !== 'effective_date')"
+                      class="entity-sub"
+                    >
+                      <span v-if="entity.subject" class="entity-subject">{{ entity.subject }}</span>
+                      <span
+                        v-if="entity.effective_date && entity.entity_type !== 'deadline' && entity.entity_type !== 'effective_date'"
+                        class="entity-effective"
+                      >
+                        <i class="pi pi-calendar" /> {{ formatDate(entity.effective_date) }}
+                      </span>
+                    </div>
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </section>
+
+          <section v-if="circular.attachments.length" class="detail-section documents-section">
+            <h2><i class="pi pi-paperclip section-icon" />Documents</h2>
+            <div class="document-pills">
               <button
-                v-if="group.items.length > COLLAPSE_THRESHOLD"
+                v-for="attachment in circular.attachments"
+                :key="attachment.id"
                 type="button"
-                class="relationship-show-more"
-                @click="toggleGroup(group.key)"
+                class="document-pill"
+                @click="openAttachment(attachment)"
               >
-                {{ expandedGroups.has(group.key) ? 'Show less' : `+${group.items.length - COLLAPSE_THRESHOLD} more` }}
+                <i :class="attachment.file_type === 'pdf' ? 'pi pi-file-pdf' : 'pi pi-file'" />
+                <span>{{ attachment.filename }}</span>
               </button>
             </div>
-          </div>
-        </div>
-      </section>
-
-      <section v-if="entityGroups.length" class="detail-section entities-section">
-        <h2><i class="pi pi-percentage section-icon" />Regulatory Values</h2>
-        <div class="entity-groups">
-          <div v-for="group in entityGroups" :key="group.type" class="entity-group">
-            <span class="entity-group-label">{{ group.label }}</span>
-            <table class="entity-table">
-              <tbody>
-                <tr v-for="entity in group.items" :key="entity.id" class="entity-row">
-                  <th scope="row" class="entity-metric">{{ entity.metric || '—' }}</th>
-                  <td class="entity-value">
-                    {{ formatEntityValue(entity) }}
-                    <span v-if="entity.unit && entity.unit !== '%' && !entity.value_text?.includes(entity.unit)" class="entity-unit">{{ entity.unit }}</span>
-                  </td>
-                  <td class="entity-subject">{{ entity.subject || '' }}</td>
-                  <td class="entity-effective">
-                    <span v-if="entity.effective_date && entity.entity_type !== 'deadline' && entity.entity_type !== 'effective_date'">
-                      <i class="pi pi-calendar" /> {{ formatDate(entity.effective_date) }}
-                    </span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </section>
-
-      <section v-if="circular.attachments.length" class="detail-section documents-section">
-        <h2><i class="pi pi-paperclip section-icon" />Documents</h2>
-        <div class="document-pills">
-          <button
-            v-for="attachment in circular.attachments"
-            :key="attachment.id"
-            type="button"
-            class="document-pill"
-            @click="openAttachment(attachment)"
-          >
-            <i :class="attachment.file_type === 'pdf' ? 'pi pi-file-pdf' : 'pi pi-file'" />
-            <span>{{ attachment.filename }}</span>
-          </button>
-        </div>
-      </section>
-
-      <section v-if="sourceLoading || sourceError || (source?.type === 'html' && source.content) || isPdf" class="detail-section source-section">
-        <h2><i class="pi pi-file section-icon" />Source content</h2>
-        <Message v-if="sourceError" severity="warn" :closable="false">{{ sourceError }}</Message>
-        <div v-if="sourceLoading" class="preview-loading compact-loading"><ProgressSpinner /><span>Loading source</span></div>
-        <div v-else-if="source?.type === 'html' && source.content" class="source-frame">
-          <div class="sbp-source-content" v-html="source.content" @click="handleSourceClick" />
-        </div>
-        <button v-else-if="isPdf" type="button" class="pdf-source-compact" @click="pdfDialogVisible = true">
-          <i class="pi pi-file-pdf" /><span><strong>PDF source</strong><small>Open the document preview</small></span><i class="pi pi-angle-right" />
-        </button>
-      </section>
+          </section>
+        </aside>
+      </div>
     </div>
 
     <PdfPreviewDialog v-model:visible="pdfDialogVisible" :title="circular?.title || 'Circular'" :url="sourceUrl" />
@@ -684,54 +730,74 @@ onBeforeUnmount(stopPolling)
 
 .entity-group-label {
   display: block;
-  font-size: 0.72rem;
+  font-size: 0.64rem;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--p-text-muted-color, #6b7280);
-  margin-bottom: 0.3rem;
+  margin-bottom: 0.25rem;
 }
 
-.entity-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.85rem;
+.entity-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
 }
 
-.entity-row {
+.entity-item {
+  padding: 0.3rem 0;
   border-top: 1px solid var(--p-content-border-color, #e5e7eb);
 }
 
-.entity-row > th,
-.entity-row > td {
-  padding: 0.35rem 0.5rem 0.35rem 0;
-  text-align: left;
-  vertical-align: top;
+.entity-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.4rem;
+  font-size: 0.72rem;
+  line-height: 1.3;
 }
 
 .entity-metric {
   font-weight: 600;
-  white-space: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .entity-value {
+  flex: 0 1 auto;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
+  text-align: right;
+  overflow-wrap: anywhere;
 }
 
 .entity-unit {
   color: var(--p-text-muted-color, #6b7280);
+  font-weight: 400;
   margin-left: 0.2rem;
+}
+
+.entity-sub {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.2rem 0.5rem;
+  margin-top: 0.12rem;
+  font-size: 0.68rem;
+  line-height: 1.3;
 }
 
 .entity-subject {
   color: var(--p-text-muted-color, #4b5563);
-  width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .entity-effective {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
   color: var(--p-text-muted-color, #6b7280);
   white-space: nowrap;
-  font-size: 0.78rem;
 }
 </style>

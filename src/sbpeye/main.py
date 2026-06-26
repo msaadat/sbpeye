@@ -16,7 +16,7 @@ import uuid
 from .database import PROJECT_ROOT, engine, Base, get_db, SessionLocal, has_vector_store_data
 from .models import AIGenerationJob, Attachment, CachedDocument, SyncStatus, Circular, CircularEntity, CircularRelationship, EcoDataSeries, EcoDataEntry, Settings, ChatSession, ChatMessage, ResearchWorkspace, WorkspaceCircular
 from .search import resolve_metric_terms, search_engine
-from .ai import AIClient, AIConfig, friendly_chat_error, get_ai_client, get_provider_api_key, get_provider_definition, normalize_provider
+from .ai import AIClient, AIConfig, classify_provider_state, friendly_chat_error, get_ai_client, get_provider_api_key, get_provider_definition, normalize_provider
 from .circular_ai import GENERATION_ACTIONS, generation_job_payload, run_generation_job
 from .checklist_export import build_checklist_workbook
 from .embeddings import EmbeddingConfig, create_embedding_backend
@@ -1085,6 +1085,42 @@ async def save_settings(request: Request, db: Session = Depends(get_db)):
         "settings": _settings_payload(config, embedding),
         "context_window_detected": detected_context_window is not None,
     }
+
+
+@app.post("/api/settings/models")
+async def list_settings_models(request: Request):
+    data = await request.json()
+    provider = normalize_provider(data.get("provider", data.get("ai_provider", "lmstudio")))
+    provider_definition = get_provider_definition(provider)
+    api_key = (data.get("api_key") or data.get("ai_api_key") or "").strip()
+    if not api_key and not data.get("clear_api_key"):
+        api_key, _ = get_provider_api_key(provider)
+    config = AIConfig(
+        provider=provider,
+        base_url=(
+            data.get("base_url")
+            or data.get("ai_base_url")
+            or provider_definition.default_base_url
+        ),
+        api_key=api_key,
+        model=data.get("model", data.get("ai_model", provider_definition.default_model)),
+        chat_model=data.get("chat_model", data.get("ai_chat_model", "")),
+    )
+    try:
+        return {
+            "success": True,
+            "provider": provider,
+            "models": AIClient(config).list_models(),
+        }
+    except Exception as exc:
+        state, detail = classify_provider_state(exc)
+        return {
+            "success": False,
+            "provider": provider,
+            "state": state,
+            "error": detail,
+            "models": [],
+        }
 
 
 @app.post("/api/settings/embeddings/test")

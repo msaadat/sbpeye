@@ -8,7 +8,7 @@ import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
 import Password from 'primevue/password'
 import Select from 'primevue/select'
-import { getSettings, saveSettings, testEmbeddingConnection, testSettingsConnection } from '@/lib/api'
+import { getProviderModels, getSettings, saveSettings, testEmbeddingConnection, testSettingsConnection } from '@/lib/api'
 
 type ProviderOption = {
   name: string
@@ -18,13 +18,20 @@ type ProviderOption = {
   defaultModel: string
 }
 
+type ModelSelectOption = {
+  label: string
+  value: string
+}
+
 const toast = useToast()
 
 const loading = ref(true)
 const saving = ref(false)
 const testing = ref(false)
 const testingEmbeddings = ref(false)
+const loadingModels = ref(false)
 const loadError = ref('')
+const modelLoadError = ref('')
 
 const provider = ref('lmstudio')
 const baseUrl = ref('http://localhost:1234/v1')
@@ -44,6 +51,9 @@ const embeddingApiKeyConfigured = ref(false)
 const embeddingApiKeyEnvVar = ref('EMBEDDING_API_KEY')
 const clearEmbeddingApiKey = ref(false)
 const managedEnvFile = ref('.env.local')
+const discoveredModels = ref<ModelSelectOption[]>([])
+let modelRefreshTimer: ReturnType<typeof setTimeout> | undefined
+let modelRefreshRequestId = 0
 
 const providerOptions: ProviderOption[] = [
   { name: 'LM Studio (Local)', value: 'lmstudio', baseUrl: 'http://localhost:1234/v1', apiKeyEnvVar: 'AI_API_KEY', defaultModel: 'local-model' },
@@ -66,6 +76,19 @@ const providerMeta = Object.fromEntries(providerOptions.map((option) => [option.
 const selectedProviderMeta = computed(() => providerMeta[provider.value] ?? providerMeta.custom)
 const externalProvider = computed(() => provider.value !== 'lmstudio')
 const embeddingNeedsApiKey = computed(() => embeddingProvider.value !== 'fastembed')
+const modelOptions = computed<ModelSelectOption[]>(() => {
+  const options = new Map<string, ModelSelectOption>()
+  for (const option of discoveredModels.value) {
+    options.set(option.value, option)
+  }
+  for (const value of [model.value, chatModel.value]) {
+    const trimmed = value.trim()
+    if (trimmed && !options.has(trimmed)) {
+      options.set(trimmed, { label: trimmed, value: trimmed })
+    }
+  }
+  return Array.from(options.values())
+})
 
 watch(provider, (next, previous) => {
   const nextMeta = providerMeta[next] ?? providerMeta.custom
@@ -83,6 +106,12 @@ watch(provider, (next, previous) => {
   apiKeyConfigured.value = false
   apiKey.value = ''
   clearApiKey.value = false
+})
+
+watch([provider, baseUrl, apiKey], () => {
+  if (!loading.value) {
+    scheduleProviderModelRefresh()
+  }
 })
 
 watch(embeddingProvider, (next) => {
@@ -108,6 +137,7 @@ watch(embeddingApiKey, (value) => {
 async function loadSettings() {
   loading.value = true
   loadError.value = ''
+  let shouldRefreshModels = false
   try {
     const settings = await getSettings()
     provider.value = settings.provider
@@ -127,10 +157,87 @@ async function loadSettings() {
     embeddingApiKeyEnvVar.value = settings.embedding_api_key_env_var || 'EMBEDDING_API_KEY'
     clearEmbeddingApiKey.value = false
     managedEnvFile.value = settings.managed_env_file || '.env.local'
+    shouldRefreshModels = true
   } catch (err) {
     loadError.value = err instanceof Error ? err.message : 'Failed to load settings'
   } finally {
     loading.value = false
+  }
+  if (shouldRefreshModels) {
+    void refreshProviderModels()
+  }
+}
+
+function modelOptionLabel(modelId: string, modelName: string): string {
+  const id = modelId.trim()
+  const name = modelName.trim()
+  if (!name || name === id) {
+    return id
+  }
+  return `${name} (${id})`
+}
+
+function scheduleProviderModelRefresh() {
+  if (modelRefreshTimer) {
+    clearTimeout(modelRefreshTimer)
+  }
+  modelRefreshTimer = setTimeout(() => {
+    void refreshProviderModels()
+  }, 600)
+}
+
+async function refreshProviderModels(showToast = false) {
+  const requestId = ++modelRefreshRequestId
+  loadingModels.value = true
+  modelLoadError.value = ''
+  try {
+    const result = await getProviderModels({
+      provider: provider.value,
+      base_url: baseUrl.value,
+      api_key: apiKey.value,
+      clear_api_key: clearApiKey.value,
+      model: model.value,
+      chat_model: chatModel.value,
+    })
+    if (requestId !== modelRefreshRequestId) {
+      return
+    }
+    if (result.success) {
+      discoveredModels.value = result.models.map((item) => ({
+        label: modelOptionLabel(item.id, item.name),
+        value: item.id,
+      }))
+      if (!discoveredModels.value.length) {
+        modelLoadError.value = 'The provider did not return any models. You can still type a model ID.'
+      }
+      if (showToast) {
+        toast.add({
+          severity: 'success',
+          summary: 'Models refreshed',
+          detail: `${discoveredModels.value.length} model${discoveredModels.value.length === 1 ? '' : 's'} found`,
+          life: 3000,
+        })
+      }
+      return
+    }
+    discoveredModels.value = []
+    modelLoadError.value = result.error || 'Model discovery failed. You can still type a model ID.'
+    if (showToast) {
+      toast.add({ severity: 'error', summary: 'Model discovery failed', detail: modelLoadError.value, life: 5000 })
+    }
+  } catch (err) {
+    if (requestId !== modelRefreshRequestId) {
+      return
+    }
+    discoveredModels.value = []
+    modelLoadError.value = err instanceof Error ? err.message : 'Model discovery failed. You can still type a model ID.'
+    if (showToast) {
+      toast.add({ severity: 'error', summary: 'Model discovery failed', detail: modelLoadError.value, life: 5000 })
+    }
+  } finally {
+    if (requestId === modelRefreshRequestId) {
+      loadingModels.value = false
+    }
   }
 }
 
@@ -283,17 +390,28 @@ onMounted(() => {
           </label>
           <label>
             <span>Default model</span>
-            <InputText
+            <Select
               v-model="model"
-              placeholder="Enter the provider model ID"
+              :options="modelOptions"
+              option-label="label"
+              option-value="value"
+              editable
+              placeholder="Select or type a model ID"
+              :loading="loadingModels"
               :disabled="loading"
             />
           </label>
           <label>
             <span>Chat model</span>
-            <InputText
+            <Select
               v-model="chatModel"
+              :options="modelOptions"
+              option-label="label"
+              option-value="value"
+              editable
+              show-clear
               placeholder="Leave blank to reuse default model"
+              :loading="loadingModels"
               :disabled="loading"
             />
           </label>
@@ -310,10 +428,22 @@ onMounted(() => {
         <Message severity="secondary" :closable="false">
           Token env var: <code>{{ apiKeyEnvVar }}</code>. <span v-if="apiKeyConfigured && !clearApiKey">A token is currently saved. Leave the field blank to keep it.</span><span v-else-if="clearApiKey">The saved token will be removed on the next save.</span><span v-else>No token is currently saved for this provider.</span>
         </Message>
+        <Message v-if="modelLoadError" severity="secondary" :closable="false">
+          {{ modelLoadError }}
+        </Message>
         <Message severity="success" :closable="false">
           Saved LLM provider, URL, model, and token changes apply to the next request.
         </Message>
         <div class="button-row">
+          <Button
+            label="Refresh models"
+            icon="pi pi-refresh"
+            severity="secondary"
+            outlined
+            :loading="loadingModels"
+            :disabled="loading || saving"
+            @click="refreshProviderModels(true)"
+          />
           <Button
             v-if="apiKeyConfigured && !clearApiKey"
             label="Remove saved token"

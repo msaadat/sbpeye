@@ -348,6 +348,19 @@ export interface SettingsPayload {
   managed_env_file?: string
 }
 
+export interface ProviderModelOption {
+  id: string
+  name: string
+}
+
+export interface ProviderModelsResponse {
+  success: boolean
+  provider: string
+  models: ProviderModelOption[]
+  state?: string
+  error?: string
+}
+
 export interface ChatSession {
   id: string
   title?: string | null
@@ -669,6 +682,16 @@ export async function getSettings(): Promise<SettingsPayload> {
 
 export async function saveSettings(payload: SettingsPayload): Promise<{ message: string; settings: SettingsPayload; context_window_detected: boolean }> {
   return requestJson<{ message: string; settings: SettingsPayload; context_window_detected: boolean }>('/settings', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function getProviderModels(payload: Partial<SettingsPayload>): Promise<ProviderModelsResponse> {
+  return requestJson<ProviderModelsResponse>('/settings/models', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

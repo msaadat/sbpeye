@@ -700,6 +700,33 @@ class AIClient:
             return None
         return min(value for value in detected if value is not None)
 
+    def list_models(self) -> list[dict[str, str]]:
+        """Return provider model IDs in a normalized shape for the settings UI."""
+        response = self._client.with_options(timeout=10.0, max_retries=0).models.list()
+        models: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for item in response.data:
+            metadata = self._model_metadata(item)
+            model_id = str(
+                metadata.get("id")
+                or metadata.get("model")
+                or metadata.get("name")
+                or getattr(item, "id", "")
+                or getattr(item, "model", "")
+                or getattr(item, "name", "")
+            ).strip()
+            if not model_id or model_id in seen:
+                continue
+            seen.add(model_id)
+            label = str(
+                metadata.get("name")
+                or metadata.get("display_name")
+                or getattr(item, "name", "")
+                or model_id
+            ).strip()
+            models.append({"id": model_id, "name": label or model_id})
+        return sorted(models, key=lambda model: model["id"].lower())
+
     def _complete(
         self,
         system_prompt: str,

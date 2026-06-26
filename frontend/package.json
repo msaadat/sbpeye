@@ -15,7 +15,6 @@
     "@vue-flow/core": "^1.48.2",
     "dompurify": "^3.4.10",
     "marked": "^15",
-    "pdfjs-dist": "^6.0.227",
     "pinia": "^3.0",
     "primeicons": "^7.0",
     "primevue": "^4.3",

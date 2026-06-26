@@ -1,20 +1,10 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import Button from 'primevue/button'
 import Dialog from 'primevue/dialog'
 import Message from 'primevue/message'
 import ProgressSpinner from 'primevue/progressspinner'
-import {
-  GlobalWorkerOptions,
-  getDocument,
-  type PDFDocumentLoadingTask,
-  type PDFDocumentProxy,
-  type RenderTask,
-} from 'pdfjs-dist'
-import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.mjs?url'
-import { buildDocumentContentUrl, buildPdfProxyUrl, getPdfPreview, type PdfPreviewResponse } from '@/lib/api'
-
-GlobalWorkerOptions.workerSrc = pdfWorkerUrl
+import { buildDocumentContentUrl, buildPdfProxyUrl } from '@/lib/api'
 
 const props = defineProps<{
   visible: boolean
@@ -27,19 +17,8 @@ const emit = defineEmits<{
   'update:visible': [value: boolean]
 }>()
 
-const canvasRef = shallowRef<HTMLCanvasElement | null>(null)
-const documentRef = shallowRef<PDFDocumentProxy | null>(null)
-const loadingTaskRef = shallowRef<PDFDocumentLoadingTask | null>(null)
-const renderTaskRef = shallowRef<RenderTask | null>(null)
-const preview = ref<PdfPreviewResponse | null>(null)
 const loading = ref(false)
-const rendering = ref(false)
-const errorMessage = ref('')
-const pageNumber = ref(1)
-const pageCount = ref(0)
-const scale = ref(1.25)
-let mounted = false
-let loadEpoch = 0
+const frameKey = ref(0)
 
 const dialogVisible = computed({
   get: () => props.visible,
@@ -51,210 +30,30 @@ const pdfProxyUrl = computed(() => props.documentId
   : props.url?.startsWith('/api/') ? props.url
   : props.url ? buildPdfProxyUrl(props.url) : '')
 
-const pageLabel = computed(() => {
-  if (!pageCount.value) {
-    return 'PDF source'
-  }
+const canShowPdf = computed(() => Boolean(pdfProxyUrl.value))
 
-  return `Page ${pageNumber.value} of ${pageCount.value}`
-})
+const openPdfUrl = computed(() => pdfProxyUrl.value || '#')
 
-const fallbackImageSrc = computed(() => {
-  if (preview.value?.type !== 'image' || !preview.value.content) {
-    return ''
-  }
-
-  return `data:image/png;base64,${preview.value.content}`
-})
-
-function resetState() {
-  preview.value = null
-  errorMessage.value = ''
-  pageNumber.value = 1
-  pageCount.value = 0
+function refreshViewer() {
+  frameKey.value += 1
+  loading.value = Boolean(pdfProxyUrl.value)
 }
 
-async function cancelRender() {
-  if (!renderTaskRef.value) {
-    return
-  }
-
-  const task = renderTaskRef.value
-  renderTaskRef.value = null
-  task.cancel()
-
-  try {
-    await task.promise
-  } catch {
-    // PDF.js rejects cancelled render tasks; cancellation is expected here.
-  }
-}
-
-async function closeDocument() {
-  await cancelRender()
-
-  if (loadingTaskRef.value) {
-    await loadingTaskRef.value.destroy()
-    loadingTaskRef.value = null
-  }
-
-  documentRef.value = null
-}
-
-async function renderPage(epoch = loadEpoch) {
-  const canvas = canvasRef.value
-  const document = documentRef.value
-  if (!canvas || !document) {
-    return
-  }
-
-  await cancelRender()
-  if (epoch !== loadEpoch) return
-  rendering.value = true
-  errorMessage.value = ''
-
-  try {
-    const page = await document.getPage(pageNumber.value)
-    if (epoch !== loadEpoch) return
-    const viewport = page.getViewport({ scale: scale.value })
-    const context = canvas.getContext('2d')
-
-    if (!context) {
-      throw new Error('Canvas rendering is unavailable in this browser.')
-    }
-
-    const pixelRatio = window.devicePixelRatio || 1
-    canvas.width = Math.floor(viewport.width * pixelRatio)
-    canvas.height = Math.floor(viewport.height * pixelRatio)
-    canvas.style.width = `${Math.floor(viewport.width)}px`
-    canvas.style.height = `${Math.floor(viewport.height)}px`
-
-    context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0)
-    context.clearRect(0, 0, viewport.width, viewport.height)
-
-    const task = page.render({ canvas, canvasContext: context, viewport })
-    renderTaskRef.value = task
-    await task.promise
-  } catch (error) {
-    if (epoch === loadEpoch && (!(error instanceof Error) || error.name !== 'RenderingCancelledException')) {
-      errorMessage.value = error instanceof Error ? error.message : 'Unable to render this PDF page.'
-    }
-  } finally {
-    if (epoch === loadEpoch) {
-      renderTaskRef.value = null
-      rendering.value = false
-    }
-  }
-}
-
-async function loadPdf() {
-  const epoch = ++loadEpoch
-  if (!props.url && !props.documentId) {
-    errorMessage.value = 'No PDF URL was provided.'
-    return
-  }
-
-  await closeDocument()
-  if (epoch !== loadEpoch) return
-  resetState()
-  loading.value = true
-
-  const previewPromise = props.documentId || props.url?.startsWith('/api/') ? Promise.resolve() : getPdfPreview(props.url!)
-    .then((value) => {
-      if (epoch !== loadEpoch) return
-      preview.value = value
-      if (value.pages && !pageCount.value) {
-        pageCount.value = value.pages
-      }
-    })
-    .catch(() => undefined)
-
-  try {
-    const loadingTask = getDocument({
-      url: pdfProxyUrl.value,
-      withCredentials: false,
-    })
-    loadingTaskRef.value = loadingTask
-
-    const document = await loadingTask.promise
-    if (epoch !== loadEpoch) {
-      await loadingTask.destroy()
-      return
-    }
-    documentRef.value = document
-    pageCount.value = document.numPages
-    await nextTick()
-    await renderPage(epoch)
-  } catch (error) {
-    if (epoch === loadEpoch) {
-      errorMessage.value = error instanceof Error ? error.message : 'Unable to open this PDF.'
-    }
-  } finally {
-    await previewPromise
-    if (epoch === loadEpoch) loading.value = false
-  }
-}
-
-async function deactivatePdf() {
-  loadEpoch += 1
+function handleFrameLoad() {
   loading.value = false
-  rendering.value = false
-  await closeDocument()
 }
-
-function previousPage() {
-  if (pageNumber.value <= 1) {
-    return
-  }
-
-  pageNumber.value -= 1
-  void renderPage()
-}
-
-function nextPage() {
-  if (!pageCount.value || pageNumber.value >= pageCount.value) {
-    return
-  }
-
-  pageNumber.value += 1
-  void renderPage()
-}
-
-function zoomOut() {
-  scale.value = Math.max(0.75, Number((scale.value - 0.25).toFixed(2)))
-  void renderPage()
-}
-
-function zoomIn() {
-  scale.value = Math.min(2.5, Number((scale.value + 0.25).toFixed(2)))
-  void renderPage()
-}
-
-onMounted(() => {
-  mounted = true
-  if (props.visible) {
-    void loadPdf()
-  }
-})
 
 watch(
-  () => [props.visible, props.url, props.documentId] as const,
-  ([visible, url, documentId], previous) => {
-    if (!mounted) return
-    const [wasVisible, oldUrl, oldDocumentId] = previous
-    if (!visible) {
-      void deactivatePdf()
-    } else if (!wasVisible || url !== oldUrl || documentId !== oldDocumentId) {
-      void loadPdf()
+  () => [props.visible, pdfProxyUrl.value] as const,
+  ([visible, source]) => {
+    if (visible && source) {
+      refreshViewer()
+    } else {
+      loading.value = false
     }
   },
-  { flush: 'post' },
+  { immediate: true },
 )
-
-onBeforeUnmount(() => {
-  mounted = false
-  void deactivatePdf()
-})
 </script>
 
 <template>
@@ -267,51 +66,25 @@ onBeforeUnmount(() => {
     <div class="pdf-preview">
       <div class="pdf-preview-toolbar">
         <div class="pdf-preview-meta">
-          <span>{{ pageLabel }}</span>
-          <span v-if="preview?.pages && preview.pages !== pageCount">
-            {{ preview.pages }} pages reported by server
-          </span>
+          <span>PDF viewer</span>
         </div>
         <div class="pdf-preview-actions">
           <Button
-            icon="pi pi-chevron-left"
+            icon="pi pi-refresh"
             text
             rounded
-            :disabled="loading || rendering || pageNumber <= 1"
-            aria-label="Previous page"
-            @click="previousPage"
+            :disabled="!canShowPdf"
+            aria-label="Reload PDF"
+            title="Reload PDF"
+            @click="refreshViewer"
           />
           <Button
-            icon="pi pi-chevron-right"
-            text
-            rounded
-            :disabled="loading || rendering || !pageCount || pageNumber >= pageCount"
-            aria-label="Next page"
-            @click="nextPage"
-          />
-          <Button
-            icon="pi pi-search-minus"
-            text
-            rounded
-            :disabled="loading || rendering || scale <= 0.75"
-            aria-label="Zoom out"
-            @click="zoomOut"
-          />
-          <Button
-            icon="pi pi-search-plus"
-            text
-            rounded
-            :disabled="loading || rendering || scale >= 2.5"
-            aria-label="Zoom in"
-            @click="zoomIn"
-          />
-          <Button
-            v-if="url || documentId"
+            v-if="canShowPdf"
             as="a"
-            :href="documentId ? buildDocumentContentUrl(documentId) : url!"
+            :href="openPdfUrl"
             target="_blank"
             rel="noreferrer"
-            label="Open local file"
+            label="Open in browser"
             icon="pi pi-external-link"
             size="small"
             outlined
@@ -319,34 +92,23 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <Message v-if="errorMessage" severity="error" :closable="false">
-        {{ errorMessage }}
+      <Message v-if="!canShowPdf" severity="error" :closable="false">
+        No PDF URL was provided.
       </Message>
 
-      <div v-if="loading" class="preview-loading">
+      <div v-if="loading && canShowPdf" class="preview-loading">
         <ProgressSpinner aria-label="Loading PDF preview" />
         <span>Loading PDF preview</span>
       </div>
 
-      <div v-show="!loading && documentRef" class="pdf-canvas-shell">
-        <div v-if="rendering" class="pdf-rendering-mask">
-          <i class="pi pi-spin pi-spinner" />
-        </div>
-        <canvas ref="canvasRef" class="pdf-canvas" />
-      </div>
-
-      <template v-if="!loading && !documentRef">
-        <pre v-if="preview?.type === 'text'" class="pdf-text-preview">{{ preview.content }}</pre>
-        <img
-          v-else-if="fallbackImageSrc"
-          :src="fallbackImageSrc"
-          alt="First page preview"
-          class="pdf-image-preview"
-        >
-        <Message v-else-if="!errorMessage" severity="info" :closable="false">
-          No preview content was returned for this PDF.
-        </Message>
-      </template>
+      <iframe
+        v-if="canShowPdf"
+        :key="frameKey"
+        class="pdf-native-viewer"
+        :src="pdfProxyUrl"
+        :title="title || 'PDF preview'"
+        @load="handleFrameLoad"
+      />
     </div>
   </Dialog>
 </template>

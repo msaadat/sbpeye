@@ -140,8 +140,9 @@ function statusColor(status: string | null): string {
 }
 
 function onNodeClick({ node }: { node: Node<NodeData> }) {
-  if (node.data.circularId && !node.data.isCurrent) {
-    emit('navigate', node.data.circularId)
+  const data = node.data
+  if (data?.circularId && !data.isCurrent) {
+    emit('navigate', data.circularId)
   }
 }
 </script>

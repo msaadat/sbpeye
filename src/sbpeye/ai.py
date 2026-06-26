@@ -5,8 +5,10 @@ import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 
+import requests
 from openai import APIError, BadRequestError, OpenAI
 
 from sqlalchemy.orm import Session
@@ -178,6 +180,7 @@ class ProviderDefinition:
     label: str
     default_base_url: str
     api_key_env_vars: tuple[str, ...]
+    default_model: str = "local-model"
     default_api_key: str = ""
 
 
@@ -187,6 +190,7 @@ PROVIDER_DEFINITIONS = {
         label="LM Studio (Local)",
         default_base_url="http://localhost:1234/v1",
         api_key_env_vars=("AI_API_KEY",),
+        default_model="local-model",
         default_api_key="lm-studio",
     ),
     "openai": ProviderDefinition(
@@ -194,30 +198,42 @@ PROVIDER_DEFINITIONS = {
         label="OpenAI",
         default_base_url="https://api.openai.com/v1",
         api_key_env_vars=("OPENAI_API_KEY", "AI_API_KEY"),
+        default_model="gpt-4o-mini",
     ),
     "google": ProviderDefinition(
         value="google",
         label="Google Gemini",
         default_base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
         api_key_env_vars=("GEMINI_API_KEY", "GOOGLE_API_KEY", "AI_API_KEY"),
+        default_model="gemini-2.0-flash",
+    ),
+    "ollama": ProviderDefinition(
+        value="ollama",
+        label="Ollama Cloud",
+        default_base_url="https://ollama.com/api",
+        api_key_env_vars=("OLLAMA_API_KEY", "AI_API_KEY"),
+        default_model="gpt-oss:120b",
     ),
     "mistral": ProviderDefinition(
         value="mistral",
         label="Mistral AI",
         default_base_url="https://api.mistral.ai/v1",
         api_key_env_vars=("MISTRAL_API_KEY", "AI_API_KEY"),
+        default_model="mistral-small-latest",
     ),
     "groq": ProviderDefinition(
         value="groq",
         label="Groq",
         default_base_url="https://api.groq.com/openai/v1",
         api_key_env_vars=("GROQ_API_KEY", "AI_API_KEY"),
+        default_model="llama-3.1-8b-instant",
     ),
     "openrouter": ProviderDefinition(
         value="openrouter",
         label="OpenRouter",
         default_base_url="https://openrouter.ai/api/v1",
         api_key_env_vars=("OPENROUTER_API_KEY", "AI_API_KEY"),
+        default_model="openai/gpt-4o-mini",
     ),
     "custom": ProviderDefinition(
         value="custom",
@@ -235,6 +251,7 @@ def normalize_provider(provider: str | None) -> str:
         "lm_studio": "lmstudio",
         "mistralai": "mistral",
         "mistral_ai": "mistral",
+        "ollama_cloud": "ollama",
     }
     return aliases.get(value, value if value in PROVIDER_DEFINITIONS else "custom")
 
@@ -382,6 +399,180 @@ def get_provider_api_key(provider: str | None) -> tuple[str, str | None]:
         default=definition.default_api_key,
     )
 
+
+class OllamaCloudClient:
+    """Minimal OpenAI-shaped adapter for Ollama's native cloud API."""
+
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        timeout: float = 60.0,
+        max_retries: int = 2,
+    ):
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._chat_completion_create))
+        self.models = SimpleNamespace(list=self._models_list)
+
+    def with_options(
+        self,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+    ) -> "OllamaCloudClient":
+        return OllamaCloudClient(
+            base_url=self.base_url,
+            api_key=self.api_key,
+            timeout=self.timeout if timeout is None else timeout,
+            max_retries=self.max_retries if max_retries is None else max_retries,
+        )
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+    def _request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
+        last_exc: Exception | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = requests.request(
+                    method,
+                    f"{self.base_url}{path}",
+                    headers=self._headers(),
+                    timeout=self.timeout,
+                    **kwargs,
+                )
+                response.raise_for_status()
+                return response
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= self.max_retries:
+                    break
+                time.sleep(0.25 * (attempt + 1))
+        raise last_exc or RuntimeError("Ollama Cloud request failed")
+
+    @staticmethod
+    def _tool_call_to_namespace(tool_call: dict[str, Any], index: int = 0) -> SimpleNamespace:
+        function = tool_call.get("function") or {}
+        arguments = function.get("arguments", {})
+        if not isinstance(arguments, str):
+            arguments = json.dumps(arguments)
+        return SimpleNamespace(
+            id=tool_call.get("id") or f"call_{index}",
+            index=index,
+            type=tool_call.get("type") or "function",
+            function=SimpleNamespace(
+                name=function.get("name") or "",
+                arguments=arguments,
+            ),
+        )
+
+    @classmethod
+    def _message_to_namespace(cls, message: dict[str, Any]) -> SimpleNamespace:
+        tool_calls = message.get("tool_calls") or []
+        return SimpleNamespace(
+            content=message.get("content") or "",
+            tool_calls=[
+                cls._tool_call_to_namespace(tool_call, index)
+                for index, tool_call in enumerate(tool_calls)
+            ],
+        )
+
+    @classmethod
+    def _chunk_to_namespace(cls, message: dict[str, Any]) -> SimpleNamespace:
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=cls._message_to_namespace(message),
+                )
+            ]
+        )
+
+    @staticmethod
+    def _normalize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        normalized = []
+        for message in messages:
+            item = dict(message)
+            if isinstance(item.get("tool_calls"), list):
+                converted = []
+                for tool_call in item["tool_calls"]:
+                    converted_call = dict(tool_call)
+                    function = dict(converted_call.get("function") or {})
+                    arguments = function.get("arguments")
+                    if isinstance(arguments, str):
+                        try:
+                            function["arguments"] = json.loads(arguments)
+                        except json.JSONDecodeError:
+                            function["arguments"] = {}
+                    converted_call["function"] = function
+                    converted.append(converted_call)
+                item["tool_calls"] = converted
+            normalized.append(item)
+        return normalized
+
+    @staticmethod
+    def _response_format(format_value: dict[str, Any] | None) -> Any:
+        if not format_value:
+            return None
+        if format_value.get("type") == "json_schema":
+            return (format_value.get("json_schema") or {}).get("schema")
+        if format_value.get("type") == "json_object":
+            return "json"
+        return None
+
+    def _chat_payload(self, **kwargs: Any) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": kwargs["model"],
+            "messages": self._normalize_messages(kwargs.get("messages", [])),
+            "stream": bool(kwargs.get("stream", False)),
+        }
+        options: dict[str, Any] = {}
+        if "temperature" in kwargs and kwargs["temperature"] is not None:
+            options["temperature"] = kwargs["temperature"]
+        if "max_tokens" in kwargs and kwargs["max_tokens"] is not None:
+            options["num_predict"] = kwargs["max_tokens"]
+        if options:
+            payload["options"] = options
+        if kwargs.get("tools"):
+            payload["tools"] = kwargs["tools"]
+        response_format = self._response_format(kwargs.get("response_format"))
+        if response_format:
+            payload["format"] = response_format
+        return payload
+
+    def _chat_completion_create(self, **kwargs: Any) -> Any:
+        payload = self._chat_payload(**kwargs)
+        response = self._request("POST", "/chat", json=payload, stream=payload["stream"])
+        if payload["stream"]:
+            return self._stream_chat(response)
+        body = response.json()
+        message = self._message_to_namespace(body.get("message") or {})
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    def _stream_chat(self, response: requests.Response):
+        for line in response.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            body = json.loads(line)
+            yield self._chunk_to_namespace(body.get("message") or {})
+
+    def _models_list(self) -> SimpleNamespace:
+        response = self._request("GET", "/tags")
+        body = response.json()
+        models = [
+            SimpleNamespace(
+                id=model.get("model") or model.get("name") or "",
+                model=model.get("model") or model.get("name") or "",
+                name=model.get("name") or model.get("model") or "",
+            )
+            for model in body.get("models", [])
+        ]
+        return SimpleNamespace(data=models)
+
 @dataclass
 class AIConfig:
     provider: str = "lmstudio"
@@ -404,7 +595,7 @@ class AIConfig:
             provider=provider,
             base_url=os.getenv("AI_BASE_URL", definition.default_base_url),
             api_key=api_key,
-            model=os.getenv("AI_MODEL", "local-model"),
+            model=os.getenv("AI_MODEL", definition.default_model),
             chat_model=os.getenv("AI_CHAT_MODEL", ""),
             max_context_tokens=int(os.getenv("AI_MAX_CONTEXT_TOKENS", "4000")),
         )
@@ -462,7 +653,12 @@ class AIClient:
         self.config = config
         self._client = self._create_client()
 
-    def _create_client(self) -> OpenAI:
+    def _create_client(self) -> Any:
+        if self.config.provider == "ollama":
+            return OllamaCloudClient(
+                base_url=self.config.base_url,
+                api_key=self.config.api_key,
+            )
         kwargs: dict[str, Any] = {
             "base_url": self.config.base_url,
             "api_key": self.config.api_key,

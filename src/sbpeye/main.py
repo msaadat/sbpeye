@@ -1045,7 +1045,7 @@ async def save_settings(request: Request, db: Session = Depends(get_db)):
             or provider_definition.default_base_url
         ),
         api_key="",
-        model=data.get("model", data.get("ai_model", "local-model")),
+        model=data.get("model", data.get("ai_model", provider_definition.default_model)),
         chat_model=data.get("chat_model", data.get("ai_chat_model", "")),
         max_context_tokens=int(data.get("max_context_tokens", data.get("ai_max_context_tokens", 4000))),
     )

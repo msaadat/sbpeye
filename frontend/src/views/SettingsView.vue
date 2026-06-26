@@ -15,6 +15,7 @@ type ProviderOption = {
   value: string
   baseUrl: string
   apiKeyEnvVar: string
+  defaultModel: string
 }
 
 const toast = useToast()
@@ -45,13 +46,14 @@ const clearEmbeddingApiKey = ref(false)
 const managedEnvFile = ref('.env.local')
 
 const providerOptions: ProviderOption[] = [
-  { name: 'LM Studio (Local)', value: 'lmstudio', baseUrl: 'http://localhost:1234/v1', apiKeyEnvVar: 'AI_API_KEY' },
-  { name: 'OpenAI', value: 'openai', baseUrl: 'https://api.openai.com/v1', apiKeyEnvVar: 'OPENAI_API_KEY' },
-  { name: 'Google Gemini', value: 'google', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/', apiKeyEnvVar: 'GEMINI_API_KEY' },
-  { name: 'Mistral AI', value: 'mistral', baseUrl: 'https://api.mistral.ai/v1', apiKeyEnvVar: 'MISTRAL_API_KEY' },
-  { name: 'Groq', value: 'groq', baseUrl: 'https://api.groq.com/openai/v1', apiKeyEnvVar: 'GROQ_API_KEY' },
-  { name: 'OpenRouter', value: 'openrouter', baseUrl: 'https://openrouter.ai/api/v1', apiKeyEnvVar: 'OPENROUTER_API_KEY' },
-  { name: 'Custom OpenAI-Compatible', value: 'custom', baseUrl: 'http://localhost:1234/v1', apiKeyEnvVar: 'AI_API_KEY' },
+  { name: 'LM Studio (Local)', value: 'lmstudio', baseUrl: 'http://localhost:1234/v1', apiKeyEnvVar: 'AI_API_KEY', defaultModel: 'local-model' },
+  { name: 'OpenAI', value: 'openai', baseUrl: 'https://api.openai.com/v1', apiKeyEnvVar: 'OPENAI_API_KEY', defaultModel: 'gpt-4o-mini' },
+  { name: 'Google Gemini', value: 'google', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/', apiKeyEnvVar: 'GEMINI_API_KEY', defaultModel: 'gemini-2.0-flash' },
+  { name: 'Ollama Cloud', value: 'ollama', baseUrl: 'https://ollama.com/api', apiKeyEnvVar: 'OLLAMA_API_KEY', defaultModel: 'gpt-oss:120b' },
+  { name: 'Mistral AI', value: 'mistral', baseUrl: 'https://api.mistral.ai/v1', apiKeyEnvVar: 'MISTRAL_API_KEY', defaultModel: 'mistral-small-latest' },
+  { name: 'Groq', value: 'groq', baseUrl: 'https://api.groq.com/openai/v1', apiKeyEnvVar: 'GROQ_API_KEY', defaultModel: 'llama-3.1-8b-instant' },
+  { name: 'OpenRouter', value: 'openrouter', baseUrl: 'https://openrouter.ai/api/v1', apiKeyEnvVar: 'OPENROUTER_API_KEY', defaultModel: 'openai/gpt-4o-mini' },
+  { name: 'Custom OpenAI-Compatible', value: 'custom', baseUrl: 'http://localhost:1234/v1', apiKeyEnvVar: 'AI_API_KEY', defaultModel: 'local-model' },
 ]
 
 const embeddingProviderOptions = [
@@ -71,6 +73,10 @@ watch(provider, (next, previous) => {
 
   if (!baseUrl.value || baseUrl.value === previousMeta.baseUrl) {
     baseUrl.value = nextMeta.baseUrl
+  }
+
+  if (!model.value || model.value === previousMeta.defaultModel) {
+    model.value = nextMeta.defaultModel
   }
 
   apiKeyEnvVar.value = nextMeta.apiKeyEnvVar
@@ -305,7 +311,7 @@ onMounted(() => {
           Token env var: <code>{{ apiKeyEnvVar }}</code>. <span v-if="apiKeyConfigured && !clearApiKey">A token is currently saved. Leave the field blank to keep it.</span><span v-else-if="clearApiKey">The saved token will be removed on the next save.</span><span v-else>No token is currently saved for this provider.</span>
         </Message>
         <Message severity="success" :closable="false">
-          Saved LLM provider, URL, model, and token changes apply to the next request. No server restart is required.
+          Saved LLM provider, URL, model, and token changes apply to the next request.
         </Message>
         <div class="button-row">
           <Button
@@ -351,7 +357,7 @@ onMounted(() => {
           Embedding token env var: <code>{{ embeddingApiKeyEnvVar }}</code>. <span v-if="embeddingProvider === 'fastembed'">FastEmbed does not use an API key.</span><span v-else-if="embeddingApiKeyConfigured && !clearEmbeddingApiKey">A token is currently saved. Leave the field blank to keep it.</span><span v-else-if="clearEmbeddingApiKey">The saved embedding token will be removed on the next save.</span><span v-else>No embedding token is currently saved.</span>
         </Message>
         <Message severity="warn" :closable="false">
-          Run <code>sbpeye reindex</code> after changing the embedding provider or model so stored vectors remain compatible. No server restart is required.
+          Run <code>sbpeye reindex</code> after changing the embedding provider or model so stored vectors remain compatible.
         </Message>
         <div class="button-row">
           <Button

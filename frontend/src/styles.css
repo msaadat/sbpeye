@@ -1926,6 +1926,38 @@ a {
   opacity: 0.6;
 }
 
+.detail-rail-empty {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
+  padding: 2rem 1.25rem;
+  text-align: center;
+  color: var(--sbp-text-muted, #6b7280);
+}
+
+.detail-rail-empty i {
+  font-size: 1.7rem;
+  color: color-mix(in srgb, var(--sbp-green) 55%, var(--sbp-text-muted, #6b7280));
+  opacity: 0.85;
+}
+
+.detail-rail-empty-title {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--sbp-text);
+}
+
+.detail-rail-empty-text {
+  margin: 0;
+  max-width: 18rem;
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
 /* Narrow pane: collapse to a single column driven by the tab bar. */
 @container detail-pane (max-width: 860px) {
   .detail-tabbar {

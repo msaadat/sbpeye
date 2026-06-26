@@ -589,7 +589,8 @@ onBeforeUnmount(stopPolling)
           </div>
         </div>
 
-        <aside v-if="hasIntelligence" class="detail-rail" aria-label="Circular intelligence">
+        <aside class="detail-rail" aria-label="Circular intelligence">
+          <template v-if="hasIntelligence">
           <section v-if="circular.summary" class="detail-section summary-section">
             <h2>
               <button
@@ -695,6 +696,22 @@ onBeforeUnmount(stopPolling)
               </button>
             </div>
           </section>
+          </template>
+
+          <div v-else class="detail-rail-empty">
+            <i class="pi pi-sparkles" />
+            <p class="detail-rail-empty-title">No AI analysis yet</p>
+            <p class="detail-rail-empty-text">
+              Generate a summary, tags, relationships, and regulatory values for this circular.
+            </p>
+            <Button
+              icon="pi pi-sparkles"
+              label="Generate analysis"
+              size="small"
+              :loading="Boolean(activeJob)"
+              @click="generate('all')"
+            />
+          </div>
         </aside>
       </div>
     </div>

@@ -14,8 +14,8 @@ import json
 import uuid
 
 from .database import PROJECT_ROOT, engine, Base, get_db, SessionLocal, has_vector_store_data
-from .models import AIGenerationJob, Attachment, CachedDocument, SyncStatus, Circular, CircularRelationship, EcoDataSeries, EcoDataEntry, Settings, ChatSession, ChatMessage, ResearchWorkspace, WorkspaceCircular
-from .search import search_engine
+from .models import AIGenerationJob, Attachment, CachedDocument, SyncStatus, Circular, CircularEntity, CircularRelationship, EcoDataSeries, EcoDataEntry, Settings, ChatSession, ChatMessage, ResearchWorkspace, WorkspaceCircular
+from .search import resolve_metric_terms, search_engine
 from .ai import AIClient, AIConfig, friendly_chat_error, get_ai_client, get_provider_api_key, get_provider_definition, normalize_provider
 from .circular_ai import GENERATION_ACTIONS, generation_job_payload, run_generation_job
 from .checklist_export import build_checklist_workbook
@@ -578,6 +578,7 @@ async def get_circular_detail(circular_id: str, db: Session = Depends(get_db)):
         "summary": c.summary,
         "tags": _safe_json_list(c.tags),
         "compliance_checklist": _safe_json_object(c.compliance_checklist),
+        "entities": [_entity_dict(e) for e in c.entities],
         "status": c.status or "active",
         "attachments": [
             {
@@ -603,6 +604,7 @@ async def get_circular_detail(circular_id: str, db: Session = Depends(get_db)):
             "tags": _isoformat(c.tags_generated_at),
             "checklist": _isoformat(c.checklist_generated_at),
             "relationships": _isoformat(c.relationships_generated_at),
+            "entities": _isoformat(c.entities_generated_at),
         },
     }
 
@@ -624,6 +626,110 @@ async def export_circular_checklist(circular_id: str, db: Session = Depends(get_
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+def _entity_dict(e: CircularEntity, *, include_circular: bool = False) -> dict:
+    payload = {
+        "id": e.id,
+        "circular_id": e.circular_id,
+        "entity_type": e.entity_type,
+        "metric": e.metric,
+        "comparator": e.comparator,
+        "value_numeric": e.value_numeric,
+        "value_high": e.value_high,
+        "unit": e.unit,
+        "value_text": e.value_text,
+        "subject": e.subject,
+        "effective_date": e.effective_date.strftime("%Y-%m-%d") if e.effective_date else None,
+        "context_snippet": e.context_snippet,
+        "page_start": e.page_start,
+        "confidence": e.confidence,
+    }
+    if include_circular and e.circular is not None:
+        c = e.circular
+        payload["circular"] = {
+            "id": c.id,
+            "reference": c.reference,
+            "title": c.title,
+            "department": c.department,
+            "date": c.date.strftime("%Y-%m-%d") if c.date else None,
+            "status": c.status or "active",
+        }
+    return payload
+
+
+@app.get("/api/circulars/entities/query")
+async def query_circular_entities(
+    metric: str | None = None,
+    entity_type: str | None = None,
+    unit: str | None = None,
+    comparator: str | None = None,
+    subject: str | None = None,
+    department: str | None = None,
+    min_value: float | None = None,
+    max_value: float | None = None,
+    current_only: bool = False,
+    page: int = 1,
+    per_page: int = 50,
+    db: Session = Depends(get_db),
+):
+    """Structured query over extracted regulatory values. Examples:
+    ?unit=%&comparator=min&min_value=10 -> thresholds above 10%;
+    ?metric=Paid-up Capital&subject=MFB&current_only=true -> the current MFB minimum capital."""
+    query = db.query(CircularEntity).join(Circular, CircularEntity.circular_id == Circular.id)
+    if metric:
+        distinct_metrics = [m[0] for m in db.query(CircularEntity.metric).distinct() if m[0]]
+        matched = resolve_metric_terms(metric, distinct_metrics)
+        if matched:
+            query = query.filter(CircularEntity.metric.in_(matched))
+        else:
+            query = query.filter(CircularEntity.metric.ilike(f"%{metric}%"))
+    if entity_type:
+        query = query.filter(CircularEntity.entity_type == entity_type)
+    if unit:
+        query = query.filter(CircularEntity.unit == unit)
+    if comparator:
+        query = query.filter(CircularEntity.comparator == comparator)
+    if subject:
+        query = query.filter(CircularEntity.subject.ilike(f"%{subject}%"))
+    if department:
+        query = query.filter(Circular.department.ilike(f"%{department}%"))
+    if min_value is not None:
+        query = query.filter(CircularEntity.value_numeric >= min_value)
+    if max_value is not None:
+        query = query.filter(CircularEntity.value_numeric <= max_value)
+    if current_only:
+        query = query.filter(~Circular.status.in_(("superseded", "cancelled")))
+
+    # Most recent first, by the value's effective date then the circular's date.
+    rows = query.order_by(
+        CircularEntity.effective_date.desc().nullslast(),
+        Circular.date.desc().nullslast(),
+    ).all()
+
+    if current_only:
+        # Keep only the latest value per (metric, subject) group.
+        seen: set[tuple] = set()
+        deduped = []
+        for entity in rows:
+            key = ((entity.metric or "").lower(), (entity.subject or "").lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(entity)
+        rows = deduped
+
+    total = len(rows)
+    per_page = max(1, min(per_page, 200))
+    page = max(1, page)
+    start = (page - 1) * per_page
+    window = rows[start:start + per_page]
+    return {
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "results": [_entity_dict(e, include_circular=True) for e in window],
+    }
 
 
 @app.post("/api/circulars/{circular_id}/generate")

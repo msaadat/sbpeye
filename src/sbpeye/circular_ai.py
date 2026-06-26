@@ -7,10 +7,10 @@ from sqlalchemy.orm import Session
 from .ai import get_ai_client
 from .database import SessionLocal
 from .link_routing import resolve_reference_in_context
-from .models import AIGenerationJob, Circular, CircularRelationship
+from .models import AIGenerationJob, Circular, CircularEntity, CircularRelationship
 
 
-GENERATION_FEATURES = ("summary", "tags", "checklist", "relationships")
+GENERATION_FEATURES = ("summary", "tags", "checklist", "relationships", "entities")
 GENERATION_ACTIONS = (*GENERATION_FEATURES, "all")
 
 
@@ -84,6 +84,11 @@ def _compute_outputs(
                 circular.reference or "",
                 circular.content_text,
             )
+        elif item == "entities":
+            outputs[item] = client.extract_entities(
+                circular,
+                progress_callback=progress_callback,
+            )
     return outputs
 
 
@@ -118,6 +123,13 @@ def _persist_outputs(db: Session, circular: Circular, outputs: dict, client=None
         circular.relationships_generated_at = generated_at
         db.flush()
         _recompute_statuses(db)
+    if "entities" in outputs:
+        db.query(CircularEntity).filter(
+            CircularEntity.circular_id == circular.id
+        ).delete(synchronize_session=False)
+        for entity in outputs["entities"]:
+            db.add(CircularEntity(circular_id=circular.id, **entity))
+        circular.entities_generated_at = generated_at
 
 
 def run_generation_job(job_id: str) -> None:

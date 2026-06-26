@@ -136,6 +136,27 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "query_regulatory_values",
+            "description": "Query the structured database of regulatory VALUES extracted from circulars — ratios (CAR, LCR, NSFR, Leverage Ratio), monetary thresholds (minimum paid-up capital, MCR, exposure limits), percentage limits, numeric limits, and deadlines. Use this for any quantitative question, e.g. 'what is the current minimum capital requirement for MFBs?', 'which circulars set a threshold above 10%?', 'what is the required CAR?'. Returns each value with its metric, normalized number, unit, comparator (min/max/exactly), subject it applies to, effective date, and a citation to the source circular.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "metric": {"type": "string", "description": "Metric name to match, e.g. 'CAR', 'LCR', 'Paid-up Capital', 'MCR' (substring match)"},
+                    "subject": {"type": "string", "description": "Who the value applies to, e.g. 'MFB', 'locally incorporated banks' (substring match)"},
+                    "entity_type": {"type": "string", "description": "Optional: ratio | monetary_threshold | percentage_limit | numeric_limit | deadline | effective_date"},
+                    "unit": {"type": "string", "description": "Optional unit filter: '%', 'PKR', 'USD', 'times', 'days', 'months'"},
+                    "comparator": {"type": "string", "description": "Optional: min, max, exactly, or range"},
+                    "min_value": {"type": "number", "description": "Only return values whose normalized number is >= this (e.g. 10 with unit '%' for 'above 10%')"},
+                    "max_value": {"type": "number", "description": "Only return values whose normalized number is <= this"},
+                    "current_only": {"type": "boolean", "description": "If true, exclude superseded/cancelled circulars and keep only the latest value per metric+subject. Use for 'current' value questions."},
+                    "limit": {"type": "integer", "description": "Max results (1-50)", "default": 20}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_circulars_by_tag",
             "description": "Retrieve all circulars that have a specific AI-generated tag. Use this when the user asks for circulars categorized under a specific topic like 'AML', 'Remittance', 'Forex', etc.",
             "parameters": {
@@ -1047,6 +1068,266 @@ SOURCE BLOCK:
             ],
         }
 
+    @staticmethod
+    def _entity_extraction_schema() -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "entities": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "entity_type": {
+                                "type": "string",
+                                "enum": [
+                                    "ratio",
+                                    "monetary_threshold",
+                                    "percentage_limit",
+                                    "numeric_limit",
+                                    "deadline",
+                                    "effective_date",
+                                ],
+                            },
+                            "metric": {"type": "string"},
+                            "comparator": {
+                                "type": ["string", "null"],
+                                "enum": ["min", "max", "exactly", "range", None],
+                            },
+                            "value_numeric": {"type": ["number", "null"]},
+                            "value_high": {"type": ["number", "null"]},
+                            "unit": {
+                                "type": ["string", "null"],
+                                "enum": ["%", "PKR", "USD", "times", "days", "months", None],
+                            },
+                            "value_text": {"type": "string"},
+                            "subject": {"type": "string"},
+                            "effective_date": {"type": ["string", "null"]},
+                            "context_snippet": {"type": "string"},
+                            "source_unit_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "confidence": {"type": ["number", "null"]},
+                        },
+                        "required": [
+                            "entity_type", "metric", "comparator", "value_numeric",
+                            "value_high", "unit", "value_text", "subject",
+                            "effective_date", "context_snippet", "source_unit_ids",
+                            "confidence",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["entities"],
+            "additionalProperties": False,
+        }
+
+    @staticmethod
+    def _entity_system_prompt() -> str:
+        return """You are a meticulous SBP regulatory data analyst. From exactly one SOURCE BLOCK, extract every specific regulatory VALUE that a bank/DFI/MFB must comply with. Capture:
+- ratios named in the text (e.g. CAR/Capital Adequacy Ratio, LCR, NSFR, Leverage Ratio, CCB);
+- monetary thresholds (minimum paid-up capital, MCR, exposure/finance limits) in PKR or USD;
+- percentage limits (caps, floors, weights, rates);
+- other numeric limits (e.g. number of branches, multiples/"times", tenor in days/months);
+- deadlines and effective dates attached to a requirement.
+
+For each value output:
+- entity_type: one of ratio | monetary_threshold | percentage_limit | numeric_limit | deadline | effective_date.
+- metric: the canonical short name of what the value measures (e.g. "CAR", "LCR", "NSFR", "MCR", "Paid-up Capital", "Leverage Ratio", "Exposure Limit"). Use a concise noun phrase if no standard acronym exists.
+- comparator: min (for "at least"/"minimum"/"not less than"), max (for "maximum"/"shall not exceed"/"up to"), exactly (a fixed required value), or range; null for pure dates.
+- value_numeric: the value NORMALIZED TO BASE UNITS as a plain number. Convert scales: "Rs. 23 billion" -> 23000000000, "Rs 5 crore" -> 50000000, "US$ 300 million" -> 300000000, "8%" -> 8, "1.5 times" -> 1.5. For dates use null.
+- value_high: upper bound when comparator is range, else null.
+- unit: % | PKR | USD | times | days | months, or null for dates.
+- value_text: the value exactly as written in the text (e.g. "Rs. 23 billion", "8%").
+- subject: who/what the value applies to (e.g. "locally incorporated banks", "MFBs", "foreign banks with up to 5 branches"); empty string if unspecified.
+- effective_date: the date this value takes effect or is due, as ISO YYYY-MM-DD, or null if none. For entity_type deadline/effective_date this is the date itself.
+- context_snippet: the sentence/clause the value came from (<= 300 chars).
+- source_unit_ids: one or more SOURCE_ID values cited exactly as supplied.
+- confidence: 0.0-1.0.
+
+Emit one entry per distinct (metric, subject, value) tuple — phased schedules produce multiple entries. Do NOT extract values from definitions, examples, or narrative that impose no requirement. If the block contains no regulatory value, return {"entities": []}. Return only the JSON object."""
+
+    def _parse_entities(self, result: str, valid_source_ids: set[str]) -> list[dict[str, Any]]:
+        parsed = self._parse_json_object(result)
+        raw_entities = parsed.get("entities")
+        if not isinstance(raw_entities, list):
+            raise ValueError("The model returned an invalid entities payload.")
+        valid_types = {
+            "ratio", "monetary_threshold", "percentage_limit",
+            "numeric_limit", "deadline", "effective_date",
+        }
+        cleaned: list[dict[str, Any]] = []
+        for entry in raw_entities:
+            if not isinstance(entry, dict):
+                continue
+            entity_type = str(entry.get("entity_type") or "").strip()
+            if entity_type not in valid_types:
+                continue
+            # Keep the raw citations the model returned; they are resolved against the
+            # block's units later (tolerant of full ids or suffix-only ids). A mangled
+            # citation must not discard an otherwise-valid extracted value.
+            source_ids = [
+                str(sid).strip() for sid in (entry.get("source_unit_ids") or []) if str(sid).strip()
+            ]
+            value_numeric = self._coerce_number(entry.get("value_numeric"))
+            value_text = re.sub(r"\s+", " ", str(entry.get("value_text") or "")).strip()
+            effective_date = self._coerce_date(entry.get("effective_date"))
+            # A ratio/threshold/limit with no usable number carries no queryable value.
+            if entity_type in {"ratio", "monetary_threshold", "percentage_limit", "numeric_limit"} and value_numeric is None:
+                continue
+            if entity_type in {"deadline", "effective_date"}:
+                # Models often place the date in value_text rather than effective_date.
+                if effective_date is None:
+                    effective_date = self._coerce_date(value_text)
+                if effective_date is None and not value_text:
+                    continue
+            cleaned.append({
+                "entity_type": entity_type,
+                "metric": re.sub(r"\s+", " ", str(entry.get("metric") or "")).strip() or None,
+                "comparator": (str(entry.get("comparator")).strip() or None) if entry.get("comparator") else None,
+                "value_numeric": value_numeric,
+                "value_high": self._coerce_number(entry.get("value_high")),
+                "unit": (str(entry.get("unit")).strip() or None) if entry.get("unit") else None,
+                "value_text": value_text or None,
+                "subject": re.sub(r"\s+", " ", str(entry.get("subject") or "")).strip() or None,
+                "effective_date": effective_date,
+                "context_snippet": re.sub(r"\s+", " ", str(entry.get("context_snippet") or "")).strip()[:500] or None,
+                "source_unit_ids": list(dict.fromkeys(source_ids)),
+                "confidence": self._coerce_number(entry.get("confidence")),
+            })
+        return cleaned
+
+    @staticmethod
+    def _coerce_number(value: Any) -> float | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            cleaned = re.sub(r"[,\s]", "", value)
+            try:
+                return float(cleaned)
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
+    def _coerce_date(value: Any):
+        if not value or not isinstance(value, str):
+            return None
+        text = value.strip()
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%d/%m/%Y"):
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+        try:
+            return datetime.fromisoformat(text[:10])
+        except ValueError:
+            return None
+
+    def _extract_entities_block(self, *, circular_label: str, block) -> list[dict[str, Any]]:
+        system = self._entity_system_prompt()
+        user = f"""Circular: {circular_label}
+Document: {block.doc_label}
+Block reference: {block.ref}
+Pages: {block.page_start or 'HTML'}-{block.page_end or block.page_start or 'HTML'}
+
+SOURCE BLOCK:
+{block.source_text}"""
+        result = self._complete(
+            system, user, temperature=0.0, json_schema=self._entity_extraction_schema()
+        )
+        valid_source_ids = set(block.source_unit_ids)
+        try:
+            return self._parse_entities(result, valid_source_ids)
+        except ValueError:
+            retry_system = (
+                system
+                + "\nYour previous response was malformed. Return the schema-compliant JSON object only, with valid SOURCE_ID citations."
+            )
+            retry_result = self._complete(
+                retry_system, user, temperature=0.0, json_schema=self._entity_extraction_schema()
+            )
+            return self._parse_entities(retry_result, valid_source_ids)
+
+    def extract_entities(
+        self,
+        circular,
+        *,
+        delay: float = 0.0,
+        progress_callback=None,
+        documents: list[dict[str, Any]] | None = None,
+        gaps: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Extract structured regulatory values from a circular and its PDF attachments.
+
+        Returns one dict per value, with keys matching the CircularEntity columns
+        (entity_type, metric, comparator, value_numeric, value_high, unit, value_text,
+        subject, effective_date, context_snippet, source_unit_id, page_start, confidence)."""
+        from .checklist import build_analysis_blocks, build_checklist_corpus, segment_document
+
+        if documents is None:
+            documents, _ = build_checklist_corpus(circular)
+        document_units: list[tuple[dict[str, Any], list]] = []
+        for document in documents:
+            try:
+                units = segment_document(document)
+            except Exception:
+                units = []
+            document_units.append((document, units))
+
+        document_blocks = [
+            (units, build_analysis_blocks(units)) for _, units in document_units
+        ]
+        units_by_id = {
+            unit.unit_id: unit for _, units in document_units for unit in units
+        }
+        # Models frequently cite only the hash suffix of a unit_id ("doc:suffix").
+        # Map suffixes back so those citations still resolve to a page.
+        suffix_to_id: dict[str, str] = {}
+        for uid in units_by_id:
+            suffix_to_id.setdefault(uid.rsplit(":", 1)[-1], uid)
+        total_blocks = sum(len(blocks) for _, blocks in document_blocks)
+        completed = 0
+        circular_label = circular.reference or circular.title
+        if progress_callback:
+            progress_callback(0, total_blocks)
+
+        entities: list[dict[str, Any]] = []
+        for _, blocks in document_blocks:
+            for block in blocks:
+                try:
+                    extracted = self._extract_entities_block(
+                        circular_label=circular_label, block=block
+                    )
+                    for entry in extracted:
+                        resolved_ids = []
+                        for sid in entry["source_unit_ids"]:
+                            uid = sid if sid in units_by_id else suffix_to_id.get(sid)
+                            if uid:
+                                resolved_ids.append(uid)
+                        source_units = [units_by_id[uid] for uid in resolved_ids]
+                        pages = [
+                            unit.page_start
+                            for unit in source_units
+                            if unit.page_start is not None
+                        ]
+                        entry["source_unit_id"] = resolved_ids[0] if resolved_ids else None
+                        entry["page_start"] = min(pages) if pages else None
+                        del entry["source_unit_ids"]
+                        entities.append(entry)
+                except ValueError:
+                    pass
+                completed += 1
+                if progress_callback:
+                    progress_callback(completed, total_blocks)
+                if delay > 0 and completed < total_blocks:
+                    time.sleep(delay)
+        return entities
+
     def extract_relationships(self, title: str, reference: str, content_text: str) -> dict:
         system = (
             "You are a financial regulations analyst. Extract any mentions of this circular relating to "
@@ -1327,6 +1608,76 @@ SOURCE BLOCK:
                         "tags": json.loads(c.tags) if c.tags else [],
                         "url": c.url,
                         "citation": f"[[circular:{c.id}|{c.display_name}]]",
+                    })
+                return json.dumps({"results": out, "count": len(out)})
+
+            elif name == "query_regulatory_values":
+                from .models import Circular, CircularEntity
+                query = db.query(CircularEntity).join(
+                    Circular, CircularEntity.circular_id == Circular.id
+                )
+                metric = str(arguments.get("metric", "")).strip()
+                subject = str(arguments.get("subject", "")).strip()
+                entity_type = str(arguments.get("entity_type", "")).strip()
+                unit = str(arguments.get("unit", "")).strip()
+                comparator = str(arguments.get("comparator", "")).strip()
+                if metric:
+                    from .search import resolve_metric_terms
+                    distinct_metrics = [
+                        m[0] for m in db.query(CircularEntity.metric).distinct() if m[0]
+                    ]
+                    matched = resolve_metric_terms(metric, distinct_metrics)
+                    if matched:
+                        query = query.filter(CircularEntity.metric.in_(matched))
+                    else:
+                        query = query.filter(CircularEntity.metric.ilike(f"%{metric}%"))
+                if subject:
+                    query = query.filter(CircularEntity.subject.ilike(f"%{subject}%"))
+                if entity_type:
+                    query = query.filter(CircularEntity.entity_type == entity_type)
+                if unit:
+                    query = query.filter(CircularEntity.unit == unit)
+                if comparator:
+                    query = query.filter(CircularEntity.comparator == comparator)
+                if arguments.get("min_value") is not None:
+                    query = query.filter(CircularEntity.value_numeric >= float(arguments["min_value"]))
+                if arguments.get("max_value") is not None:
+                    query = query.filter(CircularEntity.value_numeric <= float(arguments["max_value"]))
+                if arguments.get("current_only"):
+                    query = query.filter(~Circular.status.in_(("superseded", "cancelled")))
+                limit = max(1, min(int(arguments.get("limit", 20)), 50))
+                rows = query.order_by(
+                    CircularEntity.effective_date.desc().nullslast(),
+                    Circular.date.desc().nullslast(),
+                ).limit(200).all()
+                if arguments.get("current_only"):
+                    seen: set[tuple] = set()
+                    deduped = []
+                    for entity in rows:
+                        key = ((entity.metric or "").lower(), (entity.subject or "").lower())
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        deduped.append(entity)
+                    rows = deduped
+                rows = rows[:limit]
+                out = []
+                for entity in rows:
+                    c = entity.circular
+                    out.append({
+                        "metric": entity.metric,
+                        "entity_type": entity.entity_type,
+                        "comparator": entity.comparator,
+                        "value": entity.value_numeric,
+                        "value_high": entity.value_high,
+                        "unit": entity.unit,
+                        "value_text": entity.value_text,
+                        "subject": entity.subject,
+                        "effective_date": entity.effective_date.strftime("%Y-%m-%d") if entity.effective_date else None,
+                        "context": entity.context_snippet,
+                        "circular_status": (c.status or "active") if c else None,
+                        "circular_date": c.date.strftime("%Y-%m-%d") if c and c.date else None,
+                        "citation": f"[[circular:{c.id}|{c.display_name}]]" if c else None,
                     })
                 return json.dumps({"results": out, "count": len(out)})
 

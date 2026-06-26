@@ -22,6 +22,7 @@ class Circular(Base):
     checklist_generated_at = Column(DateTime, nullable=True)
     relationships_generated_at = Column(DateTime, nullable=True)
     attachments_scanned_at = Column(DateTime, nullable=True)
+    entities_generated_at = Column(DateTime, nullable=True)
 
     @property
     def display_name(self) -> str:
@@ -32,6 +33,9 @@ class Circular(Base):
     amended_by = relationship("CircularRelationship", foreign_keys="[CircularRelationship.target_id]", back_populates="target")
     attachments = relationship(
         "Attachment", back_populates="circular", cascade="all, delete-orphan"
+    )
+    entities = relationship(
+        "CircularEntity", back_populates="circular", cascade="all, delete-orphan"
     )
 
 class CircularRelationship(Base):
@@ -46,6 +50,38 @@ class CircularRelationship(Base):
 
     source = relationship("Circular", foreign_keys=[source_id], back_populates="amends")
     target = relationship("Circular", foreign_keys=[target_id], back_populates="amended_by")
+
+
+class CircularEntity(Base):
+    """A structured regulatory value (ratio, threshold, limit, or date) extracted
+    from a circular. Stored normalized so the corpus is queryable by numeric range,
+    metric, unit, and subject — e.g. "thresholds above 10%" or the current MCR for MFBs."""
+
+    __tablename__ = "circular_entities"
+
+    id = Column(Integer, primary_key=True, index=True)
+    circular_id = Column(String, ForeignKey("circulars.id"), nullable=False, index=True)
+    # ratio | monetary_threshold | percentage_limit | numeric_limit | deadline | effective_date
+    entity_type = Column(String, nullable=False, index=True)
+    # canonical metric name, e.g. CAR, LCR, NSFR, MCR, Paid-up Capital, Leverage Ratio
+    metric = Column(String, nullable=True, index=True)
+    # min | max | exactly | range
+    comparator = Column(String, nullable=True)
+    # value normalized to base units: "Rs. 23 billion" -> 23000000000.0; "8%" -> 8.0
+    value_numeric = Column(Float, nullable=True)
+    value_high = Column(Float, nullable=True)
+    # % | PKR | USD | times | days | months
+    unit = Column(String, nullable=True, index=True)
+    value_text = Column(String, nullable=True)
+    subject = Column(String, nullable=True)
+    effective_date = Column(DateTime, nullable=True)
+    context_snippet = Column(Text, nullable=True)
+    source_unit_id = Column(String, nullable=True)
+    page_start = Column(Integer, nullable=True)
+    confidence = Column(Float, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    circular = relationship("Circular", back_populates="entities")
 
 
 class Attachment(Base):

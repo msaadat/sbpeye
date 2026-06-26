@@ -170,7 +170,7 @@ export interface ComplianceChecklist {
   analysis_blocks: ChecklistAnalysisBlock[]
 }
 
-export type GenerationFeature = 'summary' | 'tags' | 'checklist' | 'relationships'
+export type GenerationFeature = 'summary' | 'tags' | 'checklist' | 'relationships' | 'entities'
 export type GenerationAction = GenerationFeature | 'all'
 
 export interface CircularGenerationState {
@@ -178,6 +178,61 @@ export interface CircularGenerationState {
   tags?: string | null
   checklist?: string | null
   relationships?: string | null
+  entities?: string | null
+}
+
+export type EntityType =
+  | 'ratio'
+  | 'monetary_threshold'
+  | 'percentage_limit'
+  | 'numeric_limit'
+  | 'deadline'
+  | 'effective_date'
+
+export interface CircularEntity {
+  id: number
+  circular_id: string
+  entity_type: EntityType
+  metric: string | null
+  comparator: 'min' | 'max' | 'exactly' | 'range' | null
+  value_numeric: number | null
+  value_high: number | null
+  unit: string | null
+  value_text: string | null
+  subject: string | null
+  effective_date: string | null
+  context_snippet: string | null
+  page_start: number | null
+  confidence: number | null
+  circular?: {
+    id: string
+    reference: string | null
+    title: string
+    department: string | null
+    date: string | null
+    status: string
+  }
+}
+
+export interface EntityQueryParams {
+  metric?: string
+  entity_type?: EntityType | ''
+  unit?: string
+  comparator?: string
+  subject?: string
+  department?: string
+  min_value?: number
+  max_value?: number
+  current_only?: boolean
+  page?: number
+  per_page?: number
+}
+
+export interface EntityQueryResponse {
+  total: number
+  page: number
+  per_page: number
+  results: CircularEntity[]
 }
 
 export interface AIGenerationJob {
@@ -198,6 +253,7 @@ export interface CircularDetail extends CircularSummary {
   attachments: CircularAttachment[]
   attachment_count: number
   compliance_checklist: ComplianceChecklist | null
+  entities: CircularEntity[]
   relationships: CircularRelationshipsResponse
   generation: CircularGenerationState
 }
@@ -446,6 +502,16 @@ export async function getCircularSearch(
 
 export async function getCircularDetail(id: string): Promise<CircularDetail> {
   return requestJson<CircularDetail>(`/circulars/${encodeURIComponent(id)}`)
+}
+
+export async function queryCircularEntities(
+  params: EntityQueryParams = {},
+  signal?: AbortSignal,
+): Promise<EntityQueryResponse> {
+  return requestJson<EntityQueryResponse>(
+    `/circulars/entities/query${toQueryString({ ...params })}`,
+    { signal },
+  )
 }
 
 export async function startCircularGeneration(id: string, feature: GenerationAction): Promise<AIGenerationJob> {

@@ -1,6 +1,7 @@
 import re
 import logging
 import threading
+from collections.abc import Iterable
 from datetime import datetime
 from rank_bm25 import BM25Okapi
 from sqlalchemy.orm import Session, joinedload
@@ -121,6 +122,9 @@ SYNONYMS: dict[str, list[str]] = {
     "cet1": ["common equity tier one"],
     "slr": ["statutory liquidity requirement"],
     "crr": ["cash reserve requirement"],
+    "mcr": ["minimum capital requirement"],
+    "paid up capital": ["paid-up capital", "minimum paid up capital"],
+    "paid-up capital": ["paid up capital", "minimum paid up capital"],
 
     # Monetary Policy & Rates
     "kibor": ["karachi interbank offered rate", "interbank rate"],
@@ -290,6 +294,87 @@ def expand_query_tokens(tokens: list[str]) -> list[str]:
                     seen.add(w)
 
     return expanded
+
+
+# ---------------------------------------------------------------------------
+# Metric resolution — acronym/expansion-aware matching for regulatory values
+# ---------------------------------------------------------------------------
+
+_SYNONYM_GROUPS: list[set[str]] | None = None
+
+
+def _synonym_groups() -> list[set[str]]:
+    """Group every SYNONYMS key with its expansion phrases (lowercased).
+
+    e.g. {"crr", "cash reserve requirement"} so a query for either surface form
+    resolves to the whole group. Built once and cached.
+    """
+    global _SYNONYM_GROUPS
+    if _SYNONYM_GROUPS is None:
+        groups: list[set[str]] = []
+        for key, phrases in SYNONYMS.items():
+            group = {key.lower()}
+            group.update(p.lower() for p in phrases)
+            groups.append(group)
+        _SYNONYM_GROUPS = groups
+    return _SYNONYM_GROUPS
+
+
+def _expansion_set(term: str) -> set[str]:
+    """All surface forms a term should also match: the term plus any synonym
+    group(s) any of its forms belongs to."""
+    term_l = term.strip().lower()
+    forms = {term_l}
+    for group in _synonym_groups():
+        if forms & group or any(g in term_l or term_l in g for g in group):
+            forms |= group
+    return {f for f in forms if f}
+
+
+def resolve_metric_terms(term: str, distinct_metrics: Iterable[str]) -> list[str]:
+    """Return the stored metric strings that match ``term``, acronym/expansion-aware.
+
+    Matching is precision-first and never returns *fewer* hits than a plain
+    substring filter:
+      1. Expand ``term`` to its synonym group(s) (e.g. CRR ↔ cash reserve requirement).
+      2. A metric matches if any expanded form is a substring of it (or vice versa),
+         or the metric's own expansion set intersects the term's.
+      3. Fallback: synonym-expanded token overlap, so word-order/partial phrasings hit.
+    """
+    term_l = (term or "").strip().lower()
+    if not term_l:
+        return []
+
+    metrics = [m for m in distinct_metrics if m]
+    term_forms = _expansion_set(term_l)
+
+    matched: list[str] = []
+    leftovers: list[str] = []
+    for metric in metrics:
+        metric_l = metric.lower()
+        # 1. Plain substring (preserve current behavior as a floor).
+        # 2. Synonym-expanded substring, either direction.
+        if any(form in metric_l or metric_l in form for form in term_forms):
+            matched.append(metric)
+            continue
+        # 3. Group-intersection: metric expands into the same synonym group.
+        if _expansion_set(metric_l) & term_forms:
+            matched.append(metric)
+            continue
+        leftovers.append(metric)
+
+    if matched:
+        return matched
+
+    # Fallback: synonym-expanded token overlap for word-order / partial phrasings.
+    query_tokens = set(expand_query_tokens(tokenize(term_l)))
+    if not query_tokens:
+        return []
+    for metric in leftovers:
+        metric_tokens = set(expand_query_tokens(tokenize(metric)))
+        if query_tokens & metric_tokens:
+            matched.append(metric)
+    return matched
 
 
 # ---------------------------------------------------------------------------

@@ -55,6 +55,7 @@ def _ensure_columns():
                 ("checklist_generated_at", "DATETIME"),
                 ("relationships_generated_at", "DATETIME"),
                 ("attachments_scanned_at", "DATETIME"),
+                ("entities_generated_at", "DATETIME"),
             ]
             for col_name, col_type in new_columns:
                 if col_name not in existing:

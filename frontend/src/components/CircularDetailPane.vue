@@ -21,6 +21,7 @@ import {
   type ApiError,
   type CircularDetail,
   type CircularAttachment,
+  type CircularEntity,
   type GenerationAction,
   type GenerationFeature,
   type CircularRelationship,
@@ -66,7 +67,63 @@ const generationFeatures: Array<{ feature: GenerationFeature; label: string; ico
   { feature: 'tags', label: 'Tags', icon: 'pi pi-tags' },
   { feature: 'checklist', label: 'Checklist', icon: 'pi pi-list-check' },
   { feature: 'relationships', label: 'Relationships', icon: 'pi pi-share-alt' },
+  { feature: 'entities', label: 'Regulatory Values', icon: 'pi pi-percentage' },
 ]
+
+const ENTITY_TYPE_LABELS: Record<string, string> = {
+  ratio: 'Ratios',
+  monetary_threshold: 'Monetary thresholds',
+  percentage_limit: 'Percentage limits',
+  numeric_limit: 'Numeric limits',
+  deadline: 'Deadlines',
+  effective_date: 'Effective dates',
+}
+
+const ENTITY_TYPE_ORDER = [
+  'ratio',
+  'monetary_threshold',
+  'percentage_limit',
+  'numeric_limit',
+  'deadline',
+  'effective_date',
+]
+
+const COMPARATOR_PREFIX: Record<string, string> = {
+  min: '≥ ',
+  max: '≤ ',
+  exactly: '',
+  range: '',
+}
+
+interface EntityGroup {
+  type: string
+  label: string
+  items: CircularEntity[]
+}
+
+const entityGroups = computed<EntityGroup[]>(() => {
+  const entities = circular.value?.entities ?? []
+  const byType = new Map<string, CircularEntity[]>()
+  for (const entity of entities) {
+    const list = byType.get(entity.entity_type) ?? []
+    list.push(entity)
+    byType.set(entity.entity_type, list)
+  }
+  return ENTITY_TYPE_ORDER.filter((type) => byType.has(type)).map((type) => ({
+    type,
+    label: ENTITY_TYPE_LABELS[type] ?? type,
+    items: byType.get(type) as CircularEntity[],
+  }))
+})
+
+function formatEntityValue(entity: CircularEntity): string {
+  if (entity.value_text) {
+    const prefix = entity.comparator ? COMPARATOR_PREFIX[entity.comparator] ?? '' : ''
+    return `${prefix}${entity.value_text}`.trim()
+  }
+  if (entity.effective_date) return formatDate(entity.effective_date)
+  return entity.value_numeric != null ? String(entity.value_numeric) : '—'
+}
 
 const sourceUrl = computed(() => source.value?.url || circular.value?.url || '')
 const sourceWebsiteUrl = computed(() => source.value?.original_url || circular.value?.url || source.value?.url || '')
@@ -541,6 +598,32 @@ onBeforeUnmount(stopPolling)
         </div>
       </section>
 
+      <section v-if="entityGroups.length" class="detail-section entities-section">
+        <h2><i class="pi pi-percentage section-icon" />Regulatory Values</h2>
+        <div class="entity-groups">
+          <div v-for="group in entityGroups" :key="group.type" class="entity-group">
+            <span class="entity-group-label">{{ group.label }}</span>
+            <table class="entity-table">
+              <tbody>
+                <tr v-for="entity in group.items" :key="entity.id" class="entity-row">
+                  <th scope="row" class="entity-metric">{{ entity.metric || '—' }}</th>
+                  <td class="entity-value">
+                    {{ formatEntityValue(entity) }}
+                    <span v-if="entity.unit && entity.unit !== '%' && !entity.value_text?.includes(entity.unit)" class="entity-unit">{{ entity.unit }}</span>
+                  </td>
+                  <td class="entity-subject">{{ entity.subject || '' }}</td>
+                  <td class="entity-effective">
+                    <span v-if="entity.effective_date && entity.entity_type !== 'deadline' && entity.entity_type !== 'effective_date'">
+                      <i class="pi pi-calendar" /> {{ formatDate(entity.effective_date) }}
+                    </span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
       <section v-if="circular.attachments.length" class="detail-section documents-section">
         <h2><i class="pi pi-paperclip section-icon" />Documents</h2>
         <div class="document-pills">
@@ -591,3 +674,64 @@ onBeforeUnmount(stopPolling)
     </Dialog>
   </aside>
 </template>
+
+<style scoped>
+.entity-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.entity-group-label {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--p-text-muted-color, #6b7280);
+  margin-bottom: 0.3rem;
+}
+
+.entity-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.entity-row {
+  border-top: 1px solid var(--p-content-border-color, #e5e7eb);
+}
+
+.entity-row > th,
+.entity-row > td {
+  padding: 0.35rem 0.5rem 0.35rem 0;
+  text-align: left;
+  vertical-align: top;
+}
+
+.entity-metric {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.entity-value {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.entity-unit {
+  color: var(--p-text-muted-color, #6b7280);
+  margin-left: 0.2rem;
+}
+
+.entity-subject {
+  color: var(--p-text-muted-color, #4b5563);
+  width: 100%;
+}
+
+.entity-effective {
+  color: var(--p-text-muted-color, #6b7280);
+  white-space: nowrap;
+  font-size: 0.78rem;
+}
+</style>

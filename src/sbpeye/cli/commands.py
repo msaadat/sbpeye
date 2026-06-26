@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 from sbpeye.database import PROJECT_ROOT, engine, Base, SessionLocal
-from sbpeye.models import Attachment, Circular, CircularRelationship
+from sbpeye.models import Attachment, Circular, CircularEntity, CircularRelationship
 from sbpeye.ai import get_ai_client
 from sbpeye.link_routing import resolve_reference_in_context
 from sbpeye.supersession import apply_blanket_supersession
@@ -355,6 +355,29 @@ def relationships(url, dept, year, limit, refresh, verbose, delay):
         db.close()
 
 
+@circulars.command()
+@click.argument("circular_id", required=False)
+@click.option("--dept", "-d", multiple=True, help="Only process circulars in these departments")
+@click.option("--year", "-y", multiple=True, help="Only process circulars from these years")
+@click.option("--limit", "-l", type=int, default=0, help="Max circulars to process (0=unlimited)")
+@click.option("--refresh", is_flag=True, help="Re-extract even if values already exist")
+@click.option("--verbose", "-v", is_flag=True, help="Print the value count per circular")
+@click.option("--delay", type=float, default=1.0, help="Delay between API calls in seconds")
+def entities(circular_id, dept, year, limit, refresh, verbose, delay):
+    """Extract structured regulatory values (ratios, thresholds, limits, dates).
+
+    With CIRCULAR_ID, extracts values for that single circular. Without it, processes
+    all circulars that have no extracted values yet — use --refresh to redo existing
+    ones and --limit to process them in batches.
+    """
+    db = SessionLocal()
+    try:
+        client = get_ai_client(db)
+        _run_entities(db, client, circular_id, dept, year, limit, refresh, verbose, delay)
+    finally:
+        db.close()
+
+
 @circulars.command("resolve-targets")
 @click.option("--verbose", "-v", is_flag=True, help="Print each resolved relationship")
 def resolve_targets(verbose):
@@ -587,7 +610,7 @@ def run_all(dept, year, limit, skip_llm, no_attachment_vectorize, verbose, delay
     print("SBPEye Full Pipeline")
     print("=" * 60)
 
-    print("\n[1/7] Syncing circulars...")
+    print("\n[1/8] Syncing circulars...")
     db = SessionLocal()
     try:
         scrape_circulars(
@@ -603,7 +626,7 @@ def run_all(dept, year, limit, skip_llm, no_attachment_vectorize, verbose, delay
         db.close()
 
     if not no_attachment_vectorize:
-        print("\n[2/7] Vectorizing attachments...")
+        print("\n[2/8] Vectorizing attachments...")
         db = SessionLocal()
         try:
             _run_attachment_vectorize(
@@ -623,15 +646,16 @@ def run_all(dept, year, limit, skip_llm, no_attachment_vectorize, verbose, delay
         ("Tags", _run_tags),
         ("Checklist", _run_checklist),
         ("Relationships", _run_relationships),
+        ("Regulatory values", _run_entities),
     ], start=3):
-        print(f"\n[{step}/7] {task_name}...")
+        print(f"\n[{step}/8] {task_name}...")
         db = SessionLocal()
         try:
             task_fn(db, client, None, dept, year, limit, False, verbose, delay)
         finally:
             db.close()
 
-    print(f"\n[7/7] Computing statuses...")
+    print(f"\n[8/8] Computing statuses...")
     ctx = click.Context(status)
     ctx.params = {"verbose": verbose}
     with ctx:
@@ -1181,6 +1205,57 @@ def _run_relationships(db, client, url, dept, year, limit, refresh, verbose, del
     print(f"\nExtracted {total_rels} relationships from {processed}/{len(circulars)} circulars.")
 
 
+def _run_entities(db, client, circular_id, dept, year, limit, refresh, verbose, delay):
+    if circular_id:
+        seed = db.get(Circular, circular_id)
+        if not seed:
+            print(f"No circular found with ID: {circular_id}")
+            return
+        circulars = [seed]
+    else:
+        query = _year_filter(_dept_filter(db.query(Circular), dept), year)
+        if not refresh:
+            query = query.filter(Circular.entities_generated_at.is_(None))
+        circulars = query.order_by(Circular.date.desc()).all()
+        if limit > 0:
+            circulars = circulars[:limit]
+
+    if not circulars:
+        print("No circulars to process.")
+        return
+
+    def skip(c):
+        has_pdf_text = any(
+            (a.file_type or "").lower() == "pdf"
+            and a.extraction_status == "extracted"
+            and bool(a.content_text)
+            for a in c.attachments
+        )
+        if not c.content_text and not has_pdf_text:
+            if verbose:
+                print(f"  [SKIP] No content: {c.title[:60]}")
+            return True
+        return False
+
+    def process(c):
+        extracted = client.extract_entities(c, delay=delay)
+        db.query(CircularEntity).filter(
+            CircularEntity.circular_id == c.id
+        ).delete(synchronize_session=False)
+        for entity in extracted:
+            db.add(CircularEntity(circular_id=c.id, **entity))
+        c.entities_generated_at = datetime.utcnow()
+        return _BatchOutcome(detail=f"{len(extracted)} values", count=len(extracted))
+
+    print(f"Extracting regulatory values for {len(circulars)} circular(s)...")
+    # extract_entities handles its own per-block delay, so the driver does not sleep.
+    processed, total = _run_ai_batch(
+        db, circulars, process=process, skip=skip,
+        verbose=verbose, delay=delay, sleep_in_loop=False,
+    )
+    print(f"\nExtracted {total} values from {processed}/{len(circulars)} circular(s).")
+
+
 def _show_stats():
     db = SessionLocal()
     try:
@@ -1190,6 +1265,8 @@ def _show_stats():
         summarized = db.query(Circular).filter(Circular.summary != None, Circular.summary != "").count()  # noqa: E711
         tagged = db.query(Circular).filter(Circular.tags != None, Circular.tags != "").count()
         checklist_count = db.query(Circular).filter(Circular.compliance_checklist != None, Circular.compliance_checklist != "").count()
+        entity_circ_count = db.query(Circular).filter(Circular.entities_generated_at != None).count()  # noqa: E711
+        entity_count = db.query(CircularEntity).count()
 
         print(f"\n--- Database Stats ---")
         print(f"  Circulars:         {circ_count}")
@@ -1197,6 +1274,7 @@ def _show_stats():
         print(f"  Tagged:            {tagged}/{circ_count}")
         print(f"  Checklists:        {checklist_count}/{circ_count}")
         print(f"  Relationships:     {rel_count}")
+        print(f"  Regulatory values: {entity_count} ({entity_circ_count}/{circ_count} circulars)")
 
         if circ_count > 0:
             latest = db.query(Circular).order_by(Circular.date.desc()).first()

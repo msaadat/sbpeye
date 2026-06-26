@@ -31,6 +31,12 @@ const navItems = computed(() => [
     active: route.path.startsWith('/chat'),
   },
   {
+    label: 'Values',
+    icon: 'pi pi-percentage',
+    route: '/values',
+    active: route.path.startsWith('/values'),
+  },
+  {
     label: 'EcoData',
     icon: 'pi pi-chart-line',
     route: '/ecodata',

@@ -36,7 +36,8 @@ def test_circular_detail_shape(client):
     assert body["attachments"] == []
     assert body["attachment_count"] == 0
     assert body["relationships"] == {"outgoing": [], "incoming": []}
-    assert set(body["generation"]) == {"summary", "tags", "checklist", "relationships"}
+    assert set(body["generation"]) == {"summary", "tags", "checklist", "relationships", "entities"}
+    assert body["entities"] == []
 
 
 def test_circular_detail_missing_returns_404(client):

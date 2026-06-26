@@ -33,6 +33,11 @@ const router = createRouter({
       component: () => import('@/views/DocumentView.vue'),
     },
     {
+      path: '/values',
+      name: 'values',
+      component: () => import('@/views/RegulatoryValuesView.vue'),
+    },
+    {
       path: '/ecodata',
       name: 'ecodata',
       component: () => import('@/views/EcoDataView.vue'),

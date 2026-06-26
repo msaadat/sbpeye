@@ -9,12 +9,23 @@ functions directly with a fake AI client and an in-memory DB.
 import json
 from datetime import datetime
 
+import click
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from sbpeye.ai import is_rate_limit_error
 from sbpeye.database import Base
 from sbpeye.models import Circular, CircularRelationship
 from sbpeye.cli import commands
+
+
+class _RateLimit429(Exception):
+    """Stand-in for a provider SDK 429 (rate exceeded) error."""
+
+    def __init__(self, message="429 Too Many Requests"):
+        super().__init__(message)
+        self.status_code = 429
 
 
 class FakeClient:
@@ -135,6 +146,50 @@ def test_relationships_sets_timestamp_and_creates_rows():
     assert len(rels) == 1
     assert rels[0].type == "supersedes"
     assert rels[0].target_reference == "Ref tgt"
+
+
+def test_is_rate_limit_error_detects_429():
+    assert is_rate_limit_error(_RateLimit429()) is True
+    assert is_rate_limit_error(Exception("rate_limit_exceeded for model")) is True
+    assert is_rate_limit_error(ValueError("invalid json")) is False
+
+
+def test_summarize_stops_on_first_rate_limit():
+    db = make_session()
+    add_circular(db, "a", date=datetime(2025, 3, 1))
+    add_circular(db, "b", date=datetime(2025, 2, 1))
+
+    class RateLimitedClient(FakeClient):
+        def __init__(self):
+            self.calls = 0
+
+        def summarize(self, title, content_text):
+            self.calls += 1
+            raise _RateLimit429()
+
+    client = RateLimitedClient()
+    with pytest.raises(click.ClickException):
+        commands._run_summarize(db, client, None, (), (), 0, False, False, 0)
+
+    # The batch aborts on the first 429 rather than attempting the rest.
+    assert client.calls == 1
+    assert db.query(Circular).filter(Circular.id == "b").first().summary is None
+
+
+def test_batch_continues_past_non_rate_limit_errors():
+    db = make_session()
+    add_circular(db, "a", date=datetime(2025, 3, 1))
+    add_circular(db, "b", date=datetime(2025, 2, 1))
+
+    class FlakyClient(FakeClient):
+        def summarize(self, title, content_text):
+            if title.endswith("a"):
+                raise ValueError("transient parse error")
+            return f"summary of {title}"
+
+    commands._run_summarize(db, FlakyClient(), None, (), (), 0, False, False, 0)
+    # The non-429 error on "a" is logged and skipped; "b" still gets summarized.
+    assert db.query(Circular).filter(Circular.id == "b").first().summary == "summary of Circular b"
 
 
 def test_relationships_refresh_clears_existing():

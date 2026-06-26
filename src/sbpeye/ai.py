@@ -392,6 +392,29 @@ def classify_provider_state(exc: Exception) -> tuple[str, str]:
     return "error", "Provider check failed"
 
 
+def is_rate_limit_error(exc: Exception) -> bool:
+    """True if the exception is a provider 429 / rate-limit / quota rejection.
+
+    The CLI uses this to abort batch LLM operations on the first 429 instead of
+    sending the rest of the batch into the same limit. Handles both SDK errors
+    (``status_code`` attribute) and ``requests`` HTTP errors (status on
+    ``response``).
+    """
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status == 429:
+        return True
+    text = str(exc).lower()
+    return any(
+        needle in text
+        for needle in (
+            "rate_limit", "rate limit", "too many requests",
+            "requests per minute", "tokens per minute", "quota",
+        )
+    )
+
+
 def get_provider_api_key(provider: str | None) -> tuple[str, str | None]:
     definition = get_provider_definition(provider)
     return resolve_env_value(
@@ -450,7 +473,9 @@ class OllamaCloudClient:
                 return response
             except Exception as exc:
                 last_exc = exc
-                if attempt >= self.max_retries:
+                # Stop immediately on a 429 (rate exceeded) — retrying just walks
+                # further into the provider's rate limit.
+                if attempt >= self.max_retries or is_rate_limit_error(exc):
                     break
                 time.sleep(0.25 * (attempt + 1))
         raise last_exc or RuntimeError("Ollama Cloud request failed")

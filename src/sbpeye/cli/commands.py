@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 from sbpeye.database import PROJECT_ROOT, engine, Base, SessionLocal
 from sbpeye.models import Attachment, Circular, CircularEntity, CircularRelationship
-from sbpeye.ai import get_ai_client
+from sbpeye.ai import get_ai_client, is_rate_limit_error
 from sbpeye.link_routing import resolve_reference_in_context
 from sbpeye.supersession import apply_blanket_supersession
 
@@ -522,8 +522,13 @@ def graph(circular_id, depth, limit, refresh, verbose, delay):
                             print(f"       {rel_type}: {ref!r} {resolved}")
                     time.sleep(delay)
                 except Exception as exc:
-                    print(f"  [error] {depth_tag}{label}: {exc}")
                     db.rollback()
+                    if is_rate_limit_error(exc):
+                        raise click.ClickException(
+                            f"Rate limit (HTTP 429) hit on {label}: {exc}. "
+                            f"Stopping graph expansion after {processed} processed."
+                        )
+                    print(f"  [error] {depth_tag}{label}: {exc}")
 
             # Expand neighbors from relationships now in DB
             if not depth or current_depth < depth:
@@ -919,8 +924,13 @@ def _run_ai_batch(db, circulars, *, process, skip=None,
             else:
                 print(f"  [{processed}/{len(circulars)}] {c.title[:60]}")
         except Exception as e:
-            print(f"  [ERROR] {c.title[:60]}: {e}")
             db.rollback()
+            if is_rate_limit_error(e):
+                raise click.ClickException(
+                    f"Rate limit (HTTP 429) hit on {c.title[:60]}: {e}. "
+                    f"Stopping after {processed} processed."
+                )
+            print(f"  [ERROR] {c.title[:60]}: {e}")
         if sleep_in_loop:
             time.sleep(delay)
     return processed, total

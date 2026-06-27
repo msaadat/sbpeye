@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import requests
-from openai import APIError, BadRequestError, OpenAI
+from openai import APIError, OpenAI
 
 from sqlalchemy.orm import Session
 
@@ -447,7 +447,7 @@ class OllamaCloudClient:
         self,
         base_url: str,
         api_key: str,
-        timeout: float = 60.0,
+        timeout: float = 120.0,
         max_retries: int = 2,
     ):
         self.base_url = base_url.rstrip("/")
@@ -688,12 +688,93 @@ class AIConfig:
         }
 
 
+# Conservative context windows (tokens) used to size checklist extraction batches
+# when the provider does not report a window. detect_context_window() overrides
+# these for local servers (LM Studio / Ollama) that advertise context_length.
+_PROVIDER_CONTEXT_WINDOW: dict[str, int] = {
+    "openai": 128_000,
+    "google": 1_000_000,
+    "ollama": 32_768,
+    "groq": 32_768,
+    "mistral": 32_768,
+    "openrouter": 32_768,
+    "lmstudio": 8_192,
+    "custom": 8_192,
+}
+_DEFAULT_CONTEXT_WINDOW = 8_192
+# Fraction of the context window reserved for prompt input; the remainder covers
+# the system prompt and the JSON response.
+_CONTEXT_INPUT_FRACTION = 0.6
+# Structured-output capability tiers, strongest first.
+_STRUCTURED_MODES = ("json_schema", "json_object", "text")
+
+
+def _status_code(exc: Exception) -> int | None:
+    """Best-effort HTTP status from OpenAI SDK or requests exceptions."""
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+    return status if isinstance(status, int) else None
+
+
+def _is_response_format_error(exc: Exception) -> bool:
+    """Heuristically detect that a model/provider rejected structured output.
+
+    Covers explicit SDK BadRequestError messages as well as the varied 400/422
+    responses local and third-party providers return when they do not support
+    ``response_format`` / ``json_schema``.
+    """
+    text = str(exc).lower()
+    keywords = (
+        "response_format",
+        "response format",
+        "json_schema",
+        "json schema",
+        "structured output",
+        "structured_output",
+        "schema",
+    )
+    if any(keyword in text for keyword in keywords):
+        return True
+    status = _status_code(exc)
+    if status in (400, 422) and ("format" in text or "not support" in text or "unsupported" in text):
+        return True
+    return False
+
+
+def _is_context_size_error(exc: Exception) -> bool:
+    """True when the model rejected the request for being too large (not a 429)."""
+    if _status_code(exc) == 413:
+        return True
+    text = str(exc).lower()
+    return any(
+        needle in text
+        for needle in (
+            "context_length_exceeded",
+            "maximum context length",
+            "context window",
+            "request too large",
+            "reduce your message size",
+            "too many tokens",
+        )
+    )
+
+
 class AIClient:
     def __init__(self, config: AIConfig | None = None):
         if config is None:
             config = AIConfig.from_env()
         self.config = config
         self._client = self._create_client()
+        # Negotiated lazily; capable providers start at strict schema, others at
+        # json_object so weaker models avoid a guaranteed-to-fail first call.
+        self._structured_mode = (
+            "json_schema"
+            if self.config.provider in {"openai", "google", "ollama"}
+            else "json_object"
+        )
+        self._context_budget: int | None = None
 
     def _create_client(self) -> Any:
         if self.config.provider == "ollama":
@@ -704,6 +785,9 @@ class AIClient:
         kwargs: dict[str, Any] = {
             "base_url": self.config.base_url,
             "api_key": self.config.api_key,
+            # Bound each request so a stuck connection cannot hang generation for
+            # the SDK default (~10 min) and then retry. Matches OllamaCloudClient.
+            "timeout": 120.0,
         }
         if self.config.provider == "openrouter":
             kwargs["default_headers"] = {"X-Title": "SBPEye"}
@@ -742,6 +826,22 @@ class AIClient:
             return None
         return min(value for value in detected if value is not None)
 
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        """Cheap token estimate (~4 chars/token) used only for batch sizing."""
+        return max(1, len(text) // 4)
+
+    def resolve_context_budget(self) -> int:
+        """Return the per-call input token budget for checklist extraction."""
+        if self._context_budget is not None:
+            return self._context_budget
+        window = self.detect_context_window()
+        if not window:
+            window = _PROVIDER_CONTEXT_WINDOW.get(self.config.provider, _DEFAULT_CONTEXT_WINDOW)
+        budget = int(window * _CONTEXT_INPUT_FRACTION)
+        self._context_budget = max(budget, 1_000)
+        return self._context_budget
+
     def list_models(self) -> list[dict[str, str]]:
         """Return provider model IDs in a normalized shape for the settings UI."""
         response = self._client.with_options(timeout=10.0, max_retries=0).models.list()
@@ -769,6 +869,49 @@ class AIClient:
             models.append({"id": model_id, "name": label or model_id})
         return sorted(models, key=lambda model: model["id"].lower())
 
+    @staticmethod
+    def _downgrade_structured_mode(mode: str) -> str:
+        index = _STRUCTURED_MODES.index(mode)
+        return _STRUCTURED_MODES[min(index + 1, len(_STRUCTURED_MODES) - 1)]
+
+    def _build_completion_kwargs(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        model: str,
+        temperature: float,
+        json_schema: dict[str, Any] | None,
+        mode: str,
+    ) -> dict[str, Any]:
+        system = system_prompt
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "temperature": temperature,
+        }
+        if json_schema and mode == "json_schema":
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "sbpeye_response",
+                    "strict": True,
+                    "schema": json_schema,
+                },
+            }
+        elif json_schema and mode == "json_object":
+            kwargs["response_format"] = {"type": "json_object"}
+        elif json_schema:
+            # Plain-text mode: no provider enforcement, so ask explicitly.
+            system = (
+                system_prompt
+                + "\n\nRespond with only a single valid JSON object and no other text."
+            )
+        kwargs["messages"] = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_prompt},
+        ]
+        return kwargs
+
     def _complete(
         self,
         system_prompt: str,
@@ -778,32 +921,54 @@ class AIClient:
         json_schema: dict[str, Any] | None = None,
     ) -> str:
         model = model or self.config.model
-        kwargs: dict[str, Any] = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": temperature,
-        }
-        if json_schema:
-            kwargs["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "sbpeye_response",
-                    "strict": True,
-                    "schema": json_schema,
-                },
-            }
-        try:
-            response = self._client.chat.completions.create(**kwargs)
-        except BadRequestError as exc:
-            if not json_schema or "response_format" not in str(exc):
+        while True:
+            mode = self._structured_mode if json_schema else "text"
+            kwargs = self._build_completion_kwargs(
+                system_prompt,
+                user_prompt,
+                model=model,
+                temperature=temperature,
+                json_schema=json_schema,
+                mode=mode,
+            )
+            try:
+                response = self._client.chat.completions.create(**kwargs)
+            except Exception as exc:
+                if json_schema and mode != "text" and _is_response_format_error(exc):
+                    # Provider rejected this structured-output tier; drop down and
+                    # cache so the rest of the run skips the dead mode.
+                    self._structured_mode = self._downgrade_structured_mode(mode)
+                    continue
                 raise
-            # Some OpenAI-compatible local servers only accept text responses.
-            kwargs["response_format"] = {"type": "text"}
-            response = self._client.chat.completions.create(**kwargs)
-        return response.choices[0].message.content or ""
+            return response.choices[0].message.content or ""
+
+    def _complete_json(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        json_schema: dict[str, Any],
+        temperature: float = 0.0,
+    ) -> str:
+        """Complete and return text that parses as a JSON object.
+
+        Beyond the API-error downgrade in :meth:`_complete`, this handles models
+        that accept the structured-output request but answer with prose anyway:
+        on an unparseable result it downgrades the cached mode and retries once.
+        """
+        raw = self._complete(
+            system_prompt, user_prompt, temperature=temperature, json_schema=json_schema
+        )
+        try:
+            self._parse_json_object(raw)
+            return raw
+        except ValueError:
+            if self._structured_mode == "text":
+                return raw
+            self._structured_mode = self._downgrade_structured_mode(self._structured_mode)
+            return self._complete(
+                system_prompt, user_prompt, temperature=temperature, json_schema=json_schema
+            )
 
     def _complete_chat(self, messages: list[dict[str, str]], model: str = "", temperature: float = 0.3) -> str:
         model = model or self.config.effective_chat_model
@@ -1022,7 +1187,10 @@ class AIClient:
             if classification not in {"required", "optional"}:
                 raise ValueError("The model returned an invalid checklist classification.")
 
-            source_ids = entry.get("source_unit_ids", entry.get("source_ids", []))
+            source_ids = entry.get(
+                "source_unit_ids",
+                entry.get("source_ids", entry.get("citations", [])),
+            )
             if isinstance(source_ids, str):
                 source_ids = [source_ids]
             if not isinstance(source_ids, list):
@@ -1050,55 +1218,102 @@ class AIClient:
             normalized.append(item)
         return normalized
 
-    def _extract_checklist_block(
+    _CHECKLIST_SYSTEM_PROMPT = (
+        "You are a conservative SBP regulatory compliance analyst. Extract "
+        "actionable compliance requirements from the SOURCE BLOCKS below. The "
+        "text may contain several sections, forms, or tables; read them together "
+        "as one corpus so related clauses inform each other.\n\n"
+        "INCLUDE: explicit duties, prohibitions, eligibility conditions, "
+        "controls, deadlines, recordkeeping, submission requirements, required "
+        "evidence, and explicit permissions or recommendations.\n"
+        "EXCLUDE: headings, definitions without an obligation, explanatory "
+        "narrative, addresses, greetings, signature labels, blank form fields, "
+        "empty table cells, and formatting fragments. For forms and tables, "
+        "extract only substantive required fields, attestations, evidence, "
+        "submission actions, or format constraints; never turn individual words "
+        "or decorative labels into items.\n"
+        "GROUPING: combine an introductory clause with its dependent list when "
+        "they form one obligation, but keep genuinely separate actions separate.\n"
+        "CLASSIFICATION: use \"required\" for duties, prohibitions, conditions, "
+        "and mandatory evidence; use \"optional\" only for explicit permissions "
+        "or recommendations.\n"
+        "FIELDS: each item is a JSON object with these keys: \"requirement\" (one "
+        "self-contained sentence of at least 8 characters stating the obligation), "
+        "\"classification\" (\"required\" or \"optional\"), \"actor\", \"action\", "
+        "\"object\", \"conditions\", \"deadline\", \"evidence\", \"applicability\", "
+        "and \"source_unit_ids\". Populate actor, action, object, conditions, "
+        "deadline, evidence, and applicability when present, using an empty string "
+        "when a field is absent.\n"
+        "CITATIONS: \"source_unit_ids\" must be a non-empty JSON array citing the "
+        "[SOURCE_ID: ...] value(s) from the block(s) the item came from, copied "
+        "exactly. Use no other key name for citations.\n"
+        "OUTPUT: return only a JSON object {\"items\":[...]}. If there is no "
+        "actionable requirement, return {\"items\":[]}."
+    )
+
+    def _extract_checklist_batch(
         self,
         *,
         circular_label: str,
-        block,
+        blocks: list,
         trace_callback=None,
     ) -> list[dict[str, Any]]:
-        system = """You are a conservative SBP regulatory compliance analyst. Extract actionable compliance requirements from exactly one complete SOURCE BLOCK.
-
-Include explicit duties, prohibitions, eligibility conditions, controls, deadlines, recordkeeping, submission requirements, required evidence, and explicit permissions or recommendations. Exclude headings, definitions without an obligation, explanatory narrative, addresses, greetings, signature labels, blank form fields, empty table cells, and formatting fragments. For forms and tables, extract only substantive required fields, attestations, evidence, submission actions, or format constraints; do not turn individual words or decorative labels into items. Combine an introductory clause with its dependent list when they form one obligation, but keep genuinely separate actions separate. Use "required" for duties, prohibitions, conditions, and mandatory evidence; use "optional" only for explicit permissions or recommendations. Populate actor, action, object, conditions, deadline, evidence, and applicability when present, using an empty string when a field is absent. Cite one or more SOURCE_ID values exactly as supplied. If the block contains no actionable requirement, return {"items":[]}. Return only the JSON object."""
+        schema = self._checklist_extraction_schema()
+        doc_label = blocks[0].doc_label
+        pages = [
+            page
+            for block in blocks
+            for page in (block.page_start, block.page_end)
+            if page is not None
+        ]
+        page_span = f"pages {min(pages)}-{max(pages)}" if pages else "HTML"
+        sections = "\n\n".join(
+            f"--- Section: {block.ref} (type: {block.block_type}, pages "
+            f"{block.page_start or 'HTML'}-{block.page_end or block.page_start or 'HTML'}) ---\n"
+            f"{block.source_text}"
+            for block in blocks
+        )
+        system = self._CHECKLIST_SYSTEM_PROMPT
         user = f"""Circular: {circular_label}
-Document: {block.doc_label}
-Block reference: {block.ref}
-Block type: {block.block_type}
-Pages: {block.page_start or 'HTML'}-{block.page_end or block.page_start or 'HTML'}
+Document: {doc_label}
+Sections: {len(blocks)} ({page_span})
 
-SOURCE BLOCK:
-{block.source_text}"""
+SOURCE BLOCKS:
+{sections}"""
+        valid_source_ids = {
+            source_id for block in blocks for source_id in block.source_unit_ids
+        }
+        trace_block = (
+            blocks[0]
+            if len(blocks) == 1
+            else SimpleNamespace(
+                ref=f"{len(blocks)} sections ({blocks[0].ref} … {blocks[-1].ref})",
+                block_id=blocks[0].block_id,
+            )
+        )
         if trace_callback:
             trace_callback("llm_input", {
-                "block": block,
+                "block": trace_block,
                 "system_prompt": system,
                 "user_prompt": user,
             })
-        result = self._complete(
-            system,
-            user,
-            temperature=0.0,
-            json_schema=self._checklist_extraction_schema(),
-        )
+        result = self._complete_json(system, user, json_schema=schema, temperature=0.0)
         if trace_callback:
-            trace_callback("llm_output", {"block": block, "raw_response": result})
-        valid_source_ids = set(block.source_unit_ids)
+            trace_callback("llm_output", {"block": trace_block, "raw_response": result})
         try:
             return self._parse_checklist_items(result, valid_source_ids)
         except ValueError:
             retry_system = (
                 system
-                + "\nYour previous response was malformed. Return the schema-compliant JSON object only, with valid SOURCE_ID citations."
+                + "\n\nYour previous response was malformed. Return the "
+                "schema-compliant JSON object only, with valid SOURCE_ID citations."
             )
-            retry_result = self._complete(
-                retry_system,
-                user,
-                temperature=0.0,
-                json_schema=self._checklist_extraction_schema(),
+            retry_result = self._complete_json(
+                retry_system, user, json_schema=schema, temperature=0.0
             )
             if trace_callback:
                 trace_callback("llm_output", {
-                    "block": block,
+                    "block": trace_block,
                     "raw_response": retry_result,
                     "attempt": 2,
                 })
@@ -1113,8 +1328,37 @@ SOURCE BLOCK:
                 ) from exc
 
     @staticmethod
-    def _materialize_checklist_item(entry, block, units_by_id) -> dict[str, Any]:
+    def _best_excerpt(requirement: str, source_text: str) -> str:
+        """Pick the source sentence that best supports the requirement.
+
+        Uses Jaccard token overlap (overlap relative to the union) with a minimum
+        length floor so a single high-frequency word can no longer win with a
+        misleadingly short fragment. Falls back to the full text when nothing
+        meaningfully overlaps.
+        """
+        requirement_tokens = set(re.findall(r"[a-z0-9]+", requirement.casefold()))
+        candidates = [
+            re.sub(r"\s+", " ", candidate).strip(" -*|\n")
+            for candidate in re.split(r"(?<=[.;:])\s+|\n+", source_text)
+        ]
+        candidates = [candidate for candidate in candidates if len(candidate) >= 20]
+
+        def score(candidate: str) -> float:
+            tokens = set(re.findall(r"[a-z0-9]+", candidate.casefold()))
+            if not tokens or not requirement_tokens:
+                return 0.0
+            return len(requirement_tokens & tokens) / len(requirement_tokens | tokens)
+
+        best = max(candidates, key=score, default="")
+        excerpt = best if best and score(best) > 0.0 else source_text
+        if len(excerpt) > 900:
+            excerpt = excerpt[:897].rstrip() + "..."
+        return excerpt
+
+    @staticmethod
+    def _materialize_checklist_item(entry, units_by_id) -> dict[str, Any]:
         source_units = [units_by_id[source_id] for source_id in entry["source_unit_ids"]]
+        primary = source_units[0]
         refs = list(dict.fromkeys(unit.ref for unit in source_units))
         pages = [
             page
@@ -1123,25 +1367,10 @@ SOURCE BLOCK:
             if page is not None
         ]
         digest = hashlib.sha256(
-            f"{block.doc_id}\0{entry['requirement']}\0{'|'.join(entry['source_unit_ids'])}".encode("utf-8")
+            f"{primary.doc_id}\0{entry['requirement']}\0{'|'.join(entry['source_unit_ids'])}".encode("utf-8")
         ).hexdigest()[:20]
         source_text = "\n\n".join(unit.source_text for unit in source_units)
-        requirement_tokens = set(re.findall(r"[a-z0-9]+", entry["requirement"].casefold()))
-        candidates = [
-            re.sub(r"\s+", " ", candidate).strip(" -*|\n")
-            for candidate in re.split(r"(?<=[.;:])\s+|\n+", source_text)
-        ]
-        candidates = [candidate for candidate in candidates if candidate]
-        source_excerpt = max(
-            candidates,
-            key=lambda candidate: len(
-                requirement_tokens
-                & set(re.findall(r"[a-z0-9]+", candidate.casefold()))
-            ),
-            default=source_text,
-        )
-        if len(source_excerpt) > 900:
-            source_excerpt = source_excerpt[:897].rstrip() + "..."
+        source_excerpt = AIClient._best_excerpt(entry["requirement"], source_text)
         return {
             "item_id": f"checklist:{digest}",
             "requirement": entry["requirement"],
@@ -1157,9 +1386,9 @@ SOURCE BLOCK:
             "source_refs": refs,
             "source_unit_ids": entry["source_unit_ids"],
             "source_text": source_excerpt,
-            "doc_id": block.doc_id,
-            "doc_type": block.doc_type,
-            "doc_label": block.doc_label,
+            "doc_id": primary.doc_id,
+            "doc_type": primary.doc_type,
+            "doc_label": primary.doc_label,
             "page_start": min(pages) if pages else None,
             "page_end": max(pages) if pages else None,
         }
@@ -1211,6 +1440,73 @@ SOURCE BLOCK:
                 existing["page_end"] = max(pages)
         return deduplicated
 
+    @staticmethod
+    def _record_block_gap(gaps: list[dict[str, Any]], block, exc: Exception) -> None:
+        gaps.append({
+            "doc_id": block.doc_id,
+            "doc_type": block.doc_type,
+            "doc_label": block.doc_label,
+            "reason": "checklist_extraction_error",
+            "error": str(exc),
+            "block_id": block.block_id,
+            "ref": block.ref,
+            "page_start": block.page_start,
+            "page_end": block.page_end,
+        })
+
+    def _run_checklist_batch(
+        self,
+        *,
+        circular_label: str,
+        batch: list,
+        units_by_id: dict[str, Any],
+        gaps: list[dict[str, Any]],
+        trace_callback=None,
+    ) -> list[dict[str, Any]]:
+        """Extract one batch, degrading to per-block calls when the batch fails.
+
+        Rate-limit errors propagate so callers can abort. Parse and context-size
+        failures on a multi-block batch are recovered by retrying each block on
+        its own; a block that still fails is recorded as a coverage gap.
+        """
+        try:
+            extracted = self._extract_checklist_batch(
+                circular_label=circular_label,
+                blocks=batch,
+                trace_callback=trace_callback,
+            )
+            return [
+                self._materialize_checklist_item(entry, units_by_id)
+                for entry in extracted
+            ]
+        except Exception as exc:
+            if is_rate_limit_error(exc):
+                raise
+            if not isinstance(exc, ValueError) and not _is_context_size_error(exc):
+                raise
+            if len(batch) == 1:
+                self._record_block_gap(gaps, batch[0], exc)
+                return []
+
+        # Multi-block batch failed for a recoverable reason: salvage per block.
+        materialized: list[dict[str, Any]] = []
+        for block in batch:
+            try:
+                extracted = self._extract_checklist_batch(
+                    circular_label=circular_label,
+                    blocks=[block],
+                    trace_callback=trace_callback,
+                )
+                materialized.extend(
+                    self._materialize_checklist_item(entry, units_by_id)
+                    for entry in extracted
+                )
+            except Exception as block_exc:
+                if is_rate_limit_error(block_exc):
+                    raise
+                self._record_block_gap(gaps, block, block_exc)
+        return materialized
+
     def generate_checklist(
         self,
         circular,
@@ -1221,7 +1517,12 @@ SOURCE BLOCK:
         documents: list[dict[str, Any]] | None = None,
         gaps: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        from .checklist import build_analysis_blocks, build_checklist_corpus, segment_document
+        from .checklist import (
+            build_analysis_blocks,
+            build_checklist_corpus,
+            build_extraction_batches,
+            segment_document,
+        )
 
         if documents is None:
             documents, discovered_gaps = build_checklist_corpus(circular)
@@ -1266,52 +1567,51 @@ SOURCE BLOCK:
         if trace_callback:
             for document, _, blocks in document_blocks:
                 trace_callback("analysis_blocks", {"document": document, "blocks": blocks})
-        total_blocks = sum(len(blocks) for _, _, blocks in document_blocks)
+        # Pack each document's blocks into the fewest LLM calls that fit the
+        # model's context window. A small circular collapses to a single call so
+        # the model sees the whole document at once.
+        budget = self.resolve_context_budget()
+        document_batches = [
+            (document, build_extraction_batches(blocks, budget, self._estimate_tokens))
+            for document, _, blocks in document_blocks
+        ]
+        total_batches = sum(len(batches) for _, batches in document_batches)
         completed = 0
         checklist_items: list[dict[str, Any]] = []
         all_units = [unit for _, units in document_units for unit in units]
         units_by_id = {unit.unit_id: unit for unit in all_units}
         circular_label = circular.reference or circular.title
         if progress_callback:
-            progress_callback(0, total_blocks)
+            progress_callback(0, total_batches)
 
-        for _, _, blocks in document_blocks:
-            for block in blocks:
-                try:
-                    extracted = self._extract_checklist_block(
-                        circular_label=circular_label,
-                        block=block,
-                        trace_callback=trace_callback,
-                    )
-                    materialized = [
-                        self._materialize_checklist_item(entry, block, units_by_id)
-                        for entry in extracted
-                    ]
-                    checklist_items.extend(materialized)
-                except ValueError as exc:
-                    materialized = []
-                    gaps.append({
-                        "doc_id": block.doc_id,
-                        "doc_type": block.doc_type,
-                        "doc_label": block.doc_label,
-                        "reason": "checklist_extraction_error",
-                        "error": str(exc),
-                        "block_id": block.block_id,
-                        "ref": block.ref,
-                        "page_start": block.page_start,
-                        "page_end": block.page_end,
-                    })
+        for _, batches in document_batches:
+            for batch in batches:
+                materialized = self._run_checklist_batch(
+                    circular_label=circular_label,
+                    batch=batch,
+                    units_by_id=units_by_id,
+                    gaps=gaps,
+                    trace_callback=trace_callback,
+                )
+                checklist_items.extend(materialized)
+                completed += 1
                 if trace_callback:
                     trace_callback("normalized_block", {
-                        "block": block,
+                        "block": (
+                            batch[0]
+                            if len(batch) == 1
+                            else SimpleNamespace(
+                                ref=f"{len(batch)} sections",
+                                block_id=batch[0].block_id,
+                            )
+                        ),
                         "items": materialized,
-                        "completed": completed + 1,
-                        "total": total_blocks,
+                        "completed": completed,
+                        "total": total_batches,
                     })
-                completed += 1
                 if progress_callback:
-                    progress_callback(completed, total_blocks)
-                if delay > 0 and completed < total_blocks:
+                    progress_callback(completed, total_batches)
+                if delay > 0 and completed < total_batches:
                     time.sleep(delay)
 
         checklist_items = self._deduplicate_checklist_items(checklist_items)

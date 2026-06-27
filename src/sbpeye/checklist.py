@@ -781,6 +781,35 @@ def build_analysis_blocks(units: list[ReferenceUnit]) -> list[AnalysisBlock]:
     return blocks
 
 
+def build_extraction_batches(
+    blocks: list[AnalysisBlock],
+    budget_tokens: int,
+    estimate_fn,
+) -> list[list[AnalysisBlock]]:
+    """Greedily pack blocks (in document order) into the fewest batches that fit.
+
+    A batch's combined source text is kept under ``budget_tokens`` (estimated via
+    ``estimate_fn``). When every block fits in one batch the result is a single
+    batch, giving the whole-document fast path for free. A block larger than the
+    budget on its own becomes an isolated batch; the caller is responsible for any
+    further size handling on that block.
+    """
+    batches: list[list[AnalysisBlock]] = []
+    current: list[AnalysisBlock] = []
+    current_tokens = 0
+    for block in blocks:
+        block_tokens = estimate_fn(block.source_text)
+        if current and current_tokens + block_tokens > budget_tokens:
+            batches.append(current)
+            current = []
+            current_tokens = 0
+        current.append(block)
+        current_tokens += block_tokens
+    if current:
+        batches.append(current)
+    return batches
+
+
 def prepare_reference_chunks(
     document: dict[str, Any], max_words: int = 350, overlap_words: int = 75
 ) -> list[dict[str, Any]]:

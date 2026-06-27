@@ -6,10 +6,13 @@ import pytest
 
 from sbpeye.ai import AIClient, AIConfig
 from sbpeye.checklist import (
+    AnalysisBlock,
+    ReferenceUnit,
     _expand_marker,
     automatic_na_reason,
     build_analysis_blocks,
     build_checklist_corpus,
+    build_extraction_batches,
     compact_required_checklist,
     prepare_reference_chunks,
     segment_document,
@@ -332,6 +335,27 @@ def test_checklist_extraction_rejects_unknown_source_citations():
         AIClient._parse_checklist_items(response, {"source-1"})
 
 
+def test_checklist_extraction_accepts_citations_alias():
+    # Models in json_object mode (no schema enforcement) sometimes return the
+    # citation list under "citations" instead of "source_unit_ids".
+    response = json.dumps({"items": [{
+        "requirement": "Banks shall report monthly.",
+        "classification": "required",
+        "citations": ["source-1"],
+    }]})
+
+    items = AIClient._parse_checklist_items(response, {"source-1"})
+    assert items[0]["source_unit_ids"] == ["source-1"]
+
+
+def test_checklist_system_prompt_specifies_required_keys():
+    # The prompt is the contract in json_object/text mode (schema not enforced),
+    # so it must name the keys the parser requires or every response fails.
+    prompt = AIClient._CHECKLIST_SYSTEM_PROMPT
+    assert "requirement" in prompt
+    assert "source_unit_ids" in prompt
+
+
 def test_invalid_checklist_response_is_retried(monkeypatch):
     client = AIClient(AIConfig())
     responses = iter(["The unit is required.", None])
@@ -429,3 +453,191 @@ def test_compact_checklist_supports_legacy_required_source_units():
         "doc_label": "rules.pdf",
         "requirement": "File reports.",
     }]
+
+
+# --- Batching, capability tiers, and degradation -------------------------------
+
+
+def _make_block(block_id, text="Banks shall report monthly.", source_unit_ids=None):
+    return AnalysisBlock(
+        block_id=block_id,
+        ref=block_id,
+        doc_id="doc-1",
+        doc_type="circular",
+        doc_label="Doc",
+        block_type="regulation",
+        source_text=text,
+        source_unit_ids=source_unit_ids or [block_id],
+        heading_path=[],
+        page_start=None,
+        page_end=None,
+    )
+
+
+def _make_unit(unit_id, text="Banks shall report monthly."):
+    return ReferenceUnit(
+        unit_id=unit_id,
+        ref=f"ref-{unit_id}",
+        doc_id="doc-1",
+        doc_type="circular",
+        doc_label="Doc",
+        source_text=text,
+        heading_path=[],
+        page_start=1,
+        page_end=1,
+        start_offset=0,
+        end_offset=len(text),
+        oversized=False,
+        kind="text",
+    )
+
+
+def test_build_extraction_batches_packs_small_corpus_into_single_batch():
+    blocks = [_make_block(f"b{i}", "short text") for i in range(3)]
+    batches = build_extraction_batches(blocks, 1000, AIClient._estimate_tokens)
+    assert len(batches) == 1
+    assert [block.block_id for block in batches[0]] == ["b0", "b1", "b2"]
+
+
+def test_build_extraction_batches_splits_when_over_budget():
+    # Each block is ~100 estimated tokens (400 chars); budget fits two per batch.
+    blocks = [_make_block(f"b{i}", "x" * 400) for i in range(3)]
+    batches = build_extraction_batches(blocks, 250, AIClient._estimate_tokens)
+    assert [[block.block_id for block in batch] for batch in batches] == [
+        ["b0", "b1"],
+        ["b2"],
+    ]
+
+
+def test_build_extraction_batches_isolates_oversized_block():
+    big = _make_block("big", "x" * 4000)  # ~1000 tokens, over budget on its own
+    small = _make_block("small", "x" * 40)
+    batches = build_extraction_batches([big, small], 250, AIClient._estimate_tokens)
+    assert [[block.block_id for block in batch] for batch in batches] == [
+        ["big"],
+        ["small"],
+    ]
+
+
+class _FakeBadRequest(Exception):
+    status_code = 400
+
+
+def _fake_response(content):
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+
+
+def _install_fake_client(client, create):
+    client._client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+
+def test_complete_downgrades_structured_mode_on_response_format_error():
+    client = AIClient(AIConfig())
+    client._structured_mode = "json_schema"
+    calls = []
+
+    def create(**kwargs):
+        calls.append(kwargs.get("response_format"))
+        rf = kwargs.get("response_format") or {}
+        if rf.get("type") == "json_schema":
+            raise _FakeBadRequest("response_format json_schema is not supported")
+        return _fake_response('{"items": []}')
+
+    _install_fake_client(client, create)
+    result = client._complete("sys", "user", json_schema={"type": "object"})
+
+    assert result == '{"items": []}'
+    assert client._structured_mode == "json_object"
+    assert [rf and rf.get("type") for rf in calls] == ["json_schema", "json_object"]
+
+
+def test_complete_json_downgrades_when_model_ignores_structured_output():
+    client = AIClient(AIConfig())
+    client._structured_mode = "json_object"
+
+    def create(**kwargs):
+        # json_object mode returns prose; plain-text mode returns valid JSON.
+        if kwargs.get("response_format"):
+            return _fake_response("Sorry, here is the answer in prose.")
+        return _fake_response('{"items": []}')
+
+    _install_fake_client(client, create)
+    result = client._complete_json("sys", "user", json_schema={"type": "object"})
+
+    assert result == '{"items": []}'
+    assert client._structured_mode == "text"
+
+
+def test_run_checklist_batch_recovers_by_splitting_failed_batch(monkeypatch):
+    client = AIClient(AIConfig())
+
+    def fake_extract(*, circular_label, blocks, trace_callback=None):
+        if len(blocks) > 1:
+            raise ValueError("batch too large for one call")
+        unit_id = blocks[0].source_unit_ids[0]
+        return [{
+            "requirement": "Banks shall report monthly.",
+            "classification": "required",
+            "actor": "", "action": "", "object": "",
+            "conditions": "", "deadline": "", "evidence": "", "applicability": "",
+            "source_unit_ids": [unit_id],
+        }]
+
+    monkeypatch.setattr(client, "_extract_checklist_batch", fake_extract)
+    batch = [_make_block("u1"), _make_block("u2")]
+    units_by_id = {"u1": _make_unit("u1"), "u2": _make_unit("u2")}
+    gaps = []
+
+    items = client._run_checklist_batch(
+        circular_label="C",
+        batch=batch,
+        units_by_id=units_by_id,
+        gaps=gaps,
+    )
+
+    assert len(items) == 2
+    assert gaps == []
+    assert {item["source_unit_ids"][0] for item in items} == {"u1", "u2"}
+
+
+def test_run_checklist_batch_records_gap_when_single_block_fails(monkeypatch):
+    client = AIClient(AIConfig())
+
+    def fake_extract(*, circular_label, blocks, trace_callback=None):
+        raise ValueError("still malformed")
+
+    monkeypatch.setattr(client, "_extract_checklist_batch", fake_extract)
+    gaps = []
+
+    items = client._run_checklist_batch(
+        circular_label="C",
+        batch=[_make_block("u1")],
+        units_by_id={"u1": _make_unit("u1")},
+        gaps=gaps,
+    )
+
+    assert items == []
+    assert gaps[0]["reason"] == "checklist_extraction_error"
+    assert gaps[0]["block_id"] == "u1"
+
+
+def test_run_checklist_batch_propagates_rate_limit(monkeypatch):
+    client = AIClient(AIConfig())
+
+    class _RateLimited(Exception):
+        status_code = 429
+
+    def fake_extract(*, circular_label, blocks, trace_callback=None):
+        raise _RateLimited("rate limit exceeded")
+
+    monkeypatch.setattr(client, "_extract_checklist_batch", fake_extract)
+
+    with pytest.raises(_RateLimited):
+        client._run_checklist_batch(
+            circular_label="C",
+            batch=[_make_block("u1"), _make_block("u2")],
+            units_by_id={"u1": _make_unit("u1"), "u2": _make_unit("u2")},
+            gaps=[],
+        )

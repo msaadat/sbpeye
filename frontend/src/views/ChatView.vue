@@ -57,6 +57,7 @@ const editDraft = ref('')
 const renamingSessionId = ref<string | null>(null)
 const renameDraft = ref('')
 const errorMessage = ref('')
+const activityStatus = ref('')
 const messagesEl = ref<HTMLElement | null>(null)
 const attachmentDialogVisible = ref(false)
 const selectedAttachment = ref<ResolvedDocument | null>(null)
@@ -598,6 +599,7 @@ async function generateMessage(
   }
 
   errorMessage.value = ''
+  activityStatus.value = 'Thinking'
   sending.value = true
   editingMessageId.value = null
   const circularIds = replaceMessage?.circular_ids?.length
@@ -650,7 +652,15 @@ async function generateMessage(
         onSession: (sessionId) => {
           currentSessionId.value = sessionId
         },
+        onStatus: (status) => {
+          if (status.phase === 'tools' && status.tools?.length) {
+            activityStatus.value = status.tools.join(' · ')
+          } else if (status.phase === 'thinking') {
+            activityStatus.value = 'Thinking'
+          }
+        },
         onToken: (content) => {
+          activityStatus.value = 'Generating'
           messages.value = messages.value.map((message) =>
             message.id === assistantId ? { ...message, content: message.content + content } : message,
           )
@@ -685,6 +695,7 @@ async function generateMessage(
   } finally {
     streamController = null
     sending.value = false
+    activityStatus.value = ''
   }
 }
 
@@ -1040,7 +1051,7 @@ onMounted(async () => {
 
               <div v-if="sending" class="assistant-typing">
                 <i class="pi pi-spin pi-spinner" />
-                <span>Generating</span>
+                <span>{{ activityStatus || 'Generating' }}</span>
               </div>
             </div>
 

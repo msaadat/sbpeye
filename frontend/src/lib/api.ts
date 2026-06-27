@@ -771,6 +771,7 @@ export async function streamChatMessage(
   handlers: {
     onSession?: (sessionId: string) => void
     onToken: (content: string) => void
+    onStatus?: (status: { phase: string; tools?: string[] }) => void
     onError?: (message: string) => void
     onDone?: (sessionId?: string) => void
   },
@@ -818,10 +819,21 @@ export async function streamChatMessage(
       return
     }
 
-    const data = JSON.parse(dataLines.join('\n')) as { content?: string; session_id?: string; error?: string }
+    const data = JSON.parse(dataLines.join('\n')) as {
+      content?: string
+      session_id?: string
+      error?: string
+      phase?: string
+      tools?: string[]
+    }
 
     if (event === 'meta' && data.session_id) {
       handlers.onSession?.(data.session_id)
+      return
+    }
+
+    if (event === 'status' && data.phase) {
+      handlers.onStatus?.({ phase: data.phase, tools: data.tools })
       return
     }
 

@@ -74,6 +74,23 @@ TAG_TAXONOMY = [
 ]
 
 
+# Human-readable activity labels for the chat status stream. Keys must match the
+# tool function names declared in ``TOOLS`` below.
+TOOL_LABELS = {
+    "search_selected_documents": "Searching selected documents",
+    "search_circulars": "Searching circulars",
+    "get_latest_circulars": "Fetching latest circulars",
+    "get_circular_details": "Reading circular details",
+    "query_regulatory_values": "Looking up regulatory values",
+    "get_circulars_by_tag": "Browsing circulars by tag",
+}
+
+
+def tool_activity_label(name: str) -> str:
+    """Friendly label for a tool call, falling back to a humanized name."""
+    return TOOL_LABELS.get(name, name.replace("_", " ").strip().capitalize())
+
+
 TOOLS = [
     {
         "type": "function",
@@ -2079,6 +2096,7 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
 
         max_iterations = 5
         for _ in range(max_iterations):
+            yield {"phase": "thinking"}
             stream = self._client.chat.completions.create(
                 model=self.config.effective_chat_model,
                 messages=full_messages,
@@ -2118,14 +2136,24 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
             if not tool_calls:
                 return
 
+            ordered_calls = [tool_calls[index] for index in sorted(tool_calls)]
+            yield {
+                "phase": "tools",
+                "tools": [
+                    tool_activity_label(call["function"]["name"])
+                    for call in ordered_calls
+                ],
+            }
+
             self._apply_tool_calls(
                 full_messages,
                 "".join(content_parts),
-                [tool_calls[index] for index in sorted(tool_calls)],
+                ordered_calls,
                 db,
                 selected_circular_ids,
             )
 
+        yield {"phase": "thinking"}
         synthesis_messages = self._tool_result_synthesis_messages(
             messages, full_messages, circulars_context
         )

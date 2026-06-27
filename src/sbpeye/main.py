@@ -1690,6 +1690,9 @@ async def chat_message_stream(request: Request, db: Session = Depends(get_db)):
                 circulars_context=circulars_context,
                 selected_circular_ids=circular_ids,
             ):
+                if isinstance(chunk, dict):
+                    yield sse("status", chunk)
+                    continue
                 response_parts.append(chunk)
                 yield sse("token", {"content": chunk})
 

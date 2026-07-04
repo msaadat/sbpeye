@@ -105,6 +105,25 @@ def _reference_parts(text: str | None, inferred_year: int | None = None) -> dict
     }
 
 
+def normalize_reference(reference: str | None) -> str | None:
+    """Return a canonical, site-independent key for a circular reference.
+
+    "DMMD Circular Letter No. 03 of 2023", " dmmd  circular letter no 3 of 2023 ",
+    and the same reference as shown on either the new or the archived site all map to
+    "DMMD CIRCULAR LETTER NO 3 OF 2023". Returns ``None`` when the text contains no
+    parseable circular reference (e.g. unreferenced notices), so callers can fall back
+    to a URL-derived identity.
+    """
+    parts = _reference_parts(reference)
+    if not parts:
+        return None
+    kind = "CIRCULAR LETTER" if parts["is_letter"] else "CIRCULAR"
+    key = f"{parts['prefix']} {kind} NO {parts['number']}"
+    if parts["year"]:
+        key += f" OF {parts['year']}"
+    return key
+
+
 def _candidate_year(circular: Circular) -> int | None:
     if circular.date:
         return circular.date.year
@@ -306,6 +325,39 @@ def _link_plain_circular_references(soup: BeautifulSoup, circular: Circular, db:
         if last_end < len(text):
             replacements.append(NavigableString(text[last_end:]))
         text_node.replace_with(*replacements)
+
+
+def harvest_reference_links(html: str | bytes, db: Session, current: Circular) -> list[Circular]:
+    """Circulars that ``current``'s detail page hyperlinks to.
+
+    The redesigned site pre-renders in-text references as real ``<a>`` links to other
+    circular slugs. Resolving those anchors against stored circulars gives deterministic
+    relationship targets (no LLM needed), which callers merge with the model's output.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    targets: dict[str, Circular] = {}
+    for anchor in soup.find_all("a", href=True):
+        try:
+            url = normalize_sbp_url(anchor.get("href", ""))
+        except ValueError:
+            continue
+        path = urlparse(url).path
+        # Only individual circular detail slugs, not the paginated listing (…/circulars/P30).
+        if "/circulars/" not in path or re.search(r"/circulars/P\d+$", path):
+            continue
+        match = (
+            db.query(Circular)
+            .filter(
+                or_(
+                    func.lower(Circular.new_url) == url.lower(),
+                    func.lower(Circular.url) == url.lower(),
+                )
+            )
+            .first()
+        )
+        if match is not None and match.id != current.id:
+            targets[match.id] = match
+    return list(targets.values())
 
 
 def rewrite_document_links(html: str, circular: Circular, db: Session) -> str:

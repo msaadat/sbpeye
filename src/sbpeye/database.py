@@ -46,6 +46,8 @@ def _ensure_columns():
         if "circulars" in table_names:
             existing = {c["name"] for c in insp.get_columns("circulars")}
             new_columns = [
+                ("new_url", "VARCHAR"),
+                ("old_url", "VARCHAR"),
                 ("summary", "TEXT"),
                 ("tags", "TEXT"),
                 ("compliance_checklist", "TEXT"),

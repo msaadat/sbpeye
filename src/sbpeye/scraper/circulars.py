@@ -1,4 +1,5 @@
 import requests
+import cloudscraper
 from bs4 import BeautifulSoup
 import re
 import logging
@@ -12,11 +13,18 @@ from ..models import Attachment, Circular, CircularRelationship
 from ..database import PROJECT_ROOT, collection, embedding_backend
 from ..checklist import PAGE_MARKER_RE, prepare_reference_chunks
 from .clean_html import extract_sbp_text
-from ..link_routing import normalize_sbp_url
+from ..link_routing import normalize_reference, normalize_sbp_url
 import uuid
 from urllib.parse import unquote, urljoin, urlparse
 
 BASE_URL = "https://www.sbp.org.pk"
+ARCHIVE_BASE_URL = "https://archive.sbp.org.pk"
+
+# The redesigned site (July 2026) serves all circulars from a single paginated
+# listing at index.php?/circulars/P{offset}; the offset advances 30 at a time.
+CIRCULARS_LISTING_URL_FIRST = f"{BASE_URL}/circulars/"
+CIRCULARS_LISTING_URL = f"{BASE_URL}/circulars/P{{offset}}"
+LISTING_PAGE_SIZE = 30
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -26,44 +34,25 @@ ATTACHMENTS_DIR = PROJECT_ROOT / "attachments"
 ATTACHMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx"}
 _CHROMA_WRITE_LOCK = threading.Lock()
 
-# Map from department index URL path to a human-readable department name.
-# Scraped from the cir.asp page links [31]-[56].
-DEPARTMENT_INDEX_PAGES = {
-    "../acd/index.htm":        "Agriculture Credit & Financial Inclusion (ACFID)",
-    "../bsd-1/index.htm":      "Banking Supervision Department-1",
-    "../bsd-2/index.htm":      "Banking Supervision Department-2",
-    "../bsd-3/index.htm":      "Banking Supervision Department-3",
-    "../bpd/index.htm":        "Banking Policy & Regulations (BPRD)",
-    "../bsrvd/index.htm":      "Banking Surveillance Department",
-    "../CRMD/index.htm":       "Cyber Risk Management Department",
-    "../cpd/index.htm":        "Consumer Protection Department",
-    "../BCPD/index.htm":       "Banking Conduct Policy Department",
-    "../stats/index.htm":      "Statistics & Data Services Department",
-    "../dmmd/index.htm":       "Domestic Markets & Monetary Management (DMMD)",
-    "../DFIs/index.htm":       "DFIs & Exchange Companies Inspection",
-    "../disd/index.htm":       "Digital Innovation & Settlements Department",
-    "../acc/index.htm":        "Finance Department",
-    "../FIRD/index.htm":       "Financial Institutions Resolution Department",
-    "../fsd/index.htm":        "Financial Stability Department",
-    "../smefd/circulars/index.htm": "SME, Housing & Sustainable Finance",
-    "../ifpd/index.htm":       "Islamic Finance Policy Department",
-    "../ifdd/index.htm":       "Islamic Finance Development Department",
-    "../MFD/index.htm":        "Microfinance Department",
-    "../psd/index.htm":        "Payment Systems Policy & Oversight",
-    "../rtgs/circulars/index.htm": "RTGS System",
-    "../tod/index.htm":        "Treasury Operations Department",
-    "../CMD/index.htm":        "Currency & Accounts Department (CAD)",
-}
 
-# Exchange Policy Department uses a different base domain
-EPD_INDEX = "https://www.sbp.org.pk/epd/index.htm"
+def circular_identity(reference: str | None, url: str) -> str:
+    """The stable primary-key id for a circular.
+
+    A circular's identity is its normalized reference (e.g. "BPRD CIRCULAR NO 4 OF
+    2025"), so the same circular gets the same id whether it is scraped from the new
+    site, from the archive, or under a different URL slug. Unreferenced circulars fall
+    back to a URL-derived id.
+    """
+    basis = normalize_reference(reference) or url
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, basis))
 
 
 def _get_sbp(url: str, **kwargs):
     """Fetch an SBP URL while validating every redirect target."""
     current_url = normalize_sbp_url(url)
     for _ in range(6):
-        response = requests.get(current_url, allow_redirects=False, **kwargs)
+        # response = requests.get(current_url, allow_redirects=False, **kwargs)
+        response = cloudscraper.create_scraper().get(current_url, **kwargs)
         status_code = getattr(response, "status_code", 200)
         if status_code not in {301, 302, 303, 307, 308}:
             return response
@@ -77,7 +66,9 @@ def _get_sbp(url: str, **kwargs):
 
 def fetch_page(url: str) -> BeautifulSoup:
     """Fetch a URL and return a BeautifulSoup object."""
-    resp = requests.get(url, headers=HEADERS, timeout=50)
+    print(f"Fetching {url}")
+    # resp = requests.get(url, headers=HEADERS, timeout=50)
+    resp = cloudscraper.create_scraper().get(url, headers=HEADERS, timeout=50)
     resp.raise_for_status()
     return BeautifulSoup(resp.content, "html.parser")
 
@@ -97,6 +88,13 @@ def fetch_page_cached(url: str, force: bool = False) -> bytes:
     temp_file.write_bytes(response.content)
     temp_file.replace(cache_file)
     return response.content
+
+
+def cached_circular_html(circular) -> bytes | None:
+    """Return a circular's cached detail HTML, or None if it has not been fetched."""
+    cache_id = str(uuid.uuid5(uuid.NAMESPACE_URL, circular.url or ""))
+    cache_file = HTML_CACHE_DIR / f"{cache_id}.html"
+    return cache_file.read_bytes() if cache_file.is_file() else None
 
 
 def detect_attachments(soup: BeautifulSoup, base_url: str) -> list[dict]:
@@ -369,181 +367,116 @@ def fetch_attachments_for_circular(
     return processed
 
 
-def discover_departments(verbose: bool = False) -> list[dict]:
-    """
-    Scrape cir.asp to discover department index pages.
-    Returns list of {"name": ..., "url": ...} dicts.
-    """
-    soup = fetch_page(f"{BASE_URL}/circulars/cir.asp")
-    departments = []
+def _reference_year(reference: str) -> str:
+    """Best-effort year extracted from a listing reference (for date parsing)."""
+    match = re.search(r"\b((?:19|20)\d{2})\b", reference or "")
+    return match.group(1) if match else ""
 
-    for link in soup.find_all("a", href=True):
-        href = link["href"]
-        text = link.get_text(strip=True)
-        if not text:
+
+def parse_circular_listing(soup: BeautifulSoup) -> list[dict]:
+    """Parse one circulars listing page into circular descriptors.
+
+    Each entry on the redesigned site is a ``div.publication-box-new`` holding a title
+    link (the slug detail URL), a reference line, and a meta line with the date and the
+    department / category / type spans.
+    """
+    circulars: list[dict] = []
+    for box in soup.select("div.publication-box-new"):
+        link = box.select_one("h4 a[href]")
+        if not link:
+            continue
+        title = re.sub(r"\s+", " ", link.get_text(strip=True))
+        if not title:
+            continue
+        try:
+            url = normalize_sbp_url(urljoin(BASE_URL, link.get("href", "").strip()))
+        except ValueError:
             continue
 
-        # Match known department links
-        if href in DEPARTMENT_INDEX_PAGES:
-            dept_url = urljoin(f"{BASE_URL}/circulars/cir.asp", href)
-            dept_name = DEPARTMENT_INDEX_PAGES[href]
-            departments.append({"name": dept_name, "url": dept_url})
-        elif href == EPD_INDEX or "epd/index" in href:
-            departments.append({"name": "Exchange Policy Department", "url": EPD_INDEX})
+        ref_el = box.select_one("p.mb-3.date")
+        reference = re.sub(r"\s+", " ", ref_el.get_text(" ", strip=True)) if ref_el else ""
 
-    if verbose:
-        print(f"Discovered {len(departments)} departments")
-        for d in departments:
-            print(f"  - {d['name']}: {d['url']}")
+        # The reference line and the meta line are both <p class="... date">; the meta
+        # line is the one carrying the department/category/type spans.
+        meta = next((p for p in box.select("p.date") if p.select_one("span.dept")), None)
+        department = category = doc_type = date_text = ""
+        if meta is not None:
+            dept_el = meta.select_one("span.dept")
+            cat_el = meta.select_one("span.cat")
+            type_el = meta.select_one("span.type")
+            department = dept_el.get_text(strip=True) if dept_el else ""
+            category = cat_el.get_text(strip=True) if cat_el else ""
+            doc_type = type_el.get_text(strip=True) if type_el else ""
+            # The date is the leading text node before the first "|" separator.
+            date_text = meta.get_text(" ", strip=True).split("|", 1)[0].strip()
 
-    return departments
+        if not department and reference:
+            department = reference.split()[0]
 
-
-def discover_year_pages(dept_url: str, verbose: bool = False) -> list[dict]:
-    """
-    Given a department index page URL, discover year-level circular pages.
-    Returns list of {"year": str, "url": str} dicts.
-    """
-    soup = fetch_page(dept_url)
-    year_pages = []
-
-    for link in soup.find_all("a", href=True):
-        text = link.get_text(strip=True)
-        href = link["href"]
-
-        # Year links are typically just "2025", "2024", etc.
-        if re.match(r"^\d{4}$", text):
-            try:
-                year_url = normalize_sbp_url(urljoin(dept_url, href))
-            except ValueError:
-                continue
-            year_pages.append({"year": text, "url": year_url})
-        # Some departments also have range links like "1981-1990" pointing to PDFs
-        elif re.match(r"^\d{4}-\d{4}$", text) and not href.endswith(".pdf"):
-            try:
-                year_url = normalize_sbp_url(urljoin(dept_url, href))
-            except ValueError:
-                continue
-            year_pages.append({"year": text, "url": year_url})
-
-    if verbose:
-        print(f"  Year pages found: {len(year_pages)}")
-        for yp in year_pages[:5]:
-            print(f"    {yp['year']}: {yp['url']}")
-        if len(year_pages) > 5:
-            print(f"    ... and {len(year_pages) - 5} more")
-
-    return year_pages
-
-
-def discover_circulars_on_year_page(
-    year_url: str, department: str, year: str, verbose: bool = False
-) -> list[dict]:
-    """
-    Given a year-level page URL, discover individual circulars.
-    Returns list of {"reference": ..., "date": ..., "title": ..., "url": ..., "department": ..., "year": ...} dicts.
-
-    Parses table rows with structure: [Circular Reference | Date | Title (link)]
-    Falls back to link-only extraction if no suitable table is found.
-    """
-    try:
-        soup = fetch_page(year_url)
-    except Exception as e:
-        if verbose:
-            print(f"    [WARN] Could not fetch {year_url}: {e}")
-        return []
-
-    circulars = []
-    seen_urls = set()
-
-    # The main circular listing table typically uses width="1000".
-    tables = soup.find_all("table", attrs={"width": "1000"})
-    if not tables:
-        tables = soup.find_all("table")
-
-    for table in tables:
-        for tr in table.find_all("tr"):
-            if tr.find("table") and tr.find("table").find("img", src="../../images/back.jpg"):
-                continue
-
-            cells = tr.find_all(["td", "th"])
-            if len(cells) < 3 or len(cells) > 10:
-                continue
-
-            title_cell = cells[2]
-            link = title_cell.find("a", href=True)
-            if not link:
-                continue
-
-            href = link["href"]
-            title = link.get_text(strip=True)
-
-            if not title or len(title) < 3:
-                continue
-
-            href_lower = href.lower()
-            if not href_lower.endswith((".htm", ".html")):
-                continue
-            if href_lower.endswith("-u.pdf"):
-                continue
-            if href.startswith("#") or "javascript:" in href_lower:
-                continue
-            try:
-                full_url = normalize_sbp_url(urljoin(year_url, href))
-            except ValueError:
-                continue
-            if full_url in seen_urls:
-                continue
-            seen_urls.add(full_url)
-
-            reference = cells[0].get_text(strip=True)
-            date_text = re.sub(r"\s+", " ", cells[1].get_text()).strip()
-
-            circulars.append({
-                "reference": reference,
-                "date": date_text,
-                "title": title,
-                "url": full_url,
-                "department": department,
-                "year": year,
-            })
-
-    if not circulars:
-        for link in soup.find_all("a", href=True):
-            href = link["href"]
-            text = link.get_text(strip=True)
-
-            if not text or len(text) < 3:
-                continue
-
-            if href.startswith("..") and "index" in href:
-                continue
-            if href.startswith("#") or "javascript:" in href.lower():
-                continue
-            if href.lower().endswith("-u.pdf"):
-                continue
-
-            href_lower = href.lower()
-            if href_lower.endswith((".htm", ".html")):
-                try:
-                    full_url = normalize_sbp_url(urljoin(year_url, href))
-                except ValueError:
-                    continue
-                if full_url not in seen_urls:
-                    seen_urls.add(full_url)
-                    circulars.append({
-                        "reference": "",
-                        "date": "",
-                        "title": text,
-                        "url": full_url,
-                        "department": department,
-                        "year": year,
-                    })
-
-    if verbose:
-        print(f"    Circulars on {year} page: {len(circulars)}")
-
+        circulars.append({
+            "reference": reference,
+            "date": date_text,
+            "title": title,
+            "url": url,
+            "department": department,
+            "category": category,
+            "doc_type": doc_type,
+            "year": _reference_year(reference) or _reference_year(date_text),
+        })
     return circulars
+
+
+def _listing_total_pages(soup: BeautifulSoup) -> int:
+    """Number of listing pages, read from the pagination widget with fallbacks."""
+    pager = soup.select_one(".pagination-custom[data-total-pages]")
+    if pager and pager.get("data-total-pages", "").isdigit():
+        return max(1, int(pager["data-total-pages"]))
+    total_el = soup.select_one("#total_all_records")
+    if total_el and (total_el.get("value") or "").isdigit():
+        total = int(total_el["value"])
+        return max(1, -(-total // LISTING_PAGE_SIZE))  # ceil division
+    return 1
+
+
+def discover_circulars(
+    limit: int = 0,
+    max_pages: int = 0,
+    verbose: bool = False,
+) -> list[dict]:
+    """Crawl the unified circulars listing and return circular descriptors.
+
+    Pages are fetched in order (P0, P30, ...) until the listing is exhausted, ``limit``
+    circulars have been collected, or ``max_pages`` pages have been read.
+    """
+    first = fetch_page(CIRCULARS_LISTING_URL_FIRST)
+    total_pages = _listing_total_pages(first)
+    if max_pages > 0:
+        total_pages = min(total_pages, max_pages)
+    if verbose:
+        print(f"Listing has {total_pages} page(s) to crawl")
+
+    results: list[dict] = []
+    seen_urls: set[str] = set()
+    for page_index in range(total_pages):
+        soup = first if page_index == 0 else fetch_page(
+            CIRCULARS_LISTING_URL.format(offset=page_index * LISTING_PAGE_SIZE)
+        )
+        page_items = parse_circular_listing(soup)
+        if verbose:
+            print(f"  [PAGE {page_index + 1}/{total_pages}] {len(page_items)} circular(s)")
+        for item in page_items:
+            if item["url"] in seen_urls:
+                continue
+            seen_urls.add(item["url"])
+            results.append(item)
+            if limit > 0 and len(results) >= limit:
+                return results
+    return results
+
+
+def _matches_department(item: dict, filters: list[str]) -> bool:
+    haystack = f"{item.get('department', '')} {item.get('reference', '')}".lower()
+    return any(f.lower() in haystack for f in filters)
 
 
 def scrape_circulars(
@@ -569,54 +502,34 @@ def scrape_circulars(
         skip_llm: If True, skip LLM relationship extraction.
         verbose: If True, print progress details.
     """
-    all_depts = discover_departments(verbose=verbose)
+    # With filters we must scan the whole listing to find matches, so only push the
+    # limit down into the crawler for the unfiltered "latest N" case.
+    filtering = bool(departments or years)
+    discovered = discover_circulars(
+        limit=0 if filtering else limit,
+        verbose=verbose,
+    )
 
     if departments:
-        dept_lower = [d.lower() for d in departments]
-        all_depts = [
-            d for d in all_depts
-            if any(f in d["name"].lower() for f in dept_lower)
-        ]
-        if verbose:
-            print(f"Filtered to {len(all_depts)} departments")
+        discovered = [c for c in discovered if _matches_department(c, departments)]
+    if years:
+        discovered = [c for c in discovered if c.get("year") in years]
+    if verbose and filtering:
+        print(f"Filtered to {len(discovered)} circular(s)")
 
-    seen_urls = set()
     pending: list[dict] = []
     skipped = 0
-
-    for dept in all_depts:
-        if verbose:
-            print(f"\n[DEPT] {dept['name']}")
-
-        year_pages = discover_year_pages(dept["url"], verbose=verbose)
-
-        if years:
-            year_pages = [yp for yp in year_pages if yp["year"] in years]
-
-        for yp in year_pages:
-            circs = discover_circulars_on_year_page(
-                yp["url"], dept["name"], yp["year"], verbose=verbose
-            )
-
-            for circ_info in circs:
-                if circ_info["url"] in seen_urls:
-                    continue
-                seen_urls.add(circ_info["url"])
-
-
-                existing = db.query(Circular).filter(
-                    Circular.url == circ_info["url"]
-                ).first()
-                if existing and not force_fetch and not force_download:
-                    skipped += 1
+    for circ_info in discovered:
+        if not force_fetch and not force_download:
+            existing = db.query(Circular).filter(
+                Circular.id == circular_identity(circ_info.get("reference"), circ_info["url"])
+            ).first()
+            if existing:
+                skipped += 1
+                if verbose:
                     print(f"Circular {circ_info['url']} already exists. Skipping")
-                    continue
-
-                pending.append(circ_info)
-                if limit > 0 and len(pending) >= limit:
-                    break
-            if limit > 0 and len(pending) >= limit:
-                break
+                continue
+        pending.append(circ_info)
         if limit > 0 and len(pending) >= limit:
             break
 
@@ -679,12 +592,13 @@ def process_circular(
     force_fetch: bool = False,
     force_download: bool = False,
     include_attachments: bool = True,
+    old_url: str | None = None,
 ):
     """Download and idempotently store a circular and its attachments."""
     if verbose:
         print(f"  Fetching: {url}")
 
-    circular_id = str(uuid.uuid5(uuid.NAMESPACE_URL, url))
+    circular_id = circular_identity(reference, url)
     raw_html = fetch_page_cached(url, force=force_fetch)
     soup = BeautifulSoup(raw_html, "html.parser")
     content_text = extract_sbp_text(raw_html)
@@ -721,6 +635,9 @@ def process_circular(
     circular.department = department
     circular.date = circular_date or circular.date or datetime.now()
     circular.url = url
+    circular.new_url = url
+    if old_url:
+        circular.old_url = old_url
     circular.content_text = content_text
     db.commit()
 

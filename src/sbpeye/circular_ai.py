@@ -39,6 +39,20 @@ def _resolve_reference(
     )
 
 
+def _harvest_anchor_targets(db: Session, circular: Circular) -> list[Circular]:
+    """Deterministic relationship targets from the circular's pre-linked page anchors."""
+    from .link_routing import harvest_reference_links
+    from .scraper.circulars import cached_circular_html
+
+    html = cached_circular_html(circular)
+    if not html:
+        return []
+    try:
+        return harvest_reference_links(html, db, circular)
+    except Exception:
+        return []
+
+
 def _recompute_statuses(db: Session) -> None:
     status_map: dict[str, str] = {}
     priority = {"cancelled": 3, "superseded": 2, "amended": 1, "active": 0}
@@ -108,15 +122,30 @@ def _persist_outputs(db: Session, circular: Circular, outputs: dict, client=None
             CircularRelationship.source_id == circular.id
         ).delete(synchronize_session=False)
         relationships = outputs["relationships"]
+        produced_target_ids: set[str] = set()
         for relationship_type in ("amends", "supersedes", "cancels", "adds_to", "clarifies"):
             for target_reference in relationships.get(relationship_type, []):
                 target = _resolve_reference(db, str(target_reference), current=circular)
+                if target is not None:
+                    produced_target_ids.add(target.id)
                 db.add(CircularRelationship(
                     source_id=circular.id,
                     target_id=target.id if target else None,
                     target_reference=str(target_reference),
                     type=relationship_type,
                 ))
+        # Seed any pre-linked references the model missed straight from the page anchors.
+        for target in _harvest_anchor_targets(db, circular):
+            if target.id in produced_target_ids:
+                continue
+            produced_target_ids.add(target.id)
+            db.add(CircularRelationship(
+                source_id=circular.id,
+                target_id=target.id,
+                target_reference=target.reference or target.title,
+                type="clarifies",
+                confidence=0.4,
+            ))
         if client is not None:
             from .supersession import apply_blanket_supersession
             apply_blanket_supersession(db, client, circular, relationships)

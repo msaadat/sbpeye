@@ -6,7 +6,7 @@ from sqlalchemy import func, extract
 from urllib.parse import urljoin, urlparse, urlencode
 from pathlib import Path
 from contextlib import asynccontextmanager
-import requests as http_requests
+import cloudscraper
 from bs4 import BeautifulSoup
 import re as _re
 import os
@@ -575,6 +575,8 @@ async def get_circular_detail(circular_id: str, db: Session = Depends(get_db)):
         "reference": c.reference,
         "date": c.date.strftime("%Y-%m-%d") if c.date else None,
         "url": c.url,
+        "new_url": c.new_url or c.url,
+        "old_url": c.old_url,
         "summary": c.summary,
         "tags": _safe_json_list(c.tags),
         "compliance_checklist": _safe_json_object(c.compliance_checklist),
@@ -960,7 +962,7 @@ async def pdf_preview(url: str):
         return {"error": "Only SBP PDFs are supported."}
 
     try:
-        resp = http_requests.get(url, headers=HEADERS, timeout=20)
+        resp = cloudscraper.create_scraper().get(url, headers=HEADERS, timeout=20)
         resp.raise_for_status()
 
         pdf = pdfplumber.open(io.BytesIO(resp.content))
@@ -992,7 +994,7 @@ async def pdf_proxy(url: str):
         return JSONResponse({"error": "Only PDF files are supported."}, status_code=400)
 
     try:
-        resp = http_requests.get(url, headers=HEADERS, timeout=30)
+        resp = cloudscraper.create_scraper().get(url, headers=HEADERS, timeout=30)
         resp.raise_for_status()
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=502)
@@ -1782,7 +1784,7 @@ async def batch_download(
             safe_ref = (c.reference or c.id).replace("/", "_").replace("\\", "_")
             if c.url.lower().endswith(".pdf"):
                 try:
-                    resp = http_requests.get(c.url, headers=HEADERS, timeout=20)
+                    resp = cloudscraper.create_scraper().get(c.url, headers=HEADERS, timeout=20)
                     resp.raise_for_status()
                     zip_file.writestr(f"{safe_ref}.pdf", resp.content)
                 except Exception as e:

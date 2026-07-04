@@ -12,6 +12,11 @@ class Circular(Base):
     department = Column(String)
     date = Column(DateTime)
     url = Column(String)
+    # After the July 2026 SBP redesign a circular is reachable at two URLs: its slug on
+    # the new site (new_url) and its original path on the frozen archive.sbp.org.pk
+    # mirror (old_url). `url` mirrors the primary (new) URL for backward compatibility.
+    new_url = Column(String, nullable=True)
+    old_url = Column(String, nullable=True)
     content_text = Column(Text)
     summary = Column(Text, nullable=True)
     tags = Column(Text, nullable=True)

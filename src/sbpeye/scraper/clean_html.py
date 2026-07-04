@@ -26,6 +26,28 @@ _ROW_NAV_PATTERNS = {
     "back to home page",
 }
 
+# On the redesigned site (July 2026) a circular's content lives in a dedicated
+# container; the surrounding chrome is plain <div>s, so scoping to this container is
+# what removes navigation rather than the legacy table heuristics. Archive pages lack
+# these containers and fall back to <body> + the legacy cleaning below.
+CONTENT_CONTAINER_SELECTORS = ("div.pdfcontenttodownload", "div.circular-body")
+# Print-only buttons, hidden holders, and white-on-white tracking numbers on detail pages.
+NOISE_SELECTORS = (".no-print", "#automationPathHolder", 'font[color="#fff"]')
+
+
+def _content_root(soup: BeautifulSoup):
+    """Return (root, is_new_site).
+
+    ``root`` is the circular's content container when the new site emits one (in which
+    case ``is_new_site`` is True and the legacy chrome-stripping can be skipped), else
+    the page ``<body>`` for archived table-based pages.
+    """
+    for selector in CONTENT_CONTAINER_SELECTORS:
+        node = soup.select_one(selector)
+        if node is not None:
+            return node, True
+    return (soup.find("body") or soup), False
+
 
 def _normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", value.replace("\xa0", " ")).strip().lower()
@@ -70,7 +92,10 @@ def extract_sbp_text(html_content: bytes) -> str:
     for tag in soup.find_all(["head", "script", "style", "noscript", "template"]):
         tag.decompose()
 
-    root = soup.find("body") or soup
+    root, _is_new = _content_root(soup)
+    for selector in NOISE_SELECTORS:
+        for tag in root.select(selector):
+            tag.decompose()
     parts: list[str] = []
 
     def boundary() -> None:
@@ -157,52 +182,59 @@ def clean_sbp_html(html_content: bytes, base_url: str = "") -> str:
             a["target"] = "_blank"
             a["rel"] = "noopener noreferrer"
 
-    body = soup.find("body")
+    body, is_new_site = _content_root(soup)
     if not body:
         return "<p>No content found</p>"
 
-    tables = body.find_all("table")
-    for table in tables:
-        text = table.get_text().strip().lower()
-        if not text:
-            table.decompose()
-            continue
+    for selector in NOISE_SELECTORS:
+        for tag in body.select(selector):
+            tag.decompose()
 
-        links = table.find_all("a")
-        link_count = len(links)
-
-        if link_count >= 3 and len(text) < 500:
-            if any(p in text for p in NAV_PATTERNS):
+    # Archived (table-based) pages need the legacy navigation-chrome stripping; the new
+    # site's content container is already clean, so this whole pass is skipped there.
+    if not is_new_site:
+        tables = body.find_all("table")
+        for table in tables:
+            text = table.get_text().strip().lower()
+            if not text:
                 table.decompose()
                 continue
 
-        if len(text) < 200 and any(p in text for p in NAV_PATTERNS):
-            table.decompose()
+            links = table.find_all("a")
+            link_count = len(links)
 
-    for table in body.find_all("table"):
-        if not table.get_text(strip=True):
-            table.decompose()
-            continue
-        for tr in table.find_all("tr"):
-            row_text = _normalize_text(tr.get_text(" ", strip=True))
-            if not row_text:
-                tr.decompose()
+            if link_count >= 3 and len(text) < 500:
+                if any(p in text for p in NAV_PATTERNS):
+                    table.decompose()
+                    continue
+
+            if len(text) < 200 and any(p in text for p in NAV_PATTERNS):
+                table.decompose()
+
+        for table in body.find_all("table"):
+            if not table.get_text(strip=True):
+                table.decompose()
                 continue
-            if _is_navigation_row(tr):
-                tr.decompose()
-                continue
-            imgs = tr.find_all("img")
-            cells = tr.find_all(["td", "th"])
-            if imgs and all(not td.get_text(strip=True) for td in cells):
-                tr.decompose()
+            for tr in table.find_all("tr"):
+                row_text = _normalize_text(tr.get_text(" ", strip=True))
+                if not row_text:
+                    tr.decompose()
+                    continue
+                if _is_navigation_row(tr):
+                    tr.decompose()
+                    continue
+                imgs = tr.find_all("img")
+                cells = tr.find_all(["td", "th"])
+                if imgs and all(not td.get_text(strip=True) for td in cells):
+                    tr.decompose()
 
-    for table in body.find_all("table"):
-        if not table.get_text(strip=True):
-            table.decompose()
+        for table in body.find_all("table"):
+            if not table.get_text(strip=True):
+                table.decompose()
 
-    for tag in body.find_all(["font", "span", "div", "p"]):
-        if _is_navigation_link_group(tag):
-            tag.decompose()
+        for tag in body.find_all(["font", "span", "div", "p"]):
+            if _is_navigation_link_group(tag):
+                tag.decompose()
 
     for font in soup.find_all("font"):
         font.unwrap()

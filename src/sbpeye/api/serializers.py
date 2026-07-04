@@ -97,6 +97,8 @@ def _circular_summary(
         "reference": circular.reference,
         "date": circular.date.strftime("%Y-%m-%d") if circular.date else None,
         "url": circular.url,
+        "new_url": circular.new_url or circular.url,
+        "old_url": circular.old_url,
         "summary": _summary_preview(circular.summary),
         "tags": _safe_json_list(circular.tags),
         "status": circular.status or "active",

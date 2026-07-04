@@ -834,34 +834,27 @@ def reindex_cmd(dry_run):
 @click.option("--dept", "-d", multiple=True, help="Filter by department")
 @click.option("--year", "-y", multiple=True, help="Filter by year")
 @click.option("--verbose", "-v", is_flag=True, help="Print each discovered circular's details")
-def dry_run_cmd(dept, year, verbose):
+@click.option("--max-pages", type=int, default=0, help="Limit listing pages crawled (0 = all)")
+def dry_run_cmd(dept, year, verbose, max_pages):
     """Discover and list circulars without downloading."""
-    from sbpeye.scraper.circulars import discover_departments, discover_year_pages, discover_circulars_on_year_page
+    from sbpeye.scraper.circulars import discover_circulars, _matches_department
 
-    all_depts = discover_departments(verbose=True)
+    circulars = discover_circulars(max_pages=max_pages, verbose=True)
     if dept:
-        dept_lower = [d.lower() for d in dept]
-        all_depts = [d for d in all_depts if any(f in d["name"].lower() for f in dept_lower)]
-        print(f"\nFiltered to {len(all_depts)} department(s)")
+        circulars = [c for c in circulars if _matches_department(c, list(dept))]
+    if year:
+        circulars = [c for c in circulars if c.get("year") in year]
+    if dept or year:
+        print(f"\nFiltered to {len(circulars)} circular(s)")
 
-    total = 0
-    for d in all_depts:
-        print(f"\n{'='*60}\n  {d['name']}\n  {d['url']}\n{'='*60}")
-        year_pages = discover_year_pages(d["url"], verbose=True)
-        if year:
-            year_pages = [yp for yp in year_pages if yp["year"] in year]
-        for yp in year_pages:
-            circs = discover_circulars_on_year_page(yp["url"], d["name"], yp["year"], verbose=True)
-            if verbose:
-                for c in circs:
-                    ref = c.get("reference", "")
-                    date = c.get("date", "")
-                    prefix = f"[{ref}] {date} - " if ref or date else ""
-                    print(f"      {prefix}{c['title'][:80]}")
-                    print(f"        {c['url']}")
-            total += len(circs)
+    if verbose:
+        for c in circulars:
+            ref, date = c.get("reference", ""), c.get("date", "")
+            prefix = f"[{ref}] {date} - " if ref or date else ""
+            print(f"  {prefix}{c['title'][:80]}")
+            print(f"    {c['url']}  ({c.get('department','')} / {c.get('category','')})")
 
-    print(f"\nTotal circulars discovered: {total}")
+    print(f"\nTotal circulars discovered: {len(circulars)}")
 
 
 def _url_filter(query, url):
@@ -1299,6 +1292,95 @@ def _show_stats():
         print()
     finally:
         db.close()
+
+
+@cli.group()
+def migrate():
+    """Rebuild the circular corpus from the redesigned site, preserving LLM outputs."""
+    pass
+
+
+@migrate.command("snapshot")
+@click.option("--out", "out_path", default="llm_snapshot.json", show_default=True,
+              help="File to write the preserved LLM data to")
+def migrate_snapshot(out_path):
+    """Export summaries/tags/checklists/relationships/entities keyed by reference."""
+    from sbpeye.migration import snapshot_llm_data
+
+    db = SessionLocal()
+    try:
+        snapshot = snapshot_llm_data(db)
+    finally:
+        db.close()
+    Path(out_path).write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+    print(f"Snapshotted {len(snapshot['circulars'])} circular(s) to {out_path}")
+    if snapshot["unkeyed"]:
+        print(f"  {len(snapshot['unkeyed'])} circular(s) had no parseable reference "
+              f"and cannot be reattached by reference.")
+
+
+@migrate.command("reattach")
+@click.option("--in", "in_path", default="llm_snapshot.json", show_default=True,
+              help="Snapshot file produced by 'migrate snapshot'")
+def migrate_reattach(in_path):
+    """Reattach a snapshot's LLM data to the freshly scraped circulars, matched by reference."""
+    from sbpeye.migration import apply_llm_snapshot
+
+    snapshot = json.loads(Path(in_path).read_text(encoding="utf-8"))
+    db = SessionLocal()
+    try:
+        stats = apply_llm_snapshot(db, snapshot)
+    finally:
+        db.close()
+    print(f"Reattached LLM data to {stats['matched']} circular(s); "
+          f"rebuilt {stats['relationships']} relationship(s), {stats['entities']} entity(ies)")
+    if stats["unmatched_snapshot"]:
+        print(f"  {len(stats['unmatched_snapshot'])} snapshot reference(s) had no match "
+              f"in the rebuilt corpus:")
+        for key in stats["unmatched_snapshot"][:50]:
+            print(f"    - {key}")
+
+
+@migrate.command("rebuild")
+@click.option("--snapshot-file", default="llm_snapshot.json", show_default=True)
+@click.option("--limit", "-l", type=int, default=0, help="Max circulars to scrape (0 = all)")
+@click.option("--workers", type=click.IntRange(1), default=1, show_default=True)
+@click.option("--yes", is_flag=True, help="Skip the destructive-wipe confirmation")
+@click.option("--verbose", "-v", is_flag=True)
+def migrate_rebuild(snapshot_file, limit, workers, yes, verbose):
+    """Full one-shot rebuild: snapshot -> wipe -> re-scrape -> reattach.
+
+    Run 'sbpeye reindex' afterwards to rebuild the vector store.
+    """
+    from sbpeye.migration import snapshot_llm_data, apply_llm_snapshot, wipe_circular_data
+    from sbpeye.scraper.circulars import scrape_circulars
+
+    if not yes:
+        click.confirm(
+            "This deletes ALL circulars, relationships, entities, attachments and vectors, "
+            "then re-scrapes from the new site. Continue?",
+            abort=True,
+        )
+
+    db = SessionLocal()
+    try:
+        # snapshot = snapshot_llm_data(db)
+        # Path(snapshot_file).write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+        snapshot = json.loads(Path(snapshot_file).read_text(encoding="utf-8"))
+        # print(f"[1/4] Snapshotted {len(snapshot['circulars'])} circular(s) -> {snapshot_file}")
+
+        wipe_circular_data(db)
+        print("[2/4] Wiped old circular data and vectors")
+
+        scrape_circulars(db, limit=limit, skip_llm=True, verbose=verbose, workers=workers)
+        print("[3/4] Re-scraped circulars from the new site")
+
+        stats = apply_llm_snapshot(db, snapshot)
+        print(f"[4/4] Reattached LLM data to {stats['matched']} circular(s) "
+              f"({len(stats['unmatched_snapshot'])} unmatched)")
+    finally:
+        db.close()
+    print("Done. Run 'sbpeye reindex' to rebuild the vector store.")
 
 
 def main():

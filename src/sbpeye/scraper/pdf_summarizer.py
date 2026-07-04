@@ -1,4 +1,4 @@
-import requests
+import cloudscraper
 import pdfplumber
 from io import BytesIO
 from datetime import datetime
@@ -12,22 +12,34 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
-SUMMARIZABLE_URLS = {
-    "https://www.sbp.org.pk/ecodata/GDP_table.pdf": "gdp",
-    "https://www.sbp.org.pk/ecodata/QGDP.pdf": "qgdp",
-    "https://www.sbp.org.pk/ecodata/Productselect.pdf": "generic",
-    "https://www.sbp.org.pk/ecodata/BroadMoney_M2.pdf": "generic",
-    "https://www.sbp.org.pk/ecodata/forex.pdf": "generic",
-    "https://www.sbp.org.pk/ecodata/kibor_index.asp": None,
-    "https://www.sbp.org.pk/ecodata/Result-OMO.pdf": "generic",
-    "https://www.sbp.org.pk/ecodata/overnightsreporates2.pdf": "generic",
+# On the redesigned site, economic-data documents live under the shared /assets store
+# instead of /ecodata/*.pdf, so summarizability is decided by path + type, not an
+# exact-URL allowlist.
+ECODATA_DOC_PREFIXES = (
+    "https://www.sbp.org.pk/assets/document/",
+    "https://www.sbp.org.pk/assets/documents/",
+)
+# Filename keyword -> specialized parser; every other economic-data PDF uses the generic one.
+SUMMARY_KINDS = {
+    "gdp_table": "gdp",
+    "qgdp": "qgdp",
 }
 
+
+def _summary_kind(url: str) -> str:
+    name = url.rsplit("/", 1)[-1].lower()
+    for keyword, kind in SUMMARY_KINDS.items():
+        if keyword in name:
+            return kind
+    return "generic"
+
+
 def is_summarizable(url: str) -> bool:
-    return url in SUMMARIZABLE_URLS and SUMMARIZABLE_URLS[url] is not None
+    lowered = (url or "").lower()
+    return lowered.endswith(".pdf") and lowered.startswith(ECODATA_DOC_PREFIXES)
 
 def _download_pdf(url: str) -> bytes:
-    resp = requests.get(url, headers=HEADERS, timeout=30)
+    resp = cloudscraper.create_scraper().get(url, headers=HEADERS, timeout=30)
     resp.raise_for_status()
     return resp.content
 
@@ -161,7 +173,7 @@ def summarize_pdf(url: str, db: Session) -> str:
     if cached:
         return md.render(cached.summary_markdown)
 
-    parser_type = SUMMARIZABLE_URLS.get(url, "generic")
+    parser_type = _summary_kind(url)
 
     if parser_type in SPECIALIZED_PARSERS:
         summary = SPECIALIZED_PARSERS[parser_type](url)

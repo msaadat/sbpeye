@@ -81,6 +81,28 @@ def test_detect_attachments_deduplicates_and_skips_urdu():
     ]
 
 
+def test_detect_attachments_deduplicates_by_filename_across_urls():
+    soup = BeautifulSoup(
+        """
+        <a href="https://www.sbp.org.pk/assets/document/FEC1-Annex-A.pdf">Annexure-I</a>
+        <a href="https://www.sbp.org.pk/assets/documents/circulars/FEC1-Annex-A.pdf">Annexure-I</a>
+        """,
+        "html.parser",
+    )
+
+    found = scraper.detect_attachments(
+        soup, "https://www.sbp.org.pk/circulars/fe-circular-no-01-of-2018"
+    )
+
+    assert found == [
+        {
+            "url": "https://www.sbp.org.pk/assets/document/FEC1-Annex-A.pdf",
+            "filename": "FEC1-Annex-A.pdf",
+            "file_type": "pdf",
+        },
+    ]
+
+
 def test_attachment_id_is_scoped_to_circular():
     url = "https://www.sbp.org.pk/files/rules.pdf"
     assert scraper.attachment_id("one", url) == scraper.attachment_id("one", url)
@@ -394,6 +416,95 @@ def test_attachment_checklist_diagnostic_prints_full_verbose_trace(
     assert result["coverage_gaps"] == []
     assert result["checklist_items"][0]["classification"] == "required"
     assert circular.compliance_checklist == '{"existing": true}'
+
+
+def test_attachment_dedupe_merges_same_filename_keeping_extracted(monkeypatch, tmp_path):
+    import sbpeye.cli.commands as cli_commands
+    from sbpeye.cli.commands import _run_attachment_dedupe
+
+    db = make_session()
+    circular = make_circular()
+    keep_path = tmp_path / "keep.pdf"
+    keep_path.write_bytes(b"keep")
+    drop_path = tmp_path / "drop.pdf"
+    drop_path.write_bytes(b"drop")
+    circular.attachments = [
+        Attachment(
+            id="keep",
+            circular_id=circular.id,
+            filename="FEC1-Annex-A.pdf",
+            original_url="https://www.sbp.org.pk/assets/document/FEC1-Annex-A.pdf",
+            local_path="keep.pdf",
+            file_type="pdf",
+            content_text="Annexure text",
+            extraction_status="extracted",
+            created_at=datetime(2025, 1, 1),
+        ),
+        Attachment(
+            id="drop",
+            circular_id=circular.id,
+            filename="fec1-annex-a.pdf",
+            original_url="https://www.sbp.org.pk/assets/documents/circulars/FEC1-Annex-A.pdf",
+            local_path="drop.pdf",
+            file_type="pdf",
+            content_text="Annexure text",
+            extraction_status="extracted",
+            created_at=datetime(2025, 1, 2),
+        ),
+    ]
+    db.add(circular)
+    db.commit()
+    deleted_chunks = []
+    monkeypatch.setattr(cli_commands, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(
+        scraper, "_delete_document_chunks", lambda **kwargs: deleted_chunks.append(kwargs)
+    )
+
+    summary = _run_attachment_dedupe(db)
+
+    remaining = db.query(Attachment).filter(Attachment.circular_id == circular.id).all()
+    assert [item.id for item in remaining] == ["keep"]
+    assert summary == {"groups": 1, "removed": 1}
+    assert deleted_chunks == [{"attachment_id_value": "drop"}]
+    assert not drop_path.exists()
+    assert keep_path.exists()
+
+
+def test_attachment_dedupe_prefers_extracted_over_error(monkeypatch):
+    from sbpeye.cli.commands import _run_attachment_dedupe
+
+    db = make_session()
+    circular = make_circular()
+    circular.attachments = [
+        Attachment(
+            id="broken",
+            circular_id=circular.id,
+            filename="Annex-B.pdf",
+            original_url="https://www.sbp.org.pk/circulars/Annex-B.pdf",
+            file_type="pdf",
+            extraction_status="error",
+            created_at=datetime(2025, 1, 1),
+        ),
+        Attachment(
+            id="working",
+            circular_id=circular.id,
+            filename="Annex-B.pdf",
+            original_url="https://www.sbp.org.pk/assets/documents/circulars/Annex-B.pdf",
+            file_type="pdf",
+            content_text="Annexure text",
+            extraction_status="extracted",
+            created_at=datetime(2025, 1, 2),
+        ),
+    ]
+    db.add(circular)
+    db.commit()
+    monkeypatch.setattr(scraper, "_delete_document_chunks", lambda **kwargs: None)
+
+    summary = _run_attachment_dedupe(db)
+
+    remaining = db.query(Attachment).filter(Attachment.circular_id == circular.id).all()
+    assert [item.id for item in remaining] == ["working"]
+    assert summary == {"groups": 1, "removed": 1}
 
 
 def test_attachment_vectorize_by_id_reindexes_only_selected(monkeypatch):

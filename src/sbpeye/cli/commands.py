@@ -253,6 +253,68 @@ def _run_attachment_vectorize(
     return indexed
 
 
+def _run_attachment_dedupe(db, verbose=False):
+    """Merge attachment rows that share a (circular_id, filename) identity.
+
+    SBP's site sometimes links the same annexure under two different asset paths
+    that serve identical content, so the scraper's own url-based dedup can miss
+    them. Within each duplicate group, keep the row with usable extracted content
+    (falling back to the earliest row), and drop the rest along with their
+    downloaded files and any indexed vector chunks.
+    """
+    from sbpeye.scraper.circulars import _delete_document_chunks
+
+    complete_statuses = {"extracted", "scanned"}
+    groups: dict[tuple[str, str], list[Attachment]] = {}
+    for attachment in db.query(Attachment).order_by(Attachment.created_at).all():
+        key = (attachment.circular_id, attachment.filename.casefold())
+        groups.setdefault(key, []).append(attachment)
+
+    removed = 0
+    affected_groups = 0
+    for rows in groups.values():
+        if len(rows) < 2:
+            continue
+        affected_groups += 1
+        keeper = next(
+            (
+                row
+                for row in rows
+                if row.extraction_status in complete_statuses and row.content_text
+            ),
+            rows[0],
+        )
+        for row in rows:
+            if row is keeper:
+                continue
+            if row.local_path:
+                local_file = PROJECT_ROOT / row.local_path
+                local_file.unlink(missing_ok=True)
+            _delete_document_chunks(attachment_id_value=row.id)
+            if verbose:
+                print(f"  [DEDUPE] Removing {row.filename} ({row.id}) for circular {row.circular_id}")
+            db.delete(row)
+            removed += 1
+        db.commit()
+
+    return {"groups": affected_groups, "removed": removed}
+
+
+@attachments.command("dedupe")
+@click.option("--verbose", "-v", is_flag=True, help="Print each removed attachment")
+def attachments_dedupe(verbose):
+    """Merge duplicate attachments that share a circular and filename."""
+    db = SessionLocal()
+    try:
+        summary = _run_attachment_dedupe(db, verbose=verbose)
+        print(
+            f"Dedupe complete: {summary['groups']} duplicate group(s), "
+            f"{summary['removed']} row(s) removed"
+        )
+    finally:
+        db.close()
+
+
 @attachments.command("vectorize")
 @click.option("--id", "attachment_id", help="Vectorize one attachment by exact ID")
 @click.option("--dept", "-d", multiple=True, help="Filter by department substring")

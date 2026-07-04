@@ -98,9 +98,16 @@ def cached_circular_html(circular) -> bytes | None:
 
 
 def detect_attachments(soup: BeautifulSoup, base_url: str) -> list[dict]:
-    """Return unique attachment links found in circular HTML."""
+    """Return unique attachment links found in circular HTML.
+
+    SBP's redesigned site frequently links the same annexure twice under two
+    different asset paths (e.g. `/assets/document/X.pdf` and
+    `/assets/documents/circulars/X.pdf`) that both serve identical file content, so
+    duplicates are also collapsed by filename, not just by exact URL.
+    """
     found: list[dict] = []
     seen_urls: set[str] = set()
+    seen_filenames: set[str] = set()
 
     for anchor in soup.find_all("a", href=True):
         href = anchor.get("href", "").strip()
@@ -122,6 +129,10 @@ def detect_attachments(soup: BeautifulSoup, base_url: str) -> list[dict]:
         seen_urls.add(absolute_url)
 
         filename = unquote(Path(parsed.path).name) or f"attachment{extension}"
+        if filename.casefold() in seen_filenames:
+            continue
+        seen_filenames.add(filename.casefold())
+
         found.append({
             "url": absolute_url,
             "filename": filename,

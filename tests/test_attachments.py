@@ -103,6 +103,67 @@ def test_detect_attachments_deduplicates_by_filename_across_urls():
     ]
 
 
+def test_detect_attachments_resolves_bare_filename_via_automation_path():
+    soup = BeautifulSoup(
+        """
+        <span id="automationPathHolder" style="display:none;">/psd/2016/index.htm</span>
+        <p>Encl: <a href="C3-Annexure-A.pdf">Annexure-A</a></p>
+        """,
+        "html.parser",
+    )
+
+    found = scraper.detect_attachments(
+        soup, "https://www.sbp.org.pk/circulars/psd-circular-no-03-of-2016"
+    )
+
+    assert found == [
+        {
+            "url": "https://www.sbp.org.pk/assets/documents/circulars/psd/2016/C3-Annexure-A.pdf",
+            "fallback_url": "https://www.sbp.org.pk/assets/documents/circulars/C3-Annexure-A.pdf",
+            "filename": "C3-Annexure-A.pdf",
+            "file_type": "pdf",
+        },
+    ]
+
+
+def test_detect_attachments_resolves_bare_filename_without_automation_path():
+    soup = BeautifulSoup('<a href="Foo-Annex.pdf">Foo</a>', "html.parser")
+
+    found = scraper.detect_attachments(
+        soup, "https://www.sbp.org.pk/circulars/some-circular"
+    )
+
+    assert found == [
+        {
+            "url": "https://www.sbp.org.pk/assets/documents/circulars/Foo-Annex.pdf",
+            "filename": "Foo-Annex.pdf",
+            "file_type": "pdf",
+        },
+    ]
+
+
+def test_detect_attachments_relative_href_with_subdirectory_ignores_automation_path():
+    soup = BeautifulSoup(
+        """
+        <span id="automationPathHolder" style="display:none;">/psd/2016/index.htm</span>
+        <a href="files/rules.pdf?download=1">Rules</a>
+        """,
+        "html.parser",
+    )
+
+    found = scraper.detect_attachments(
+        soup, "https://www.sbp.org.pk/circulars/2025/page.htm"
+    )
+
+    assert found == [
+        {
+            "url": "https://www.sbp.org.pk/circulars/2025/files/rules.pdf?download=1",
+            "filename": "rules.pdf",
+            "file_type": "pdf",
+        },
+    ]
+
+
 def test_attachment_id_is_scoped_to_circular():
     url = "https://www.sbp.org.pk/files/rules.pdf"
     assert scraper.attachment_id("one", url) == scraper.attachment_id("one", url)
@@ -130,22 +191,72 @@ def test_fetch_page_cached_uses_uuid_filename(monkeypatch, tmp_path):
 
 
 def test_download_attachment_streams_to_id_based_path(monkeypatch, tmp_path):
-    response = FakeResponse(b"document bytes")
+    response = FakeResponse(b"%PDF document bytes")
     monkeypatch.setattr(scraper, "ATTACHMENTS_DIR", tmp_path)
-    monkeypatch.setattr(scraper.requests, "get", lambda *args, **kwargs: response)
+    monkeypatch.setattr(scraper, "_get_sbp", lambda *args, **kwargs: response)
     info = {
         "url": "https://www.sbp.org.pk/files/report.pdf",
         "filename": "report.pdf",
         "file_type": "pdf",
     }
 
-    path, downloaded, error = scraper.download_attachment("circ", info)
+    path, downloaded, error, resolved_url = scraper.download_attachment("circ", info)
 
     assert error is None
     assert downloaded is True
+    assert resolved_url == info["url"]
     assert path == tmp_path / "circ" / f"{scraper.attachment_id('circ', info['url'])}.pdf"
-    assert path.read_bytes() == b"document bytes"
+    assert path.read_bytes() == b"%PDF document bytes"
     assert response.closed is True
+    assert not list(tmp_path.rglob("*.part"))
+
+
+def test_download_attachment_falls_back_when_primary_content_is_html(monkeypatch, tmp_path):
+    primary = "https://www.sbp.org.pk/assets/documents/circulars/psd/2016/C3-Annexure-A.pdf"
+    fallback = "https://www.sbp.org.pk/assets/documents/circulars/C3-Annexure-A.pdf"
+    responses = {
+        primary: FakeResponse(b"<html>not a pdf</html>"),
+        fallback: FakeResponse(b"%PDF real pdf bytes"),
+    }
+    monkeypatch.setattr(scraper, "ATTACHMENTS_DIR", tmp_path)
+    monkeypatch.setattr(scraper, "_get_sbp", lambda url, **kwargs: responses[url])
+    info = {
+        "url": primary,
+        "fallback_url": fallback,
+        "filename": "C3-Annexure-A.pdf",
+        "file_type": "pdf",
+    }
+
+    path, downloaded, error, resolved_url = scraper.download_attachment("circ", info)
+
+    assert error is None
+    assert downloaded is True
+    assert resolved_url == fallback
+    assert path.read_bytes() == b"%PDF real pdf bytes"
+    assert not list(tmp_path.rglob("*.part"))
+
+
+def test_download_attachment_reports_error_when_no_candidate_is_valid(monkeypatch, tmp_path):
+    primary = "https://www.sbp.org.pk/assets/documents/circulars/psd/2016/Missing.pdf"
+    fallback = "https://www.sbp.org.pk/assets/documents/circulars/Missing.pdf"
+    responses = {
+        primary: FakeResponse(b"<html>404</html>"),
+        fallback: FakeResponse(b"<html>404</html>"),
+    }
+    monkeypatch.setattr(scraper, "ATTACHMENTS_DIR", tmp_path)
+    monkeypatch.setattr(scraper, "_get_sbp", lambda url, **kwargs: responses[url])
+    info = {
+        "url": primary,
+        "fallback_url": fallback,
+        "filename": "Missing.pdf",
+        "file_type": "pdf",
+    }
+
+    path, downloaded, error, resolved_url = scraper.download_attachment("circ", info)
+
+    assert path is None
+    assert downloaded is False
+    assert error is not None
     assert not list(tmp_path.rglob("*.part"))
 
 
@@ -172,7 +283,7 @@ def test_process_attachment_retries_error_and_sets_extracted(monkeypatch, tmp_pa
     monkeypatch.setattr(
         scraper,
         "download_attachment",
-        lambda *args, **kwargs: (local_file, False, None),
+        lambda *args, **kwargs: (local_file, False, None, url),
     )
     monkeypatch.setattr(
         scraper,
@@ -191,6 +302,41 @@ def test_process_attachment_retries_error_and_sets_extracted(monkeypatch, tmp_pa
     assert result.content_text == "Extracted requirements"
     assert result.local_path == "report.pdf"
     assert result.is_vectorized == 0
+
+
+def test_process_attachment_stores_resolved_fallback_url(monkeypatch, tmp_path):
+    db = make_session()
+    circular = make_circular()
+    db.add(circular)
+    db.commit()
+    primary_url = "https://www.sbp.org.pk/assets/documents/circulars/psd/2016/C3-Annexure-A.pdf"
+    fallback_url = "https://www.sbp.org.pk/assets/documents/circulars/C3-Annexure-A.pdf"
+    local_file = tmp_path / "C3-Annexure-A.pdf"
+    local_file.write_bytes(b"%PDF")
+    monkeypatch.setattr(scraper, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(
+        scraper,
+        "download_attachment",
+        lambda *args, **kwargs: (local_file, True, None, fallback_url),
+    )
+    monkeypatch.setattr(
+        scraper,
+        "extract_pdf_text",
+        lambda path: ("Annexure text", "extracted", None),
+    )
+
+    result = scraper.process_attachment(
+        db,
+        circular,
+        {
+            "url": primary_url,
+            "fallback_url": fallback_url,
+            "filename": "C3-Annexure-A.pdf",
+            "file_type": "pdf",
+        },
+    )
+
+    assert result.original_url == fallback_url
 
 
 def test_build_corpus_orders_circular_then_named_attachments():

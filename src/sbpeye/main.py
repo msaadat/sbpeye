@@ -863,7 +863,7 @@ async def resolve_document(
         }
         local_path = PROJECT_ROOT / standalone.local_path if standalone.local_path else None
         if refresh or not local_path or not local_path.is_file():
-            path, _, error = download_attachment("standalone", info, force=refresh)
+            path, _, error, _ = download_attachment("standalone", info, force=refresh)
             standalone.local_path = str(path.relative_to(PROJECT_ROOT)) if path else None
             standalone.error = error
             db.commit()
@@ -911,7 +911,7 @@ async def resolve_document(
             db.commit()
         local_path = PROJECT_ROOT / cached_document.local_path if cached_document.local_path else None
         if refresh or not local_path or not local_path.is_file():
-            path, _, error = download_attachment("standalone", info, force=refresh)
+            path, _, error, _ = download_attachment("standalone", info, force=refresh)
             cached_document.local_path = str(path.relative_to(PROJECT_ROOT)) if path else None
             cached_document.error = error
             db.commit()
@@ -1805,7 +1805,7 @@ async def batch_download(
                         else None
                     )
                     if local_path is None or not local_path.exists():
-                        local_path, _, error = download_attachment(
+                        local_path, _, error, _ = download_attachment(
                             c.id,
                             {
                                 "url": attachment.original_url,

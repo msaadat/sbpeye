@@ -32,7 +32,31 @@ HEADERS = {
 HTML_CACHE_DIR = PROJECT_ROOT / "cache" / "html"
 ATTACHMENTS_DIR = PROJECT_ROOT / "attachments"
 ATTACHMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx"}
+# Flat asset store the redesigned site consolidated most circular attachments into.
+ASSET_BASE_URL = f"{BASE_URL}/assets/documents/circulars/"
 _CHROMA_WRITE_LOCK = threading.Lock()
+
+
+def _extract_automation_path(soup: BeautifulSoup) -> str | None:
+    """Return the legacy department/year path from the hidden automationPathHolder span.
+
+    Archived-era circular pages carry `<span id="automationPathHolder">/psd/2016/
+    index.htm</span>` — a leftover of the pre-redesign URL structure. SBP's own
+    front-end (`circular-inner.js`) uses it to reconstruct download links for the
+    bare relative hrefs those pages emit (e.g. `href="C3-Annexure-A.pdf"`); we mirror
+    that logic since it's the only source of the original per-department/year path.
+    """
+    holder = soup.find(id="automationPathHolder")
+    if holder is None:
+        return None
+    text = holder.get_text().strip()
+    if not text:
+        return None
+    text = re.sub(r"^https?://(?:www\.)?sbp\.org\.pk", "", text, flags=re.IGNORECASE)
+    text = text.split("?")[0].split("#")[0]
+    text = text.replace("\\", "/")
+    text = re.sub(r"/[^/]*$", "/", text)
+    return text.strip("/") or None
 
 
 def circular_identity(reference: str | None, url: str) -> str:
@@ -104,20 +128,48 @@ def detect_attachments(soup: BeautifulSoup, base_url: str) -> list[dict]:
     different asset paths (e.g. `/assets/document/X.pdf` and
     `/assets/documents/circulars/X.pdf`) that both serve identical file content, so
     duplicates are also collapsed by filename, not just by exact URL.
+
+    Archived-era pages instead emit a bare relative filename (e.g.
+    `href="C3-Annexure-A.pdf"`, no directory component). Resolving that against the
+    circular's own pretty URL produces a dead link, so it's instead resolved against
+    the flat asset store, preferring the legacy department/year path from
+    `automationPathHolder` when present (see `_extract_automation_path`) with the flat
+    path kept as a `fallback_url` — SBP inconsistently kept files at one location or
+    the other after their redesign.
     """
     found: list[dict] = []
     seen_urls: set[str] = set()
     seen_filenames: set[str] = set()
+    automation_path = _extract_automation_path(soup)
 
     for anchor in soup.find_all("a", href=True):
         href = anchor.get("href", "").strip()
         if not href:
             continue
 
-        try:
-            absolute_url = normalize_sbp_url(urljoin(base_url, href))
-        except ValueError:
-            continue
+        is_bare_filename = "/" not in href and not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", href)
+        fallback_url = None
+        if is_bare_filename:
+            try:
+                flat_url = normalize_sbp_url(urljoin(ASSET_BASE_URL, href))
+            except ValueError:
+                continue
+            if automation_path:
+                try:
+                    absolute_url = normalize_sbp_url(
+                        urljoin(f"{ASSET_BASE_URL}{automation_path}/", href)
+                    )
+                except ValueError:
+                    continue
+                fallback_url = flat_url
+            else:
+                absolute_url = flat_url
+        else:
+            try:
+                absolute_url = normalize_sbp_url(urljoin(base_url, href))
+            except ValueError:
+                continue
+
         parsed = urlparse(absolute_url)
         extension = Path(parsed.path).suffix.lower()
         if extension not in ATTACHMENT_EXTENSIONS:
@@ -133,11 +185,14 @@ def detect_attachments(soup: BeautifulSoup, base_url: str) -> list[dict]:
             continue
         seen_filenames.add(filename.casefold())
 
-        found.append({
+        entry = {
             "url": absolute_url,
             "filename": filename,
             "file_type": extension.lstrip("."),
-        })
+        }
+        if fallback_url:
+            entry["fallback_url"] = fallback_url
+        found.append(entry)
 
     return found
 
@@ -148,12 +203,41 @@ def attachment_id(circular_id: str, original_url: str) -> str:
     )
 
 
+_FILE_TYPE_MAGIC = {
+    "pdf": (b"%PDF",),
+    "doc": (b"\xd0\xcf\x11\xe0",),
+    "xls": (b"\xd0\xcf\x11\xe0",),
+    "docx": (b"PK\x03\x04",),
+    "xlsx": (b"PK\x03\x04",),
+}
+
+
+def _content_matches_file_type(chunk: bytes, file_type: str | None) -> bool:
+    """Sniff the first bytes of a download to confirm it's a real document.
+
+    SBP serves dead attachment links as HTTP 200 with an HTML page rather than a
+    404, so a successful status code alone doesn't mean the content is real.
+    """
+    magics = _FILE_TYPE_MAGIC.get(file_type or "")
+    if not magics:
+        return True
+    return any(chunk.startswith(magic) for magic in magics)
+
+
 def download_attachment(
     circular_id: str,
     att_info: dict,
     force: bool = False,
-) -> tuple[Path | None, bool, str | None]:
-    """Stream an attachment into the local cache and atomically publish it."""
+) -> tuple[Path | None, bool, str | None, str | None]:
+    """Stream an attachment into the local cache and atomically publish it.
+
+    Tries `att_info["url"]` first and, if its content doesn't match the expected
+    file type (see `_content_matches_file_type`), falls back to
+    `att_info["fallback_url"]` when present — see `detect_attachments` for why a
+    circular's attachment can resolve to two different candidate locations.
+    Returns the URL that actually served valid content alongside the usual
+    (path, downloaded, error) tuple.
+    """
     att_id = attachment_id(circular_id, att_info["url"])
     extension = f".{att_info['file_type']}" if att_info.get("file_type") else ""
     destination_dir = ATTACHMENTS_DIR / circular_id
@@ -161,28 +245,50 @@ def download_attachment(
     destination = destination_dir / f"{att_id}{extension}"
 
     if destination.exists() and not force:
-        return destination, False, None
+        return destination, False, None, att_info["url"]
+
+    candidates = [att_info["url"]]
+    if att_info.get("fallback_url"):
+        candidates.append(att_info["fallback_url"])
 
     temp_path = destination.with_name(f"{destination.name}.part")
-    response = None
-    try:
-        response = _get_sbp(
-            att_info["url"], headers=HEADERS, timeout=60, stream=True
-        )
-        response.raise_for_status()
-        with temp_path.open("wb") as output:
-            for chunk in response.iter_content(chunk_size=1024 * 1024):
-                if chunk:
+    last_error: str | None = None
+    for candidate_url in candidates:
+        response = None
+        try:
+            response = _get_sbp(
+                candidate_url, headers=HEADERS, timeout=60, stream=True
+            )
+            response.raise_for_status()
+            valid = True
+            with temp_path.open("wb") as output:
+                for index, chunk in enumerate(
+                    response.iter_content(chunk_size=1024 * 1024)
+                ):
+                    if not chunk:
+                        continue
+                    if index == 0 and not _content_matches_file_type(
+                        chunk, att_info.get("file_type")
+                    ):
+                        valid = False
+                        break
                     output.write(chunk)
-        temp_path.replace(destination)
-        return destination, True, None
-    except Exception as exc:
-        temp_path.unlink(missing_ok=True)
-        logging.warning("Failed to download attachment %s: %s", att_info["url"], exc)
-        return None, False, str(exc)
-    finally:
-        if response is not None:
-            response.close()
+            if not valid:
+                temp_path.unlink(missing_ok=True)
+                last_error = f"{candidate_url} did not return a valid {att_info.get('file_type')} file."
+                continue
+            temp_path.replace(destination)
+            return destination, True, None, candidate_url
+        except Exception as exc:
+            temp_path.unlink(missing_ok=True)
+            last_error = str(exc)
+            continue
+        finally:
+            if response is not None:
+                response.close()
+
+    logging.warning("Failed to download attachment %s: %s", att_info["url"], last_error)
+    return None, False, last_error, att_info["url"]
 
 
 def _clean_pdf_pages(raw_pages: list[str]) -> list[str]:
@@ -312,7 +418,7 @@ def process_attachment(
             print(f"    [ATT] Already processed: {attachment.filename}")
         return attachment
 
-    local_path, downloaded, download_error = download_attachment(
+    local_path, downloaded, download_error, resolved_url = download_attachment(
         circular.id, att_info, force=force_download
     )
     if local_path is None:
@@ -323,7 +429,7 @@ def process_attachment(
 
     attachment.local_path = str(local_path.relative_to(PROJECT_ROOT))
     attachment.filename = att_info["filename"]
-    attachment.original_url = att_info["url"]
+    attachment.original_url = resolved_url
     attachment.file_type = att_info["file_type"]
     attachment.extraction_error = None
 

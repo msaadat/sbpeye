@@ -164,6 +164,67 @@ def test_detect_attachments_relative_href_with_subdirectory_ignores_automation_p
     ]
 
 
+def test_detect_attachments_adds_archive_fallback_for_dead_legacy_absolute_url():
+    soup = BeautifulSoup(
+        '<a href="https://www.sbp.org.pk/dmmd/2018/C4-ANNEX-A.pdf">Annexure-A</a>',
+        "html.parser",
+    )
+
+    found = scraper.detect_attachments(
+        soup, "https://www.sbp.org.pk/circulars/dmmd-circular-no-04-of-2018"
+    )
+
+    assert found == [
+        {
+            "url": "https://www.sbp.org.pk/dmmd/2018/C4-ANNEX-A.pdf",
+            "fallback_url": "https://archive.sbp.org.pk/dmmd/2018/C4-ANNEX-A.pdf",
+            "filename": "C4-ANNEX-A.pdf",
+            "file_type": "pdf",
+        },
+    ]
+
+
+def test_detect_attachments_no_archive_fallback_for_current_asset_path():
+    soup = BeautifulSoup(
+        '<a href="https://www.sbp.org.pk/assets/documents/circulars/CL5-FormatIFS.xlsx">Format</a>',
+        "html.parser",
+    )
+
+    found = scraper.detect_attachments(
+        soup, "https://www.sbp.org.pk/circulars/bprd-circular-letter-no-05-of-2019"
+    )
+
+    assert found == [
+        {
+            "url": "https://www.sbp.org.pk/assets/documents/circulars/CL5-FormatIFS.xlsx",
+            "filename": "CL5-FormatIFS.xlsx",
+            "file_type": "xlsx",
+        },
+    ]
+
+
+def test_detect_attachments_skips_unrendered_template_placeholder_href():
+    soup = BeautifulSoup(
+        """
+        <a href="{Site_url}assets/documents/circulars/FECL3-Annex1.pdf">Broken</a>
+        <a href="https://www.sbp.org.pk/assets/documents/circulars/FECL3-Annex1.pdf">Good</a>
+        """,
+        "html.parser",
+    )
+
+    found = scraper.detect_attachments(
+        soup, "https://www.sbp.org.pk/circulars/epd-circular-letter-no-03-of-2015"
+    )
+
+    assert found == [
+        {
+            "url": "https://www.sbp.org.pk/assets/documents/circulars/FECL3-Annex1.pdf",
+            "filename": "FECL3-Annex1.pdf",
+            "file_type": "pdf",
+        },
+    ]
+
+
 def test_attachment_id_is_scoped_to_circular():
     url = "https://www.sbp.org.pk/files/rules.pdf"
     assert scraper.attachment_id("one", url) == scraper.attachment_id("one", url)

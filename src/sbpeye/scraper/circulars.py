@@ -146,8 +146,13 @@ def detect_attachments(soup: BeautifulSoup, base_url: str) -> list[dict]:
         href = anchor.get("href", "").strip()
         if not href:
             continue
+        if "{" in href or "}" in href:
+            # Unrendered CMS template placeholder (e.g. "{Site_url}assets/...") — a
+            # real URL never contains raw curly braces, so this is always a dead link.
+            continue
 
-        is_bare_filename = "/" not in href and not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", href)
+        has_scheme = bool(re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", href))
+        is_bare_filename = "/" not in href and not has_scheme
         fallback_url = None
         if is_bare_filename:
             try:
@@ -169,6 +174,18 @@ def detect_attachments(soup: BeautifulSoup, base_url: str) -> list[dict]:
                 absolute_url = normalize_sbp_url(urljoin(base_url, href))
             except ValueError:
                 continue
+            resolved_path = urlparse(absolute_url).path
+            if (
+                has_scheme
+                and urlparse(absolute_url).hostname == "www.sbp.org.pk"
+                and not resolved_path.startswith("/assets/")
+            ):
+                # A pre-redesign absolute link (e.g. /dmmd/2018/C4-ANNEX-A.pdf) written
+                # directly in the circular's own HTML is dead on the live site, but the
+                # frozen archive mirror still serves it unchanged at the same path.
+                # Links that only became absolute via urljoin against base_url (plain
+                # new-site relative hrefs) don't get this fallback — they already work.
+                fallback_url = normalize_sbp_url(f"{ARCHIVE_BASE_URL}{resolved_path}")
 
         parsed = urlparse(absolute_url)
         extension = Path(parsed.path).suffix.lower()

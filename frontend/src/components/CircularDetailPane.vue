@@ -28,6 +28,7 @@ import {
   type CircularRelationshipTarget,
   type CircularSourceContent,
 } from '@/lib/api'
+import { useResizablePane } from '@/lib/useResizablePane'
 
 const PdfPreviewDialog = defineAsyncComponent(() => import('@/components/PdfPreviewDialog.vue'))
 const CircularGraph = defineAsyncComponent(() => import('@/components/CircularGraph.vue'))
@@ -60,6 +61,7 @@ const generationPopover = ref<InstanceType<typeof Popover> | null>(null)
 const activeJob = ref<AIGenerationJob | null>(null)
 const graphVisible = ref(false)
 const detailTab = ref<'document' | 'details'>('document')
+const detailRail = useResizablePane('sbp:detailRailWidth', 336, 240, 480, { reverse: true })
 let pollTimer: ReturnType<typeof setTimeout> | null = null
 let pollEpoch = 0
 
@@ -581,7 +583,7 @@ onBeforeUnmount(stopPolling)
         </button>
       </div>
 
-      <div class="detail-body" :data-tab="detailTab">
+      <div class="detail-body" :data-tab="detailTab" :style="{ '--detail-rail-width': `${detailRail.size.value}px` }">
         <div class="detail-main">
           <section v-if="sourceLoading || sourceError || (source?.type === 'html' && source.content) || isPdf" class="detail-section source-section">
             <Message v-if="sourceError" severity="warn" :closable="false">{{ sourceError }}</Message>
@@ -598,6 +600,16 @@ onBeforeUnmount(stopPolling)
             <span>No source content available for this circular.</span>
           </div>
         </div>
+
+        <div
+          class="pane-resizer detail-resizer"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize intelligence panel"
+          :class="{ resizing: detailRail.resizing.value }"
+          @pointerdown="detailRail.startDrag"
+          @dblclick="detailRail.resetToDefault"
+        />
 
         <aside class="detail-rail" aria-label="Circular intelligence">
           <template v-if="hasIntelligence">

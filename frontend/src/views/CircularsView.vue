@@ -11,6 +11,7 @@ import Message from 'primevue/message'
 import Select from 'primevue/select'
 import CircularDetailPane from '@/components/CircularDetailPane.vue'
 import CircularResultContent from '@/components/CircularResultContent.vue'
+import { useResizablePane } from '@/lib/useResizablePane'
 import {
   createResearchWorkspace,
   deleteResearchWorkspace,
@@ -67,6 +68,7 @@ const sortBy = ref('relevance')
 let searchController: AbortController | undefined
 
 const selectedCircularId = computed(() => typeof route.params.id === 'string' ? route.params.id : '')
+const resultsPane = useResizablePane('sbp:resultsPaneWidth', 320, 224, 640)
 const totalPages = computed(() => Math.max(1, Math.ceil(totalRecords.value / perPage.value)))
 const hasFilters = computed(() => Boolean(query.value.trim() || department.value || tag.value || startYear.value || endYear.value))
 const activeWorkspace = computed(() => workspaces.value.find((workspace) => workspace.id === activeWorkspaceId.value) || null)
@@ -623,7 +625,11 @@ onBeforeUnmount(() => searchController?.abort())
       </div>
     </section>
 
-    <section class="circular-workspace" :class="{ 'has-detail': selectedCircularId }">
+    <section
+      class="circular-workspace"
+      :class="{ 'has-detail': selectedCircularId }"
+      :style="{ '--results-pane-width': `${resultsPane.size.value}px` }"
+    >
       <main class="circular-results-pane glass-panel">
         <Message v-if="errorMessage" severity="error" :closable="false">{{ errorMessage }}</Message>
         <div class="circular-result-list" :class="{ loading }">
@@ -691,6 +697,17 @@ onBeforeUnmount(() => searchController?.abort())
           </div>
         </div>
       </main>
+
+      <div
+        v-if="selectedCircularId"
+        class="pane-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize results panel"
+        :class="{ resizing: resultsPane.resizing.value }"
+        @pointerdown="resultsPane.startDrag"
+        @dblclick="resultsPane.resetToDefault"
+      />
 
       <CircularDetailPane
         v-if="selectedCircularId"

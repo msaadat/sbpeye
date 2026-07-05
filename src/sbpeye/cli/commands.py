@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 from sbpeye.database import PROJECT_ROOT, engine, Base, SessionLocal
-from sbpeye.models import Attachment, Circular, CircularEntity, CircularRelationship
+from sbpeye.models import Attachment, CachedDocument, Circular, CircularEntity, CircularRelationship
 from sbpeye.ai import get_ai_client, is_rate_limit_error
 from sbpeye.link_routing import resolve_reference_in_context
 from sbpeye.supersession import apply_blanket_supersession
@@ -1443,6 +1443,100 @@ def migrate_rebuild(snapshot_file, limit, workers, yes, verbose):
     finally:
         db.close()
     print("Done. Run 'sbpeye reindex' to rebuild the vector store.")
+
+
+@cli.group()
+def cache():
+    """Reconcile the on-disk HTML/attachment cache against the database."""
+    pass
+
+
+def _run_cache_check_stale(db, prune=False, verbose=False):
+    """Find disk cache files with no matching DB row, and DB rows whose
+    local_path file is missing, for the HTML cache and attachments dir."""
+    import uuid
+    from sbpeye.scraper.circulars import HTML_CACHE_DIR, ATTACHMENTS_DIR
+
+    # --- HTML cache: cache/html/<uuid5(url)>.html ---
+    expected_html_names = set()
+    for (url,) in db.query(Circular.url).all():
+        if url:
+            expected_html_names.add(f"{uuid.uuid5(uuid.NAMESPACE_URL, url)}.html")
+    for (old_url,) in db.query(Circular.old_url).all():
+        if old_url:
+            expected_html_names.add(f"{uuid.uuid5(uuid.NAMESPACE_URL, old_url)}.html")
+
+    html_orphans = []
+    if HTML_CACHE_DIR.is_dir():
+        for f in HTML_CACHE_DIR.iterdir():
+            if f.is_file() and f.name not in expected_html_names:
+                html_orphans.append(f)
+
+    # --- Attachments: attachments/<circular_id>/<attachment_id>.<ext> ---
+    expected_attachment_paths = {}  # resolved path -> (kind, id, local_path)
+    missing_attachment_refs = []
+    for att_id, local_path in db.query(Attachment.id, Attachment.local_path).all():
+        if not local_path:
+            continue
+        resolved = (PROJECT_ROOT / local_path).resolve()
+        expected_attachment_paths[resolved] = ("attachment", att_id, local_path)
+        if not resolved.is_file():
+            missing_attachment_refs.append(("attachment", att_id, local_path))
+    for doc_id, local_path in db.query(CachedDocument.id, CachedDocument.local_path).all():
+        if not local_path:
+            continue
+        resolved = (PROJECT_ROOT / local_path).resolve()
+        expected_attachment_paths[resolved] = ("cached_document", doc_id, local_path)
+        if not resolved.is_file():
+            missing_attachment_refs.append(("cached_document", doc_id, local_path))
+
+    attachment_orphans = []
+    if ATTACHMENTS_DIR.is_dir():
+        for f in ATTACHMENTS_DIR.rglob("*"):
+            if f.is_file() and f.resolve() not in expected_attachment_paths:
+                attachment_orphans.append(f)
+
+    print("\n--- Cache Reconciliation Report ---")
+    html_bytes = sum(f.stat().st_size for f in html_orphans)
+    print(f"  Orphaned HTML cache files:      {len(html_orphans)} ({html_bytes / 1024:.1f} KB)")
+    attachment_bytes = sum(f.stat().st_size for f in attachment_orphans)
+    print(f"  Orphaned attachment files:      {len(attachment_orphans)} ({attachment_bytes / 1024 / 1024:.1f} MB)")
+    print(f"  DB rows with missing local file: {len(missing_attachment_refs)}")
+
+    if verbose:
+        for f in html_orphans:
+            print(f"    [ORPHAN HTML] {f.relative_to(PROJECT_ROOT)}")
+        for f in attachment_orphans:
+            print(f"    [ORPHAN ATTACHMENT] {f.relative_to(PROJECT_ROOT)}")
+        for kind, ref_id, local_path in missing_attachment_refs:
+            print(f"    [MISSING FILE] {kind} {ref_id} -> {local_path}")
+
+    removed = 0
+    if prune:
+        for f in html_orphans + attachment_orphans:
+            f.unlink(missing_ok=True)
+            removed += 1
+        print(f"  Pruned {removed} orphaned file(s).")
+    print()
+
+    return {
+        "html_orphans": len(html_orphans),
+        "attachment_orphans": len(attachment_orphans),
+        "missing_refs": len(missing_attachment_refs),
+        "pruned": removed,
+    }
+
+
+@cache.command("check-stale")
+@click.option("--prune", is_flag=True, help="Delete orphaned cache files (never touches DB rows)")
+@click.option("--verbose", "-v", is_flag=True, help="List every orphan/missing reference")
+def cache_check_stale(prune, verbose):
+    """Report cache files with no matching DB row, and DB rows pointing at missing files."""
+    db = SessionLocal()
+    try:
+        _run_cache_check_stale(db, prune=prune, verbose=verbose)
+    finally:
+        db.close()
 
 
 def main():

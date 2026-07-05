@@ -34,8 +34,8 @@ const CircularGraph = defineAsyncComponent(() => import('@/components/CircularGr
 
 type PreviewAttachment = Pick<CircularAttachment, 'id' | 'filename' | 'file_type'>
 
-const props = defineProps<{ id: string }>()
-const emit = defineEmits<{ close: [] }>()
+const props = defineProps<{ id: string, isPinned: boolean, pinPending: boolean }>()
+const emit = defineEmits<{ close: [], 'toggle-pin': [] }>()
 const router = useRouter()
 const toast = useToast()
 
@@ -476,6 +476,16 @@ onBeforeUnmount(stopPolling)
               aria-label="Generate AI analysis"
               :title="activeJob ? `Generating ${activeJob.feature}` : 'Generate AI analysis'"
               @click="generationPopover?.toggle($event)"
+            />
+            <Button
+              :icon="isPinned ? 'pi pi-bookmark-fill' : 'pi pi-bookmark'"
+              text
+              rounded
+              severity="secondary"
+              :loading="pinPending"
+              :aria-label="isPinned ? 'Unpin circular' : 'Pin circular'"
+              :title="isPinned ? 'Unpin circular' : 'Pin circular'"
+              @click="emit('toggle-pin')"
             />
             <Button v-if="isPdf" icon="pi pi-file-pdf" text rounded severity="danger" aria-label="Preview PDF" title="Preview PDF" @click="pdfDialogVisible = true" />
             <Button

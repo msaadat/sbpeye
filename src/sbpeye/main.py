@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, Request, BackgroundTasks, Form
+from fastapi import FastAPI, Depends, Request, BackgroundTasks, Form, Body
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
@@ -262,12 +262,12 @@ def _get_ecodata_entries(db: Session, force_refresh: bool = False) -> list[dict]
 
 
 @app.get("/api/ecodata/entries")
-async def get_ecodata_entries(db: Session = Depends(get_db)):
+def get_ecodata_entries(db: Session = Depends(get_db)):
     return _get_ecodata_entries(db)
 
 
 @app.get("/api/ecodata/pdf_summary")
-async def get_pdf_summary(url: str, db: Session = Depends(get_db)):
+def get_pdf_summary(url: str, db: Session = Depends(get_db)):
     if not is_summarizable(url):
         return {"error": "This document is not configured for summarization."}
     try:
@@ -402,7 +402,7 @@ async def get_circular_by_url(url: str, db: Session = Depends(get_db)):
 
 
 @app.post("/api/circulars/open")
-async def open_circular_by_url(
+def open_circular_by_url(
     url: str,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
@@ -454,7 +454,7 @@ async def open_circular_by_url(
 
 
 @app.post("/api/circulars/{circular_id}/refresh")
-async def refresh_circular(
+def refresh_circular(
     circular_id: str,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
@@ -487,7 +487,7 @@ async def refresh_circular(
 
 
 @app.get("/api/circulars/{circular_id}/source")
-async def get_circular_source(circular_id: str, db: Session = Depends(get_db)):
+def get_circular_source(circular_id: str, db: Session = Depends(get_db)):
     c = db.query(Circular).filter(Circular.id == circular_id).first()
     if not c:
         return JSONResponse({"error": "Circular not found"}, status_code=404)
@@ -520,7 +520,7 @@ async def get_circular_source(circular_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/api/circulars/{circular_id}/document")
-async def circular_document(circular_id: str, db: Session = Depends(get_db)):
+def circular_document(circular_id: str, db: Session = Depends(get_db)):
     circular = db.query(Circular).filter(Circular.id == circular_id).first()
     if not circular or not circular.url.lower().split("?", 1)[0].endswith(".pdf"):
         return JSONResponse({"error": "Circular PDF not found."}, status_code=404)
@@ -877,7 +877,7 @@ async def get_circular_relationships(circular_id: str, db: Session = Depends(get
 
 
 @app.get("/api/sbp_news")
-async def get_sbp_news(db: Session = Depends(get_db)):
+def get_sbp_news(db: Session = Depends(get_db)):
     try:
         return scrape_sbp_news(db)
     except Exception as e:
@@ -992,7 +992,7 @@ async def document_content(attachment_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/api/pdf_preview")
-async def pdf_preview(url: str):
+def pdf_preview(url: str):
     import io
     import base64
     import pdfplumber
@@ -1025,7 +1025,7 @@ async def pdf_preview(url: str):
 
 
 @app.get("/api/pdf_proxy")
-async def pdf_proxy(url: str):
+def pdf_proxy(url: str):
     if not _is_allowed_sbp_url(url):
         return JSONResponse({"error": "Only SBP PDFs are supported."}, status_code=400)
 
@@ -1074,8 +1074,7 @@ async def get_settings(db: Session = Depends(get_db)):
 
 
 @app.post("/api/settings")
-async def save_settings(request: Request, db: Session = Depends(get_db)):
-    data = await request.json()
+def save_settings(data: dict = Body(...), db: Session = Depends(get_db)):
     provider = normalize_provider(data.get("provider", data.get("ai_provider", "lmstudio")))
     provider_definition = get_provider_definition(provider)
     config = AIConfig(
@@ -1176,7 +1175,7 @@ def test_embedding_connection(db: Session = Depends(get_db)):
 
 
 @app.post("/api/settings/test")
-async def test_ai_connection(db: Session = Depends(get_db)):
+def test_ai_connection(db: Session = Depends(get_db)):
     try:
         client = get_ai_client(db)
         result = client.test_connection()
@@ -1772,7 +1771,7 @@ async def chat_message_stream(request: Request, db: Session = Depends(get_db)):
 
 
 @app.post("/api/circulars/batch_download")
-async def batch_download(
+def batch_download(
     circular_ids: list[str] = Form(...),
     db: Session = Depends(get_db)
 ):

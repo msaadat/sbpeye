@@ -30,7 +30,22 @@ _ROW_NAV_PATTERNS = {
 # container; the surrounding chrome is plain <div>s, so scoping to this container is
 # what removes navigation rather than the legacy table heuristics. Archive pages lack
 # these containers and fall back to <body> + the legacy cleaning below.
-CONTENT_CONTAINER_SELECTORS = ("div.pdfcontenttodownload", "div.circular-body")
+#
+# Inside div.pdfcontenttodownload the actual letter (body + signature) is wrapped in
+# div.border-box, while the <h2> heading and <h5> date sit in sibling chrome divs
+# *outside* it. SBP inconsistently tags those chrome divs `no-print` (see
+# NOISE_SELECTORS), so scoping to pdfcontenttodownload leaked the heading+date into the
+# extracted text for whichever circulars happened not to be tagged. Scoping to the
+# border-box instead drops that heading/date chrome deterministically, regardless of the
+# no-print tagging — the heading and date are already stored as Circular.title /
+# Circular.date. div.circular-body would be too narrow: the signature (div.bottom) is a
+# sibling of circular-body, not a child. The descendant selector keeps this scoped to the
+# new-site container so archive pages (which have no border-box) are untouched.
+CONTENT_CONTAINER_SELECTORS = (
+    "div.pdfcontenttodownload div.border-box",
+    "div.pdfcontenttodownload",
+    "div.circular-body",
+)
 # Print-only buttons, hidden holders, and white-on-white tracking numbers on detail pages.
 NOISE_SELECTORS = (".no-print", "#automationPathHolder", 'font[color="#fff"]')
 

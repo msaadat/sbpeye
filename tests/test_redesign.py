@@ -9,6 +9,7 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 
 from sbpeye.link_routing import normalize_reference, harvest_reference_links
+from sbpeye.scraper.clean_html import extract_sbp_text
 from sbpeye.scraper.circulars import parse_circular_listing, circular_identity
 from sbpeye.scraper.ecodata_index import parse_ecodata_index
 from sbpeye.scraper.news import parse_news_cards
@@ -188,3 +189,61 @@ def test_snapshot_and_reattach_preserves_llm_data(db_factory):
     assert rel.target_id == nb.id
     assert rel.confidence == 0.9
     assert db.query(Circular).filter(Circular.id == nb.id).one().status == "amended"
+
+
+# --- detail-page text extraction --------------------------------------------------------
+
+def _detail_html(*, chrome_no_print: bool) -> bytes:
+    """A new-site circular detail page.
+
+    Mirrors the real structure: the <h2> heading and <h5> date sit in sibling chrome divs
+    outside div.border-box, and SBP inconsistently tags those chrome divs `no-print`. The
+    letter body + signature live inside div.border-box regardless.
+    """
+    chrome_cls = " no-print" if chrome_no_print else ""
+    return f"""
+    <div class="pdfcontenttodownload">
+      <div class="col-12 mb-5{chrome_cls}"><h2>Discontinuation of the Scheme</h2></div>
+      <div class="col-12 d-flex{chrome_cls}">
+        <h5 class="mb-0">July 02, 2026</h5>
+        <div class="text-end no-print"><button id="downloadPdfBtn">Download PDF</button></div>
+      </div>
+      <div class="col-12">
+        <div class="border-box bg-white p-3">
+          <span id="automationPathHolder" style="display:none;"></span><font color="#fff">38894</font>
+          <div class="circular-body">
+            <div class="row"><div class="col-lg-12 mx-auto">
+              <p><b>The Presidents/Chief Executives</b></p>
+              <p>Dear Sir/Madam,</p>
+              <p><b><u>Discontinuation of the Scheme</u></b></p>
+              <p>Attention is invited to the subject scheme.</p>
+            </div></div>
+          </div>
+          <div class="bottom mt-2 text-end"><div class="row"><div class="col-12"><div class="w-max ms-auto">
+            <p>Yours sincerely,</p>
+            <p>Dr. Asif Ali Director</p>
+          </div></div></div></div>
+        </div>
+      </div>
+    </div>
+    """.encode()
+
+
+def test_extract_sbp_text_excludes_heading_and_date_regardless_of_no_print():
+    tagged = extract_sbp_text(_detail_html(chrome_no_print=True))
+    untagged = extract_sbp_text(_detail_html(chrome_no_print=False))
+
+    # The `no-print` tagging on the heading/date chrome is inconsistent upstream, but
+    # scoping to div.border-box makes extraction identical either way.
+    assert tagged == untagged
+
+    # Body-only: starts at the salutation, keeps the signature, drops the <h2> heading and
+    # <h5> date (both stored separately as Circular.title / Circular.date). The in-body
+    # subject line survives — only the leading heading/date chrome is removed.
+    assert tagged.startswith("The Presidents/Chief Executives")
+    assert "Yours sincerely," in tagged
+    assert "Dr. Asif Ali" in tagged
+    assert not tagged.startswith("Discontinuation of the Scheme")
+    assert "July 02, 2026" not in tagged
+    assert "Download PDF" not in tagged
+    assert "38894" not in tagged

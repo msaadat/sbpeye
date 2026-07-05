@@ -654,16 +654,6 @@ onBeforeUnmount(() => searchController?.abort())
           >
             <span class="result-select" @click.stop>
               <Checkbox v-model="selectedIds" :value="row.id" :input-id="`select-${row.id}`" :aria-label="`Select ${row.title}`" />
-              <Button
-                :icon="isPinned(row.id) ? 'pi pi-bookmark-fill' : 'pi pi-bookmark'"
-                text
-                rounded
-                size="small"
-                severity="secondary"
-                :disabled="workspaceSaving"
-                :aria-label="isPinned(row.id) ? `Unpin ${row.title}` : `Pin ${row.title}`"
-                @click="togglePinned(row.id)"
-              />
             </span>
             <CircularResultContent
               :circular="row"
@@ -688,7 +678,14 @@ onBeforeUnmount(() => searchController?.abort())
         </div>
       </main>
 
-      <CircularDetailPane v-if="selectedCircularId" :id="selectedCircularId" @close="closeCircular" />
+      <CircularDetailPane
+        v-if="selectedCircularId"
+        :id="selectedCircularId"
+        :is-pinned="isPinned(selectedCircularId)"
+        :pin-pending="workspaceSaving"
+        @close="closeCircular"
+        @toggle-pin="togglePinned(selectedCircularId)"
+      />
     </section>
   </section>
 </template>

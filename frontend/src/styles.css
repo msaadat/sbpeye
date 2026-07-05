@@ -1718,6 +1718,7 @@ a {
 
 .result-content {
   display: grid;
+  grid-column: 2;
   min-width: 0;
   gap: 0.3rem;
 }
@@ -2364,6 +2365,46 @@ a {
   max-width: 100% !important;
   white-space: normal !important;
   overflow-wrap: anywhere;
+}
+
+/* SBP source markup mixes <p> and <div> for paragraph-level blocks (and varies between
+   the new site and legacy archived pages), and the scraper strips all inline styles
+   (clean_html.py), so relying on the browser's default UA margins produces inconsistent
+   gaps: <p> gets a default margin, <div> doesn't. Set an explicit, consistent rhythm
+   instead of leaving it to tag defaults. */
+.source-section .sbp-source-content p,
+.source-section .sbp-source-content ul,
+.source-section .sbp-source-content ol,
+.source-section .sbp-source-content table,
+.source-section .sbp-source-content h1,
+.source-section .sbp-source-content h2,
+.source-section .sbp-source-content h3,
+.source-section .sbp-source-content h4,
+.source-section .sbp-source-content h5,
+.source-section .sbp-source-content h6 {
+  margin: 0 0 1em;
+}
+
+.source-section .sbp-source-content div {
+  margin: 0;
+}
+
+.source-section .sbp-source-content li {
+  margin-bottom: 0.35em;
+}
+
+.source-section .sbp-source-content li > p {
+  margin: 0;
+}
+
+.source-section .sbp-source-content p:empty,
+.source-section .sbp-source-content p:has(> br:only-child) {
+  margin: 0 0 0.6em;
+  min-height: 0.6em;
+}
+
+.source-section .sbp-source-content > *:last-child {
+  margin-bottom: 0;
 }
 
 .source-section .sbp-source-content b,

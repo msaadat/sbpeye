@@ -106,7 +106,7 @@ SYNONYMS: dict[str, list[str]] = {
     "npl": ["non performing loan", "bad loan", "classified loan"],
     "oaem": ["other assets especially mentioned"],
     "irac": ["income recognition asset classification"],
-    "ecl": ["expected credit loss"],
+    "ecl": ["expected credit loss", "exchange company license"],
     "pcr": ["provision coverage ratio"],
     "leverage": ["leverage ratio"],
     "lcr": ["liquidity coverage ratio"],
@@ -123,8 +123,7 @@ SYNONYMS: dict[str, list[str]] = {
     "slr": ["statutory liquidity requirement"],
     "crr": ["cash reserve requirement"],
     "mcr": ["minimum capital requirement"],
-    "paid up capital": ["paid-up capital", "minimum paid up capital"],
-    "paid-up capital": ["paid up capital", "minimum paid up capital"],
+    "paid up capital": ["minimum paid up capital"],
 
     # Monetary Policy & Rates
     "kibor": ["karachi interbank offered rate", "interbank rate"],
@@ -162,7 +161,6 @@ SYNONYMS: dict[str, list[str]] = {
     "nbfc": ["non banking finance company"],
     "modaraba": ["islamic fund management"],
     "leasing": ["lease finance", "ijarah"],
-    "ecl": ["exchange company license"],
     "branchless banking": ["digital banking", "mobile banking", "agent banking"],
     "digital banking": ["branchless banking", "mobile banking"],
     "mobile banking": ["branchless banking", "digital banking"],
@@ -190,7 +188,7 @@ SYNONYMS: dict[str, list[str]] = {
     "markup": ["interest", "profit rate"],
 
     # Consumer / Conduct
-    "bcp": ["banking conduct prudential"],
+    "bcp": ["banking conduct prudential", "business continuity plan"],
     "adr": ["alternative dispute resolution"],
     "grievance": ["complaint", "dispute"],
     "disclosure": ["transparency", "fair dealing"],
@@ -205,7 +203,6 @@ SYNONYMS: dict[str, list[str]] = {
     "alco": ["asset liability committee"],
     "stress test": ["scenario analysis", "stress testing"],
     "bcm": ["business continuity management"],
-    "bcp2": ["business continuity plan"],
     "drp": ["disaster recovery plan"],
     "outsourcing": ["third party", "service provider"],
     "cybersecurity": ["cyber security", "information security", "it security"],
@@ -268,6 +265,25 @@ def tokenize(text: str) -> list[str]:
     return [w for w in re.findall(r"\w+", normalized) if len(w) > 1 and w not in STOPWORDS]
 
 
+def _build_multiword_synonyms() -> dict[str, list[str]]:
+    """Index multi-word SYNONYMS keys by their tokenized (stopword-stripped)
+    form, so a key like "paid up capital" is looked up as "paid capital" —
+    matching what query tokens look like after tokenize() has already
+    dropped stopwords like "up" and split on hyphens.
+    """
+    index: dict[str, list[str]] = {}
+    for key, values in SYNONYMS.items():
+        key_tokens = tokenize(key)
+        if len(key_tokens) < 2:
+            continue
+        index.setdefault(" ".join(key_tokens), []).extend(values)
+    return index
+
+
+# Multi-word keys indexed by tokenized form, e.g. "paid up capital" -> "paid capital".
+MULTIWORD_SYNONYMS: dict[str, list[str]] = _build_multiword_synonyms()
+
+
 def expand_query_tokens(tokens: list[str]) -> list[str]:
     """Expand query tokens with domain synonyms/acronyms.
 
@@ -284,14 +300,15 @@ def expand_query_tokens(tokens: list[str]) -> list[str]:
                     expanded.append(w)
                     seen.add(w)
 
-    # Multi-word keys (bigrams) — e.g. "policy rate", "branchless banking"
-    for i in range(len(tokens) - 1):
-        bigram = f"{tokens[i]} {tokens[i+1]}"
-        for synonym_phrase in SYNONYMS.get(bigram, []):
-            for w in tokenize(synonym_phrase):
-                if w not in seen:
-                    expanded.append(w)
-                    seen.add(w)
+    # Multi-word keys (bigrams/trigrams) — e.g. "policy rate", "paid up capital"
+    for window in (2, 3):
+        for i in range(len(tokens) - window + 1):
+            phrase = " ".join(tokens[i:i + window])
+            for synonym_phrase in MULTIWORD_SYNONYMS.get(phrase, []):
+                for w in tokenize(synonym_phrase):
+                    if w not in seen:
+                        expanded.append(w)
+                        seen.add(w)
 
     return expanded
 

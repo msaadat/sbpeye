@@ -11,6 +11,9 @@ class Circular(Base):
     title = Column(String, nullable=False)
     department = Column(String)
     date = Column(DateTime)
+    # When this row was first scraped/indexed, as opposed to `date` (the circular's
+    # publication date parsed from SBP listings). Powers the "indexed today" stat.
+    indexed_at = Column(DateTime, nullable=True)
     url = Column(String)
     # After the July 2026 SBP redesign a circular is reachable at two URLs: its slug on
     # the new site (new_url) and its original path on the frozen archive.sbp.org.pk

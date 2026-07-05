@@ -3,6 +3,8 @@
 If a handler is dropped or its path/method changes during refactoring, this fails.
 """
 
+from starlette.routing import Match
+
 import sbpeye.main as main_module
 
 EXPECTED_ROUTES = {
@@ -79,3 +81,27 @@ def test_all_expected_routes_are_registered():
     registered = _app_routes()
     missing = EXPECTED_ROUTES - registered
     assert not missing, f"Routes went missing during refactor: {sorted(missing)}"
+
+
+def _first_full_match(method: str, path: str):
+    scope = {"type": "http", "method": method, "path": path}
+    for route in main_module.app.routes:
+        match, _ = route.matches(scope)
+        if match == Match.FULL:
+            return route
+    return None
+
+
+def test_literal_routes_are_not_shadowed():
+    """A literal path (e.g. /api/circulars/export_csv) registered after a
+    parameterized sibling (e.g. /api/circulars/{circular_id}) would silently
+    resolve to the parameterized route instead — Starlette matches routes in
+    registration order. See CODE_REVIEW_FINDINGS.md §1.1."""
+    for method, path in EXPECTED_ROUTES:
+        if "{" in path:
+            continue
+        route = _first_full_match(method, path)
+        assert route is not None, f"No route matched {method} {path}"
+        assert route.path == path, (
+            f"{method} {path} is shadowed by earlier route {route.path}"
+        )

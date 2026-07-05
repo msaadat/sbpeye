@@ -760,7 +760,7 @@ def process_circular(
     title = re.sub(r"\s+", " ", title)
 
     if existing is None:
-        circular = Circular(id=circular_id)
+        circular = Circular(id=circular_id, indexed_at=datetime.utcnow())
         db.add(circular)
     else:
         circular = existing

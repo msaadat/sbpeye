@@ -6,8 +6,8 @@ from sqlalchemy.orm import sessionmaker
 
 from .embeddings import EmbeddingConfig, create_embedding_backend
 
-SQLALCHEMY_DATABASE_URL = "sqlite:///./sbpeye.db"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SQLALCHEMY_DATABASE_URL = f"sqlite:///{PROJECT_ROOT / 'sbpeye.db'}"
 CHROMA_DB_DIR = PROJECT_ROOT / "chroma_db"
 
 engine = create_engine(
@@ -36,18 +36,19 @@ except ValueError:
 
 
 def has_vector_store_data() -> bool:
-    return (CHROMA_DB_DIR / "chroma.sqlite3").exists()
+    return collection.count() > 0
 
 
 def _ensure_columns():
-    insp = inspect(engine)
-    table_names = insp.get_table_names()
     with engine.begin() as conn:
+        insp = inspect(conn)
+        table_names = insp.get_table_names()
         if "circulars" in table_names:
             existing = {c["name"] for c in insp.get_columns("circulars")}
             new_columns = [
                 ("new_url", "VARCHAR"),
                 ("old_url", "VARCHAR"),
+                ("indexed_at", "DATETIME"),
                 ("summary", "TEXT"),
                 ("tags", "TEXT"),
                 ("compliance_checklist", "TEXT"),
@@ -62,6 +63,12 @@ def _ensure_columns():
             for col_name, col_type in new_columns:
                 if col_name not in existing:
                     conn.execute(text(f"ALTER TABLE circulars ADD COLUMN {col_name} {col_type}"))
+
+            # Existing rows predate indexed_at tracking; backfill with the publication
+            # date as the closest available approximation (real scrape time is lost).
+            conn.execute(text(
+                "UPDATE circulars SET indexed_at = date WHERE indexed_at IS NULL"
+            ))
 
             # Existing stored output predates generation tracking. Backfill it once so
             # the frontend correctly presents those actions as regeneration.

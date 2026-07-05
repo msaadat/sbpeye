@@ -89,6 +89,7 @@ def _lazy_index_circular(circular_id: str) -> None:
             reference=circular.reference or "",
             include_attachments=True,
         )
+        search_engine.mark_dirty()
     finally:
         db.close()
 
@@ -127,13 +128,14 @@ app = FastAPI(
 )
 
 # Setup SPA static files
-os.makedirs("src/sbpeye/static", exist_ok=True)
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+os.makedirs(STATIC_DIR, exist_ok=True)
 
-SPA_DIR = Path("src/sbpeye/static/spa")
+SPA_DIR = STATIC_DIR / "spa"
 SPA_INDEX = SPA_DIR / "index.html"
 SPA_ASSETS_DIR = SPA_DIR / "assets"
 
-app.mount("/static", StaticFiles(directory="src/sbpeye/static"), name="static")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 if SPA_ASSETS_DIR.exists():
     app.mount("/spa/assets", StaticFiles(directory=SPA_ASSETS_DIR), name="spa-assets")
 
@@ -176,7 +178,7 @@ async def get_app_status(db: Session = Depends(get_db)):
     last_sync_dt = sync_status.last_sync_date if sync_status else None
     total_circulars = db.query(func.count(Circular.id)).scalar() or 0
     department_count = db.query(func.count(func.distinct(Circular.department))).filter(Circular.department.isnot(None)).scalar() or 0
-    indexed_today = db.query(func.count(Circular.id)).filter(func.date(Circular.date) == datetime.now().date()).scalar() or 0
+    indexed_today = db.query(func.count(Circular.id)).filter(func.date(Circular.indexed_at) == datetime.utcnow().date()).scalar() or 0
     vector_db_ready = has_vector_store_data()
 
     return {
@@ -435,6 +437,7 @@ async def open_circular_by_url(
             title=_re.sub(r"\s+", " ", title)[:500],
             department="Discovered from link",
             date=datetime.now(),
+            indexed_at=datetime.utcnow(),
             url=url,
             content_text=content_text,
             status="active",
@@ -531,6 +534,42 @@ async def circular_document(circular_id: str, db: Session = Depends(get_db)):
         iter([content]),
         media_type="application/pdf",
         headers={"Content-Disposition": 'inline; filename="circular.pdf"', "Cache-Control": "private, max-age=3600"},
+    )
+
+
+@app.get("/api/circulars/export_csv")
+async def export_search_csv(
+    q: str = "",
+    start_year: str | None = None,
+    end_year: str | None = None,
+    department: str | None = None,
+    sort_by: str = "relevance",
+    tag: str | None = None,
+    db: Session = Depends(get_db)
+):
+    results, _ = search_engine.search(
+        q, db, limit=500,
+        start_year=_parse_year(start_year),
+        end_year=_parse_year(end_year),
+        department=department,
+        sort_by=sort_by,
+        tag=tag,
+    )
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Circular Ref", "Title", "Department", "Date", "Url"])
+
+    for r in results:
+        c = r["circular"]
+        date_str = c.date.strftime('%Y-%m-%d') if c.date else 'N/A'
+        writer.writerow([c.reference, c.title, c.department, date_str, c.url])
+
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=sbpeye_search_results.csv"}
     )
 
 
@@ -1731,41 +1770,6 @@ async def chat_message_stream(request: Request, db: Session = Depends(get_db)):
         },
     )
 
-
-@app.get("/api/circulars/export_csv")
-async def export_search_csv(
-    q: str = "",
-    start_year: str | None = None,
-    end_year: str | None = None,
-    department: str | None = None,
-    sort_by: str = "relevance",
-    tag: str | None = None,
-    db: Session = Depends(get_db)
-):
-    results, _ = search_engine.search(
-        q, db, limit=500,
-        start_year=_parse_year(start_year),
-        end_year=_parse_year(end_year),
-        department=department,
-        sort_by=sort_by,
-        tag=tag,
-    )
-
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["Circular Ref", "Title", "Department", "Date", "Url"])
-
-    for r in results:
-        c = r["circular"]
-        date_str = c.date.strftime('%Y-%m-%d') if c.date else 'N/A'
-        writer.writerow([c.reference, c.title, c.department, date_str, c.url])
-
-    output.seek(0)
-    return StreamingResponse(
-        iter([output.getvalue()]),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=sbpeye_search_results.csv"}
-    )
 
 @app.post("/api/circulars/batch_download")
 async def batch_download(

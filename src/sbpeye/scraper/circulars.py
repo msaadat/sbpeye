@@ -754,7 +754,6 @@ def process_circular(
 
     if circular_date is None and existing is None:
         print(f"  [WARN] Could not extract date from content for circular {url}")
-        circular_date = datetime.now()
 
     reference = re.sub(r"\s+", " ", reference)
     title = re.sub(r"\s+", " ", title)
@@ -767,7 +766,7 @@ def process_circular(
     circular.reference = reference or circular.reference
     circular.title = title
     circular.department = department
-    circular.date = circular_date or circular.date or datetime.now()
+    circular.date = circular_date or circular.date
     circular.url = url
     circular.new_url = url
     if old_url:

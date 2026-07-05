@@ -40,6 +40,7 @@ const toast = useToast()
 
 const rows = ref<CircularSummary[]>([])
 const selectedIds = ref<string[]>([])
+const selectionMode = ref(false)
 const workspaces = ref<ResearchWorkspace[]>([])
 const activeWorkspaceId = ref('')
 const newWorkspaceName = ref('')
@@ -406,6 +407,11 @@ function togglePageSelection() {
   }
 }
 
+function toggleSelectionMode() {
+  selectionMode.value = !selectionMode.value
+  if (!selectionMode.value) selectedIds.value = []
+}
+
 async function openCircular(id: string) {
   await router.push({ path: `/circulars/${id}`, query: routeQuery() })
   await saveActiveWorkspaceState({ last_circular_id: id })
@@ -603,6 +609,14 @@ onBeforeUnmount(() => searchController?.abort())
       </form>
 
       <div class="search-utilities">
+        <Button
+          :label="selectionMode ? 'Done' : 'Select'"
+          icon="pi pi-check-square"
+          size="small"
+          text
+          :title="selectionMode ? 'Exit selection mode' : 'Select circulars'"
+          @click="toggleSelectionMode"
+        />
         <Button label="CSV" icon="pi pi-download" size="small" text title="Export CSV" :loading="exportLoading" @click="exportCsv" />
         <Button label="ZIP" icon="pi pi-file-zip" size="small" text title="Download selected as ZIP" :disabled="!selectedIds.length" :loading="zipLoading" @click="downloadSelectedZip" />
         <Button label="Chat" icon="pi pi-comments" size="small" text title="Open selected in Chat" :disabled="!selectedIds.length" @click="handoffToChat" />
@@ -624,7 +638,7 @@ onBeforeUnmount(() => searchController?.abort())
               @click="openCircular(circular.id)"
             >
               <span class="result-select" @click.stop>
-                <Checkbox v-model="selectedIds" :value="circular.id" :input-id="`select-pinned-${circular.id}`" :aria-label="`Select ${circular.title}`" />
+                <Checkbox v-if="selectionMode" v-model="selectedIds" :value="circular.id" :input-id="`select-pinned-${circular.id}`" :aria-label="`Select ${circular.title}`" />
                 <Button
                   icon="pi pi-bookmark-fill"
                   text
@@ -652,7 +666,7 @@ onBeforeUnmount(() => searchController?.abort())
             :class="{ active: row.id === selectedCircularId }"
             @click="openCircular(row.id)"
           >
-            <span class="result-select" @click.stop>
+            <span v-if="selectionMode" class="result-select" @click.stop>
               <Checkbox v-model="selectedIds" :value="row.id" :input-id="`select-${row.id}`" :aria-label="`Select ${row.title}`" />
             </span>
             <CircularResultContent
@@ -667,8 +681,8 @@ onBeforeUnmount(() => searchController?.abort())
         <div class="results-toolbar">
           <div class="results-count"><strong>{{ totalRecords.toLocaleString() }}</strong><span> results</span></div>
           <div class="results-toolbar-actions">
-            <Checkbox :model-value="allPageSelected" binary aria-label="Select page" :disabled="!searchRows.length" @update:model-value="togglePageSelection" />
-            <span v-if="selectedIds.length">{{ selectedIds.length }} selected</span>
+            <Checkbox v-if="selectionMode" :model-value="allPageSelected" binary aria-label="Select page" :disabled="!searchRows.length" @update:model-value="togglePageSelection" />
+            <span v-if="selectionMode && selectedIds.length">{{ selectedIds.length }} selected</span>
             <div class="results-pagination">
               <Button icon="pi pi-angle-left" text rounded aria-label="Previous page" :disabled="page <= 1 || loading" @click="changePage(-1)" />
               <span>Page {{ page }} of {{ totalPages }}</span>

@@ -12,6 +12,7 @@ import re as _re
 import os
 import json
 import uuid
+import threading
 
 from .database import PROJECT_ROOT, engine, Base, get_db, SessionLocal, has_vector_store_data
 from .models import AIGenerationJob, Attachment, CachedDocument, SyncStatus, Circular, CircularEntity, CircularRelationship, EcoDataSeries, EcoDataEntry, Settings, ChatSession, ChatMessage, ResearchWorkspace, WorkspaceCircular
@@ -112,9 +113,18 @@ def fail_interrupted_ai_jobs() -> None:
         db.close()
 
 
+def _warm_up_search_index() -> None:
+    db = SessionLocal()
+    try:
+        search_engine.warm_up(db)
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def app_lifespan(_app: FastAPI):
     fail_interrupted_ai_jobs()
+    threading.Thread(target=_warm_up_search_index, daemon=True).start()
     yield
 
 

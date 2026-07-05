@@ -471,6 +471,10 @@ class SearchEngine:
         with self._lock:
             self._dirty = True
 
+    def warm_up(self, db: Session) -> None:
+        """Build the BM25 index eagerly; safe to call from a background thread."""
+        self._ensure_index(db)
+
     def _ensure_index(self, db: Session):
         with self._lock:
             if not self._dirty and self._bm25 is not None:

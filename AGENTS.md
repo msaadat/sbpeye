@@ -2,15 +2,15 @@
 
 ## Purpose
 
-SBPEye is an independent indexer and search engine for State Bank of Pakistan (SBP) circulars and economic data. It scrapes SBP's website, indexes circulars from all departments, and provides a modern web UI with full-text search (hybrid BM25 + vector/semantic), browse-by-department/year navigation, PDF previews, AI-powered analysis, and live SBP news.
+SBPEye is an independent indexer and search engine for State Bank of Pakistan (SBP) circulars and economic data. It scrapes SBP's website, indexes circulars from all departments, and provides a modern web UI with full-text search (hybrid SQLite FTS5 + vector/semantic), browse-by-department/year navigation, PDF previews, AI-powered analysis, and live SBP news.
 
 ## Tech Stack
 
 - **Backend**: Python 3.12+, FastAPI (served via Uvicorn)
 - **Frontend**: Vue 3 + TypeScript + Vite + Vue Router + Pinia, PrimeVue Aura (SBP green/gold accents, light/dark support)
-- **Database**: SQLite via SQLAlchemy ORM (file `sbpeye.db` at project root)
+- **Database**: SQLite via SQLAlchemy ORM (file `sbpeye.db` at project root); also hosts the `circulars_fts` FTS5 virtual table used for keyword search
 - **Vector DB**: ChromaDB (persistent, at `chroma_db/`)
-- **Search**: Hybrid engine combining BM25 (rank-bm25) keyword ranking with ChromaDB vector similarity, fused via Reciprocal Rank Fusion (RRF) with title/department match bonuses
+- **Search**: Hybrid engine combining a persistent, incrementally-updated SQLite FTS5 keyword index with ChromaDB vector similarity, fused via Reciprocal Rank Fusion (RRF) with title/department match bonuses
 - **Scraping**: BeautifulSoup4, requests, pdfplumber (PDF extraction)
 - **AI Engine**: Flexible OpenAI-compatible client supporting LM Studio (local), OpenAI API, and Google Gemini. Configured via Settings page or environment variables.
 - **CLI**: Click-based command-line interface for syncing, tagging, summarization, etc.
@@ -43,7 +43,7 @@ SBPEye/
 │   ├── main.py                     # FastAPI app, all routes, HTML cleaning logic
 │   ├── models.py                   # SQLAlchemy models (Circular, ChatSession, Settings, etc.)
 │   ├── database.py                 # DB engine, session factory, ChromaDB client, migrations
-│   ├── search.py                   # Hybrid search engine (BM25 + ChromaDB + RRF)
+│   ├── search.py                   # Hybrid search engine (SQLite FTS5 + ChromaDB + RRF)
 │   ├── ai.py                       # AI client module (LM Studio, OpenAI, Google Gemini)
 │   ├── api/
 │   │   ├── __init__.py
@@ -180,7 +180,8 @@ cd frontend && npm run typecheck  # TypeScript type checking
 - Python 3.12+ required
 - Dependencies managed with uv (`pyproject.toml`, `uv.lock`)
 - DB sessions are managed via FastAPI dependency injection (`get_db` generator)
-- Database migrations are handled automatically via `_ensure_columns()` in database.py (no Alembic)
+- Database migrations are handled automatically via `_ensure_columns()` in database.py (no Alembic); it also creates the `circulars_fts` virtual table
+- The FTS5 keyword index (`circulars_fts`) is maintained at the application layer, not via SQL triggers — any code path that changes a circular's or attachment's text must call `index_circular_fts(db, circular)` (search.py) alongside the existing ChromaDB write, or the circular won't surface in keyword search
 - `chroma_db/` is local runtime data and should not be committed to git.
 - Frontend is a Vue 3 SPA with Vue Router, Pinia stores, and PrimeVue components
 - Dark mode is implemented via PrimeVue's built-in dark mode class switching

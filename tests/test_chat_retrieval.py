@@ -196,6 +196,7 @@ def test_search_department_filter_accepts_partial_department(monkeypatch):
         ),
     ])
     db.commit()
+    search_module.backfill_fts(db)  # build the persistent lexical index
 
     results, _ = SearchEngine().search(
         "cash reserve requirement",

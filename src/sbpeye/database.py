@@ -151,5 +151,13 @@ def _ensure_columns():
                     "ALTER TABLE research_workspaces ADD COLUMN is_default INTEGER DEFAULT 0"
                 ))
 
+        # Persistent FTS5 lexical index for keyword search (see search.py). Rows are
+        # maintained application-side (cells hold tokenize() output); this just ensures
+        # the virtual table exists. Backfill happens lazily on first server start.
+        conn.execute(text(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS circulars_fts USING fts5("
+            "circular_id UNINDEXED, title, reference, body, tokenize='unicode61')"
+        ))
+
 Base.metadata.create_all(bind=engine)
 _ensure_columns()

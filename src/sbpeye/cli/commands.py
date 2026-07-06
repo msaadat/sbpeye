@@ -738,8 +738,16 @@ def run_all(dept, year, limit, skip_llm, no_attachment_vectorize, verbose, delay
 @click.option("--query", "-q", multiple=True, help="Search query (repeatable; runs built-in test queries if omitted)")
 @click.option("--limit", "-l", type=int, default=3, help="Max results per query")
 def search_cmd(query, limit):
-    """Test the hybrid search engine (BM25 + vector)."""
-    from sbpeye.search import search_engine
+    """Test the hybrid search engine (FTS5 + vector)."""
+    from sbpeye.search import backfill_fts, search_engine
+
+    # The lexical arm reads the persistent FTS index; build it once if this is a
+    # fresh process/DB that hasn't been backfilled yet (no-op when populated).
+    db = SessionLocal()
+    try:
+        backfill_fts(db)
+    finally:
+        db.close()
 
     queries = list(query) if query else [
         "BPRD Circular No. 05 of 2024",
@@ -879,6 +887,11 @@ def reindex_cmd(dry_run):
 
         flush_batch()
         db.commit()
+
+        # Rebuild the persistent FTS5 lexical index alongside the vector store.
+        from sbpeye.search import backfill_fts
+        backfill_fts(db, force=True)
+        print("Rebuilt FTS5 lexical index")
 
         print(f"\nRe-indexing complete:")
         print(f"  Circulars indexed: {indexed}")

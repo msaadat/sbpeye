@@ -1,9 +1,8 @@
 import re
 import logging
-import threading
 from collections.abc import Iterable
 from datetime import datetime
-from rank_bm25 import BM25Okapi
+from sqlalchemy import text
 from sqlalchemy.orm import Session, joinedload
 
 from .models import Circular
@@ -443,6 +442,114 @@ def prepare_chunks(
 
 
 # ---------------------------------------------------------------------------
+# FTS5 lexical index (persistent, incremental — replaces in-memory rank-bm25)
+# ---------------------------------------------------------------------------
+
+# bm25() column weights, applied at query time. Reference outranks title
+# outranks body, mirroring the old title×3 / reference×5 token duplication.
+FTS_WEIGHTS: tuple[float, float, float] = (3.0, 5.0, 1.0)  # title, reference, body
+
+_FTS_CREATE_SQL = (
+    "CREATE VIRTUAL TABLE IF NOT EXISTS circulars_fts USING fts5("
+    "circular_id UNINDEXED, title, reference, body, tokenize='unicode61')"
+)
+
+
+def _fts_reference_tokens(reference: str | None) -> list[str]:
+    """Reference tokens plus padded/unpadded digit forms so a query for "8"
+    matches a stored "08" and vice-versa (preserves the old BM25 behavior)."""
+    ref_tokens = tokenize(reference or "")
+    extra: list[str] = []
+    for tok in ref_tokens:
+        if tok.isdigit():
+            extra.append(tok.lstrip("0") or "0")
+            extra.append(tok.zfill(2))
+    return ref_tokens + extra
+
+
+def _fts_row(circular: Circular) -> tuple[str, str, str]:
+    """Build the (title, reference, body) token strings stored in one FTS row.
+
+    Cells hold the space-joined output of ``tokenize()`` — the semantic
+    tokenization (SBP stopwords, dotted-acronym handling, 1-char filtering)
+    happens here in Python; FTS5's unicode61 tokenizer then just splits on
+    whitespace. Body aggregates the circular's own text and every attachment's,
+    exactly like the old per-circular BM25 document.
+    """
+    title = " ".join(tokenize(circular.title or ""))
+    reference = " ".join(_fts_reference_tokens(circular.reference))
+    body_tokens = tokenize(circular.content_text or "")
+    for attachment in circular.attachments:
+        body_tokens = body_tokens + tokenize(attachment.content_text or "")
+    return title, reference, " ".join(body_tokens)
+
+
+def _fts_ensure_table(conn) -> None:
+    conn.execute(text(_FTS_CREATE_SQL))
+
+
+def index_circular_fts(db: Session, circular: Circular) -> None:
+    """Upsert one circular's FTS row (delete-then-insert). Idempotent.
+
+    Call wherever a circular's or its attachments' text changes — co-located
+    with the Chroma writes. Commits so the change is durable and visible to
+    other processes (e.g. the web server reading a CLI sync's writes).
+    """
+    conn = db.connection()
+    _fts_ensure_table(conn)
+    title, reference, body = _fts_row(circular)
+    conn.execute(
+        text("DELETE FROM circulars_fts WHERE circular_id = :cid"),
+        {"cid": circular.id},
+    )
+    conn.execute(
+        text(
+            "INSERT INTO circulars_fts (circular_id, title, reference, body) "
+            "VALUES (:cid, :title, :reference, :body)"
+        ),
+        {"cid": circular.id, "title": title, "reference": reference, "body": body},
+    )
+    db.commit()
+
+
+def delete_circular_fts(db: Session, circular_id: str) -> None:
+    """Remove a circular's FTS row (for deletions)."""
+    conn = db.connection()
+    _fts_ensure_table(conn)
+    conn.execute(
+        text("DELETE FROM circulars_fts WHERE circular_id = :cid"),
+        {"cid": circular_id},
+    )
+    db.commit()
+
+
+def backfill_fts(db: Session, force: bool = False) -> None:
+    """Build the FTS index from all circulars if it is empty (or ``force``).
+
+    Replaces the old per-startup full BM25 rebuild: once populated this is a
+    cheap no-op, and thereafter the index is maintained incrementally. Pass
+    ``force=True`` to fully rebuild (e.g. the ``reindex`` CLI command).
+    """
+    conn = db.connection()
+    _fts_ensure_table(conn)
+    if force:
+        conn.execute(text("DELETE FROM circulars_fts"))
+    elif conn.execute(text("SELECT count(*) FROM circulars_fts")).scalar():
+        return
+    circulars = db.query(Circular).options(joinedload(Circular.attachments)).all()
+    for circular in circulars:
+        title, reference, body = _fts_row(circular)
+        conn.execute(
+            text(
+                "INSERT INTO circulars_fts (circular_id, title, reference, body) "
+                "VALUES (:cid, :title, :reference, :body)"
+            ),
+            {"cid": circular.id, "title": title, "reference": reference, "body": body},
+        )
+    db.commit()
+
+
+# ---------------------------------------------------------------------------
 # Search Engine
 # ---------------------------------------------------------------------------
 
@@ -456,79 +563,44 @@ class SearchEngine:
     REFERENCE_BONUS = 0.5          # bonus for exact reference matches
     SNIPPET_WINDOW = 25            # words in snippet window
 
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._dirty = True
-        self._ids: list[str] = []
-        self._id_to_idx: dict[str, int] = {}
-        self._bm25: BM25Okapi | None = None
-        self._corpus_tokens: list[list[str]] = []
-        self._titles: list[str] = []
-        self._departments: list[str] = []
-        self._dates: list[datetime | None] = []
+    def _fts_ranks(self, db: Session, expanded_tokens: list[str]) -> dict[str, int]:
+        """Rank circulars via the persistent FTS5 index for the expanded query.
 
-    def mark_dirty(self):
-        with self._lock:
-            self._dirty = True
+        Returns ``{circular_id: rank}`` (rank 1 = best), the same shape the old
+        in-memory BM25 arm produced, so RRF fusion downstream is unchanged.
+        """
+        ranks: dict[str, int] = {}
+        terms = [t for t in expanded_tokens if t]
+        if not terms:
+            return ranks
 
-    def warm_up(self, db: Session) -> None:
-        """Build the BM25 index eagerly; safe to call from a background thread."""
-        self._ensure_index(db)
+        # Ensure the virtual table exists so a never-backfilled DB yields an empty
+        # lexical arm rather than crashing the query (and poisoning the session).
+        _fts_ensure_table(db.connection())
 
-    def _ensure_index(self, db: Session):
-        with self._lock:
-            if not self._dirty and self._bm25 is not None:
-                return
+        # Quote every term so FTS5 treats it as a literal (never as a bare
+        # operator), doubling any embedded quote; OR them across all columns.
+        match_query = " OR ".join('"%s"' % t.replace('"', '""') for t in terms)
+        order_by = "bm25(circulars_fts, %g, %g, %g)" % FTS_WEIGHTS
+        try:
+            rows = db.execute(
+                text(
+                    "SELECT circular_id FROM circulars_fts "
+                    "WHERE circulars_fts MATCH :mq "
+                    f"ORDER BY {order_by} "
+                    "LIMIT :lim"
+                ),
+                {"mq": match_query, "lim": self.CANDIDATE_COUNT},
+            ).fetchall()
+        except Exception:
+            logger.exception(
+                "FTS5 lexical search failed — falling back to vector/reference only"
+            )
+            return ranks
 
-            circulars = db.query(Circular).options(
-                joinedload(Circular.attachments)
-            ).all()
-            self._ids = []
-            self._id_to_idx = {}
-            self._corpus_tokens = []
-            self._titles = []
-            self._departments = []
-            self._dates = []
-
-            for i, c in enumerate(circulars):
-                title_tokens = tokenize(c.title or "")
-                body_tokens = tokenize(c.content_text or "")
-                attachment_tokens = [
-                    token
-                    for attachment in c.attachments
-                    for token in tokenize(attachment.content_text or "")
-                ]
-                ref_tokens = tokenize(c.reference or "")
-
-                # Preserve both padded and unpadded number forms from the reference
-                # so BM25 matches "08" and "8" interchangeably
-                extra_ref_tokens: list[str] = []
-                for tok in ref_tokens:
-                    if tok.isdigit():
-                        extra_ref_tokens.append(tok.lstrip("0") or "0")
-                        extra_ref_tokens.append(tok.zfill(2))
-
-                # Boost title 3×, reference 5× (was 2×) so reference queries rank first
-                boosted = (
-                    title_tokens * 3
-                    + (ref_tokens + extra_ref_tokens) * 5
-                    + body_tokens
-                    + attachment_tokens
-                )
-
-                self._ids.append(c.id)
-                self._id_to_idx[c.id] = i
-                self._corpus_tokens.append(boosted)
-                self._titles.append(c.title or "")
-                self._departments.append(c.department or "")
-                self._dates.append(c.date)
-
-            if self._corpus_tokens:
-                self._bm25 = BM25Okapi(self._corpus_tokens)
-            else:
-                self._bm25 = None
-
-            self._dirty = False
+        for rank, row in enumerate(rows):
+            ranks[row[0]] = rank + 1
+        return ranks
 
     # ------------------------------------------------------------------
     # Reference-pattern search
@@ -731,8 +803,6 @@ class SearchEngine:
         tag: str | None = None,
     ) -> tuple[list[dict], int]:
         """Hybrid search returning ``([{dict}, …], total_count)``."""
-        self._ensure_index(db)
-        
         from sqlalchemy import extract, or_
 
         def apply_filters(q_obj):
@@ -771,20 +841,9 @@ class SearchEngine:
         ref_results = self._search_by_reference(query, db, limit * 2)
         ref_ids: set[str] = {c.id for c in ref_results}
 
-        # 2. BM25 with synonym-expanded query
+        # 2. FTS5 lexical arm with synonym-expanded query
         expanded_tokens = expand_query_tokens(query_tokens)
-
-        bm25_ranks: dict[str, int] = {}
-        if self._bm25 is not None:
-            bm25_scores = self._bm25.get_scores(expanded_tokens)
-            bm25_ranked = sorted(
-                range(len(bm25_scores)),
-                key=lambda i: bm25_scores[i],
-                reverse=True,
-            )[: self.CANDIDATE_COUNT]
-
-            for rank, idx in enumerate(bm25_ranked):
-                bm25_ranks[self._ids[idx]] = rank + 1
+        bm25_ranks = self._fts_ranks(db, expanded_tokens)
 
         # 3. Vector search (use original query — embeddings handle semantics)
         vector_ranks: dict[str, int] = {}
@@ -835,6 +894,16 @@ class SearchEngine:
             valid_ids = {r[0] for r in q_obj.all()}
             all_candidate_ids &= valid_ids
 
+        # Fetch candidate circulars once — used for bonuses, sorting, and snippets.
+        # (The lexical arm no longer keeps title/department/date in memory.)
+        circulars = (
+            db.query(Circular)
+            .options(joinedload(Circular.attachments))
+            .filter(Circular.id.in_(all_candidate_ids))
+            .all()
+        )
+        id_to_circular = {c.id: c for c in circulars}
+
         rrf_scores: dict[str, float] = {}
         query_words = set(query_tokens)
         now = datetime.now()
@@ -842,7 +911,7 @@ class SearchEngine:
         for cid in all_candidate_ids:
             score = 0.0
 
-            # RRF from BM25
+            # RRF from the FTS5 lexical arm
             if cid in bm25_ranks:
                 score += 1.0 / (self.RRF_K + bm25_ranks[cid])
 
@@ -854,30 +923,21 @@ class SearchEngine:
             if cid in ref_ids:
                 score += self.REFERENCE_BONUS
 
-            # Title / department word-overlap bonuses
-            idx = self._id_to_idx.get(cid)
-            if idx is not None:
-                title_words = set(tokenize(self._titles[idx]))
-                dept_words = set(tokenize(self._departments[idx]))
+            # Title / department word-overlap + recency bonuses
+            c = id_to_circular.get(cid)
+            if c is not None:
+                title_words = set(tokenize(c.title or ""))
+                dept_words = set(tokenize(c.department or ""))
                 score += len(query_words & title_words) * self.TITLE_MATCH_BONUS
                 score += len(query_words & dept_words) * self.DEPT_MATCH_BONUS
 
-                # Recency boost — recent docs score slightly higher
-                doc_date = self._dates[idx]
-                if doc_date:
-                    age_years = max((now - doc_date).days / 365.25, 0)
+                if c.date:
+                    age_years = max((now - c.date).days / 365.25, 0)
                     score += self.RECENCY_WEIGHT / (1 + age_years)
 
             rrf_scores[cid] = score
 
-        # 5. Sort and retrieve
-        circulars = (
-            db.query(Circular)
-            .options(joinedload(Circular.attachments))
-            .filter(Circular.id.in_(all_candidate_ids))
-            .all()
-        )
-        id_to_circular = {c.id: c for c in circulars}
+        # 5. Sort
 
         if sort_by == "date":
             # Sort valid candidates by date

@@ -16,7 +16,7 @@ import threading
 
 from .database import PROJECT_ROOT, engine, Base, get_db, SessionLocal, has_vector_store_data
 from .models import AIGenerationJob, Attachment, CachedDocument, SyncStatus, Circular, CircularEntity, CircularRelationship, EcoDataSeries, EcoDataEntry, Settings, ChatSession, ChatMessage, ResearchWorkspace, WorkspaceCircular
-from .search import resolve_metric_terms, search_engine
+from .search import backfill_fts, index_circular_fts, resolve_metric_terms, search_engine
 from .ai import AIClient, AIConfig, classify_provider_state, friendly_chat_error, get_ai_client, get_provider_api_key, get_provider_definition, normalize_provider
 from .circular_ai import GENERATION_ACTIONS, generation_job_payload, run_generation_job
 from .checklist_export import build_checklist_workbook
@@ -90,7 +90,9 @@ def _lazy_index_circular(circular_id: str) -> None:
             reference=circular.reference or "",
             include_attachments=True,
         )
-        search_engine.mark_dirty()
+        # process_circular already upserts the FTS row; keep this explicit call
+        # in case the circular row existed but its content changed here.
+        index_circular_fts(db, circular)
     finally:
         db.close()
 
@@ -116,7 +118,8 @@ def fail_interrupted_ai_jobs() -> None:
 def _warm_up_search_index() -> None:
     db = SessionLocal()
     try:
-        search_engine.warm_up(db)
+        # Build the persistent FTS5 index once if empty; a no-op thereafter.
+        backfill_fts(db)
     finally:
         db.close()
 

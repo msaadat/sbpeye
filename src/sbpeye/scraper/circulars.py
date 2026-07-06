@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from ..models import Attachment, Circular, CircularRelationship
 from ..database import PROJECT_ROOT, collection, embedding_backend
 from ..checklist import PAGE_MARKER_RE, prepare_reference_chunks
+from ..search import index_circular_fts
 from .clean_html import extract_sbp_text
 from ..link_routing import normalize_reference, normalize_sbp_url
 import uuid
@@ -793,6 +794,7 @@ def process_circular(
         db.commit()
 
     _index_circular(circular, verbose=verbose)
+    index_circular_fts(db, circular)
     return circular
 
 
@@ -943,6 +945,8 @@ def vectorize_attachment(
         )
         attachment.is_vectorized = 1
         db.commit()
+        # Attachment text feeds the circular's aggregated FTS body — refresh it.
+        index_circular_fts(db, attachment.circular)
         if verbose:
             print(
                 f"  [CHROMA] Indexed attachment: {attachment.filename} "
@@ -1035,6 +1039,7 @@ def reextract_circular_from_cache(
                 and attachment.content_text
             ):
                 indexed += int(vectorize_attachment(db, attachment, verbose=verbose))
+        index_circular_fts(db, circular)
 
     return {"changed": changed, "errors": errors, "indexed": indexed}
 

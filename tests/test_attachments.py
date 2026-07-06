@@ -443,6 +443,9 @@ def test_search_uses_attachment_for_bm25_and_snippet(monkeypatch):
     db.add(circular)
     db.commit()
 
+    from sbpeye.search import backfill_fts
+    backfill_fts(db)  # build the persistent lexical index (as startup/write paths do)
+
     class EmptyCollection:
         def query(self, **kwargs):
             return {"ids": [[]], "metadatas": [[]]}

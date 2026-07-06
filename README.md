@@ -6,8 +6,8 @@ It scrapes SBP pages, stores circulars and economic datasets, and provides a mod
 ## Key Features
 
 - Scrapes SBP circulars and EcoData content
-- Stores data in SQLite with persistent ChromaDB vector embeddings
-- Hybrid search combining BM25 keyword ranking with vector similarity
+- Stores data in SQLite (with a persistent SQLite FTS5 keyword index) plus ChromaDB vector embeddings
+- Hybrid search combining SQLite FTS5 keyword ranking with vector similarity
 - AI-driven summary, tagging, compliance checklists, and relationship extraction
 - Vue 3 + PrimeVue SPA front-end for fast interactive browsing and search
 - Localizable AI backend supporting LM Studio, OpenAI, and Google Gemini

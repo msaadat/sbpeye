@@ -573,15 +573,35 @@ def _listing_total_pages(soup: BeautifulSoup) -> int:
     return 1
 
 
+def _latest_circular_date(db: Session) -> datetime | None:
+    """Newest circular date already stored locally, if any."""
+    return db.query(Circular.date).filter(Circular.date.is_not(None)).order_by(
+        Circular.date.desc()
+    ).limit(1).scalar()
+
+
+def _oldest_listing_date(items: list[dict]) -> datetime | None:
+    """Oldest parsed listing date on one listing page."""
+    dates = [
+        parsed
+        for item in items
+        if (parsed := _parse_listing_date(item.get("date", ""), item.get("year", "")))
+    ]
+    return min(dates) if dates else None
+
+
 def discover_circulars(
     limit: int = 0,
     max_pages: int = 0,
     verbose: bool = False,
+    stop_at_date: datetime | None = None,
+    full_listing: bool = False,
 ) -> list[dict]:
     """Crawl the unified circulars listing and return circular descriptors.
 
     Pages are fetched in order (P0, P30, ...) until the listing is exhausted, ``limit``
-    circulars have been collected, or ``max_pages`` pages have been read.
+    circulars have been collected, ``max_pages`` pages have been read, or the oldest
+    circular on a page reaches ``stop_at_date``.
     """
     first = fetch_page(CIRCULARS_LISTING_URL_FIRST)
     total_pages = _listing_total_pages(first)
@@ -589,6 +609,8 @@ def discover_circulars(
         total_pages = min(total_pages, max_pages)
     if verbose:
         print(f"Listing has {total_pages} page(s) to crawl")
+        if stop_at_date and not full_listing:
+            print(f"Stopping listing after reaching local latest date: {stop_at_date.date()}")
 
     results: list[dict] = []
     seen_urls: set[str] = set()
@@ -606,6 +628,19 @@ def discover_circulars(
             results.append(item)
             if limit > 0 and len(results) >= limit:
                 return results
+        oldest_date = _oldest_listing_date(page_items)
+        if (
+            stop_at_date is not None
+            and not full_listing
+            and oldest_date is not None
+            and oldest_date.date() <= stop_at_date.date()
+        ):
+            if verbose:
+                print(
+                    f"  [STOP] Page oldest date {oldest_date.date()} reached "
+                    f"local latest date {stop_at_date.date()}"
+                )
+            break
     return results
 
 
@@ -625,6 +660,7 @@ def scrape_circulars(
     force_download: bool = False,
     include_attachments: bool = True,
     workers: int = 4,
+    full_listing: bool = False,
 ):
     """
     Main entry point: discovers and processes circulars one by one.
@@ -643,6 +679,8 @@ def scrape_circulars(
     discovered = discover_circulars(
         limit=0 if filtering else limit,
         verbose=verbose,
+        stop_at_date=None if full_listing else _latest_circular_date(db),
+        full_listing=full_listing,
     )
 
     if departments:

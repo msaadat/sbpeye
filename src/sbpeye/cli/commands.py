@@ -35,9 +35,10 @@ def circulars():
 @click.option("--force-fetch", is_flag=True, help="Re-fetch circular HTML and update existing rows")
 @click.option("--force-download", is_flag=True, help="Re-download attachment files")
 @click.option("--no-attachments", is_flag=True, help="Skip attachment discovery and download")
+@click.option("--full-listing", is_flag=True, help="Crawl every listing page instead of stopping at the latest local circular date")
 @click.option("--workers", type=click.IntRange(1), default=1, show_default=True, help="Concurrent circular downloads")
 @click.option("--verbose", "-v", is_flag=True, help="Print extra details")
-def sync(dept, year, limit, skip_llm, force_fetch, force_download, no_attachments, workers, verbose):
+def sync(dept, year, limit, skip_llm, force_fetch, force_download, no_attachments, full_listing, workers, verbose):
     """Scrape circulars from SBP website."""
     from sbpeye.scraper.circulars import scrape_circulars
 
@@ -54,6 +55,7 @@ def sync(dept, year, limit, skip_llm, force_fetch, force_download, no_attachment
             force_download=force_download,
             include_attachments=not no_attachments,
             workers=workers,
+            full_listing=full_listing,
         )
     finally:
         db.close()
@@ -666,10 +668,11 @@ def status(verbose):
 @click.option("--limit", "-l", type=int, default=0, help="Max circulars per task (0=unlimited)")
 @click.option("--skip-llm", is_flag=True, help="Skip LLM tasks (only sync circulars)")
 @click.option("--no-attachment-vectorize", is_flag=True, help="Leave attachment text unindexed")
+@click.option("--full-listing", is_flag=True, help="Crawl every listing page instead of stopping at the latest local circular date")
 @click.option("--verbose", "-v", is_flag=True, help="Print extra details")
 @click.option("--delay", type=float, default=1.0, help="Delay between API calls in seconds")
 @click.option("--workers", type=click.IntRange(1), default=4, show_default=True, help="Concurrent circular downloads")
-def run_all(dept, year, limit, skip_llm, no_attachment_vectorize, verbose, delay, workers):
+def run_all(dept, year, limit, skip_llm, no_attachment_vectorize, full_listing, verbose, delay, workers):
     """Run the complete circular and attachment processing pipeline."""
     from sbpeye.scraper.circulars import scrape_circulars
 
@@ -688,6 +691,7 @@ def run_all(dept, year, limit, skip_llm, no_attachment_vectorize, verbose, delay
             skip_llm=True,
             verbose=verbose,
             workers=workers,
+            full_listing=full_listing,
         )
     finally:
         db.close()
@@ -1447,7 +1451,14 @@ def migrate_rebuild(snapshot_file, limit, workers, yes, verbose):
         wipe_circular_data(db)
         print("[2/4] Wiped old circular data and vectors")
 
-        scrape_circulars(db, limit=limit, skip_llm=True, verbose=verbose, workers=workers)
+        scrape_circulars(
+            db,
+            limit=limit,
+            skip_llm=True,
+            verbose=verbose,
+            workers=workers,
+            full_listing=True,
+        )
         print("[3/4] Re-scraped circulars from the new site")
 
         stats = apply_llm_snapshot(db, snapshot)

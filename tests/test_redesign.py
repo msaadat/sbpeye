@@ -10,13 +10,14 @@ from bs4 import BeautifulSoup
 
 from sbpeye.link_routing import normalize_reference, harvest_reference_links
 from sbpeye.scraper.clean_html import extract_sbp_text
-from sbpeye.scraper.circulars import parse_circular_listing, circular_identity
+from sbpeye.scraper import circulars as circulars_module
+from sbpeye.scraper.circulars import parse_circular_listing, circular_identity, discover_circulars
 from sbpeye.scraper.ecodata_index import parse_ecodata_index
 from sbpeye.scraper.news import parse_news_cards
 from sbpeye.migration import snapshot_llm_data, apply_llm_snapshot
 from sbpeye.models import Circular, CircularEntity, CircularRelationship
 
-from tests.conftest import make_circular
+from conftest import make_circular
 
 
 # --- reference normalization + identity -------------------------------------------------
@@ -62,6 +63,109 @@ def test_parse_circular_listing_extracts_all_fields():
     assert item["doc_type"] == "Circulars"
     assert item["year"] == "2025"
     assert item["url"] == "https://www.sbp.org.pk/circulars/bprd-circular-no-4-of-2025"
+
+
+def _listing_page(*items: tuple[str, str, str], total_pages: int = 1) -> BeautifulSoup:
+    boxes = []
+    for slug, reference, date_text in items:
+        boxes.append(f"""
+        <div class="publication-box-new">
+          <h4 class="mb-2"><a href="/circulars/{slug}">{slug}</a></h4>
+          <p class="mb-3 date">{reference}</p>
+          <p class="date">{date_text} | <span class="dept">BPRD</span> | <span class="cat">Banking</span> | <span class="type">Circulars</span></p>
+        </div>
+        """)
+    html = f"""
+    <div class="pagination-custom" data-total-pages="{total_pages}"></div>
+    {''.join(boxes)}
+    """
+    return BeautifulSoup(html, "html.parser")
+
+
+def test_discover_circulars_stops_after_page_reaches_latest_db_date(monkeypatch):
+    fetched_urls = []
+    pages = {
+        "https://www.sbp.org.pk/circulars/": _listing_page(
+            ("new-1", "BPRD Circular No. 10 of 2026", "July 02 2026"),
+            total_pages=3,
+        ),
+        "https://www.sbp.org.pk/circulars/P30": _listing_page(
+            ("same-day", "BPRD Circular No. 09 of 2026", "June 30 2026"),
+            total_pages=3,
+        ),
+        "https://www.sbp.org.pk/circulars/P60": _listing_page(
+            ("old", "BPRD Circular No. 08 of 2026", "June 29 2026"),
+            total_pages=3,
+        ),
+    }
+
+    def fake_fetch_page(url):
+        fetched_urls.append(url)
+        return pages[url]
+
+    monkeypatch.setattr(circulars_module, "fetch_page", fake_fetch_page)
+
+    items = discover_circulars(stop_at_date=datetime(2026, 6, 30))
+
+    assert [item["url"] for item in items] == [
+        "https://www.sbp.org.pk/circulars/new-1",
+        "https://www.sbp.org.pk/circulars/same-day",
+    ]
+    assert fetched_urls == [
+        "https://www.sbp.org.pk/circulars/",
+        "https://www.sbp.org.pk/circulars/P30",
+    ]
+
+
+def test_discover_circulars_full_listing_ignores_latest_db_date(monkeypatch):
+    pages = {
+        "https://www.sbp.org.pk/circulars/": _listing_page(
+            ("new-1", "BPRD Circular No. 10 of 2026", "July 02 2026"),
+            total_pages=3,
+        ),
+        "https://www.sbp.org.pk/circulars/P30": _listing_page(
+            ("same-day", "BPRD Circular No. 09 of 2026", "June 30 2026"),
+            total_pages=3,
+        ),
+        "https://www.sbp.org.pk/circulars/P60": _listing_page(
+            ("old", "BPRD Circular No. 08 of 2026", "June 29 2026"),
+            total_pages=3,
+        ),
+    }
+
+    monkeypatch.setattr(circulars_module, "fetch_page", lambda url: pages[url])
+
+    items = discover_circulars(
+        stop_at_date=datetime(2026, 6, 30),
+        full_listing=True,
+    )
+
+    assert [item["url"] for item in items] == [
+        "https://www.sbp.org.pk/circulars/new-1",
+        "https://www.sbp.org.pk/circulars/same-day",
+        "https://www.sbp.org.pk/circulars/old",
+    ]
+
+
+def test_scrape_circulars_passes_latest_db_date_cutoff(db_factory, monkeypatch):
+    db = db_factory()
+    db.add(make_circular("latest", date=datetime(2026, 6, 30)))
+    db.commit()
+    calls = []
+
+    def fake_discover_circulars(**kwargs):
+        calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr(circulars_module, "discover_circulars", fake_discover_circulars)
+
+    circulars_module.scrape_circulars(db)
+    circulars_module.scrape_circulars(db, full_listing=True)
+
+    assert calls[0]["stop_at_date"].date() == datetime(2026, 6, 30).date()
+    assert calls[0]["full_listing"] is False
+    assert calls[1]["stop_at_date"] is None
+    assert calls[1]["full_listing"] is True
 
 
 # --- ecodata parser ---------------------------------------------------------------------

@@ -407,7 +407,7 @@ def process_attachment(
     verbose: bool = False,
 ) -> Attachment:
     """Download, extract, and persist one attachment idempotently."""
-    att_id = attachment_id(circular.id, att_info["url"])
+    att_id = att_info.get("id") or attachment_id(circular.id, att_info["url"])
     attachment = db.query(Attachment).filter(Attachment.id == att_id).first()
     if attachment is None:
         attachment = Attachment(

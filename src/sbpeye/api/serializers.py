@@ -114,14 +114,19 @@ def _circular_summary(
 def _document_payload(attachment: Attachment | CachedDocument) -> dict:
     from ..database import PROJECT_ROOT
 
-    local_path = PROJECT_ROOT / attachment.local_path if attachment.local_path else None
+    local_path = None
+    if attachment.local_path:
+        candidate_path = (PROJECT_ROOT / attachment.local_path).resolve()
+        attachments_root = (PROJECT_ROOT / "attachments").resolve()
+        if attachments_root in candidate_path.parents and candidate_path.is_file():
+            local_path = candidate_path
     return {
         "id": attachment.id,
         "circular_id": getattr(attachment, "circular_id", None),
         "filename": attachment.filename,
         "file_type": attachment.file_type,
         "original_url": attachment.original_url,
-        "cached": bool(local_path and local_path.is_file()),
+        "cached": bool(local_path),
         "content_url": f"/api/documents/{attachment.id}/content",
         "extraction_status": getattr(attachment, "extraction_status", None),
         "error": getattr(attachment, "extraction_error", None) or getattr(attachment, "error", None),

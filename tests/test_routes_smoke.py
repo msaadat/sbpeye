@@ -6,7 +6,9 @@ split and the Phase 1c chat-session dedup can be proven behavior-preserving.
 
 import json
 
-from sbpeye.models import ChatMessage, ChatSession, CircularRelationship
+import sbpeye.database as database_module
+import sbpeye.main as main_module
+from sbpeye.models import Attachment, CachedDocument, ChatMessage, ChatSession, CircularRelationship
 
 from conftest import make_circular
 
@@ -72,6 +74,222 @@ def test_circular_relationships_shape(client):
     assert rel["target"]["id"] == "tgt"
     assert rel["confidence"] == 0.9
     assert body["incoming"] == []
+
+
+def test_document_content_redownloads_missing_attachment_file(client, monkeypatch, tmp_path):
+    test_client, db_factory = client
+    monkeypatch.setattr(main_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(database_module, "PROJECT_ROOT", tmp_path)
+    repaired_path = tmp_path / "attachments" / "c1" / "att-1.pdf"
+
+    db = db_factory()
+    try:
+        circular = make_circular(circular_id="c1")
+        db.add(circular)
+        db.add(
+            Attachment(
+                id="att-1",
+                circular_id="c1",
+                filename="rules.pdf",
+                original_url="https://www.sbp.org.pk/files/rules.pdf",
+                local_path="attachments/c1/missing.pdf",
+                file_type="pdf",
+                extraction_status="extracted",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    def fake_process_attachment(db, circular, info, force_download=False, verbose=False):
+        assert circular.id == "c1"
+        assert info["id"] == "att-1"
+        assert force_download is True
+        repaired_path.parent.mkdir(parents=True, exist_ok=True)
+        repaired_path.write_bytes(b"%PDF repaired")
+        attachment = db.query(Attachment).filter(Attachment.id == "att-1").one()
+        attachment.local_path = str(repaired_path.relative_to(tmp_path))
+        attachment.extraction_status = "extracted"
+        attachment.extraction_error = None
+        db.commit()
+        return attachment
+
+    monkeypatch.setattr(main_module, "process_attachment", fake_process_attachment)
+
+    resp = test_client.get("/api/documents/att-1/content")
+
+    assert resp.status_code == 200
+    assert resp.content == b"%PDF repaired"
+    db = db_factory()
+    try:
+        attachment = db.query(Attachment).filter(Attachment.id == "att-1").one()
+        assert attachment.local_path == "attachments/c1/att-1.pdf"
+    finally:
+        db.close()
+
+
+def test_document_content_redownloads_missing_standalone_file(client, monkeypatch, tmp_path):
+    test_client, db_factory = client
+    monkeypatch.setattr(main_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(database_module, "PROJECT_ROOT", tmp_path)
+    repaired_path = tmp_path / "attachments" / "standalone" / "doc-1.pdf"
+
+    db = db_factory()
+    try:
+        db.add(
+            CachedDocument(
+                id="doc-1",
+                filename="rules.pdf",
+                original_url="https://www.sbp.org.pk/files/rules.pdf",
+                local_path="attachments/standalone/missing.pdf",
+                file_type="pdf",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    def fake_download_attachment(circular_id, info, force=False):
+        assert circular_id == "standalone"
+        assert force is True
+        repaired_path.parent.mkdir(parents=True, exist_ok=True)
+        repaired_path.write_bytes(b"%PDF standalone")
+        return repaired_path, True, None, info["url"]
+
+    monkeypatch.setattr(main_module, "download_attachment", fake_download_attachment)
+
+    resp = test_client.get("/api/documents/doc-1/content")
+
+    assert resp.status_code == 200
+    assert resp.content == b"%PDF standalone"
+    db = db_factory()
+    try:
+        document = db.query(CachedDocument).filter(CachedDocument.id == "doc-1").one()
+        assert document.local_path == "attachments/standalone/doc-1.pdf"
+        assert document.error is None
+    finally:
+        db.close()
+
+
+def test_document_content_reports_failed_redownload(client, monkeypatch, tmp_path):
+    test_client, db_factory = client
+    monkeypatch.setattr(main_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(database_module, "PROJECT_ROOT", tmp_path)
+
+    db = db_factory()
+    try:
+        circular = make_circular(circular_id="c1")
+        db.add(circular)
+        db.add(
+            Attachment(
+                id="att-1",
+                circular_id="c1",
+                filename="rules.pdf",
+                original_url="https://www.sbp.org.pk/files/rules.pdf",
+                local_path="attachments/c1/missing.pdf",
+                file_type="pdf",
+                extraction_status="extracted",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    def fake_process_attachment(db, circular, info, force_download=False, verbose=False):
+        attachment = db.query(Attachment).filter(Attachment.id == "att-1").one()
+        attachment.extraction_status = "error"
+        attachment.extraction_error = "download failed"
+        db.commit()
+        return attachment
+
+    monkeypatch.setattr(main_module, "process_attachment", fake_process_attachment)
+
+    resp = test_client.get("/api/documents/att-1/content")
+
+    assert resp.status_code == 502
+    assert resp.json() == {"error": "download failed"}
+
+
+def test_ensure_document_cached_redownloads_missing_attachment(db_factory, monkeypatch, tmp_path):
+    monkeypatch.setattr(main_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(database_module, "PROJECT_ROOT", tmp_path)
+    repaired_path = tmp_path / "attachments" / "c1" / "att-1.pdf"
+
+    db = db_factory()
+    try:
+        circular = make_circular(circular_id="c1")
+        db.add(circular)
+        db.add(
+            Attachment(
+                id="att-1",
+                circular_id="c1",
+                filename="rules.pdf",
+                original_url="https://www.sbp.org.pk/files/rules.pdf",
+                local_path="attachments/c1/missing.pdf",
+                file_type="pdf",
+                extraction_status="extracted",
+            )
+        )
+        db.commit()
+        attachment = db.query(Attachment).filter(Attachment.id == "att-1").one()
+
+        def fake_process_attachment(db, circular, info, force_download=False, verbose=False):
+            assert info["id"] == "att-1"
+            assert force_download is True
+            repaired_path.parent.mkdir(parents=True, exist_ok=True)
+            repaired_path.write_bytes(b"%PDF repaired")
+            attachment = db.query(Attachment).filter(Attachment.id == "att-1").one()
+            attachment.local_path = str(repaired_path.relative_to(tmp_path))
+            attachment.extraction_status = "extracted"
+            attachment.extraction_error = None
+            db.commit()
+            return attachment
+
+        monkeypatch.setattr(main_module, "process_attachment", fake_process_attachment)
+
+        repaired, path = main_module._ensure_document_cached(db, attachment)
+
+        assert repaired.id == "att-1"
+        assert path == repaired_path
+        assert repaired.local_path == "attachments/c1/att-1.pdf"
+    finally:
+        db.close()
+
+
+def test_ensure_document_cached_redownloads_missing_standalone(db_factory, monkeypatch, tmp_path):
+    monkeypatch.setattr(main_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(database_module, "PROJECT_ROOT", tmp_path)
+    repaired_path = tmp_path / "attachments" / "standalone" / "doc-1.pdf"
+
+    db = db_factory()
+    try:
+        document = CachedDocument(
+            id="doc-1",
+            filename="rules.pdf",
+            original_url="https://www.sbp.org.pk/files/rules.pdf",
+            local_path="attachments/standalone/missing.pdf",
+            file_type="pdf",
+        )
+        db.add(document)
+        db.commit()
+
+        def fake_download_attachment(circular_id, info, force=False):
+            assert circular_id == "standalone"
+            assert force is True
+            repaired_path.parent.mkdir(parents=True, exist_ok=True)
+            repaired_path.write_bytes(b"%PDF repaired")
+            return repaired_path, True, None, info["url"]
+
+        monkeypatch.setattr(main_module, "download_attachment", fake_download_attachment)
+
+        repaired, path = main_module._ensure_document_cached(db, document)
+
+        assert repaired.id == "doc-1"
+        assert path == repaired_path
+        assert repaired.local_path == "attachments/standalone/doc-1.pdf"
+        assert repaired.error is None
+    finally:
+        db.close()
 
 
 def test_workspace_crud_flow(client):

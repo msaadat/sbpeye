@@ -400,6 +400,56 @@ def test_process_attachment_stores_resolved_fallback_url(monkeypatch, tmp_path):
     assert result.original_url == fallback_url
 
 
+def test_process_attachment_can_repair_existing_attachment_by_id(monkeypatch, tmp_path):
+    db = make_session()
+    circular = make_circular()
+    db.add(circular)
+    primary_url = "https://www.sbp.org.pk/files/rules.pdf"
+    fallback_url = "https://archive.sbp.org.pk/files/rules.pdf"
+    att_id = scraper.attachment_id(circular.id, primary_url)
+    db.add(
+        Attachment(
+            id=att_id,
+            circular_id=circular.id,
+            filename="rules.pdf",
+            original_url=fallback_url,
+            local_path="attachments/circular-1/missing.pdf",
+            file_type="pdf",
+            extraction_status="extracted",
+        )
+    )
+    db.commit()
+    local_file = tmp_path / "rules.pdf"
+    local_file.write_bytes(b"%PDF")
+    monkeypatch.setattr(scraper, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(
+        scraper,
+        "download_attachment",
+        lambda *args, **kwargs: (local_file, True, None, fallback_url),
+    )
+    monkeypatch.setattr(
+        scraper,
+        "extract_pdf_text",
+        lambda path: ("Rules text", "extracted", None),
+    )
+
+    result = scraper.process_attachment(
+        db,
+        circular,
+        {
+            "id": att_id,
+            "url": fallback_url,
+            "filename": "rules.pdf",
+            "file_type": "pdf",
+        },
+        force_download=True,
+    )
+
+    assert result.id == att_id
+    assert result.content_text == "Rules text"
+    assert db.query(Attachment).count() == 1
+
+
 def test_build_corpus_orders_circular_then_named_attachments():
     circular = make_circular()
     circular.attachments = [

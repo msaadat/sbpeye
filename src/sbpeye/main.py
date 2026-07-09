@@ -124,6 +124,58 @@ def _warm_up_search_index() -> None:
         db.close()
 
 
+def _document_download_info(document: Attachment | CachedDocument) -> dict:
+    return {
+        "url": document.original_url,
+        "filename": document.filename,
+        "file_type": document.file_type,
+    }
+
+
+def _cached_document_path(document: Attachment | CachedDocument) -> Path | None:
+    if not document.local_path:
+        return None
+    path = (PROJECT_ROOT / document.local_path).resolve()
+    attachments_root = (PROJECT_ROOT / "attachments").resolve()
+    if attachments_root not in path.parents:
+        return None
+    return path if path.is_file() else None
+
+
+def _ensure_document_cached(
+    db: Session,
+    document: Attachment | CachedDocument,
+    *,
+    refresh: bool = False,
+) -> tuple[Attachment | CachedDocument, Path | None]:
+    cached_path = _cached_document_path(document)
+    if cached_path is not None and not refresh:
+        return document, cached_path
+
+    info = _document_download_info(document)
+    if isinstance(document, Attachment):
+        circular = document.circular
+        if circular is None:
+            document.extraction_status = "error"
+            document.extraction_error = "Attachment is not linked to a circular."
+            db.commit()
+            return document, None
+        info["id"] = document.id
+        document = process_attachment(
+            db,
+            circular,
+            info,
+            force_download=True,
+        )
+        return document, _cached_document_path(document)
+
+    path, _, error, _ = download_attachment("standalone", info, force=True)
+    document.local_path = str(path.relative_to(PROJECT_ROOT)) if path else None
+    document.error = error
+    db.commit()
+    return document, _cached_document_path(document)
+
+
 @asynccontextmanager
 async def app_lifespan(_app: FastAPI):
     fail_interrupted_ai_jobs()
@@ -908,17 +960,7 @@ async def resolve_document(
     attachment = db.query(Attachment).filter(Attachment.id == id).first() if id else None
     standalone = db.query(CachedDocument).filter(CachedDocument.id == id).first() if id and not attachment else None
     if standalone:
-        info = {
-            "url": standalone.original_url,
-            "filename": standalone.filename,
-            "file_type": standalone.file_type,
-        }
-        local_path = PROJECT_ROOT / standalone.local_path if standalone.local_path else None
-        if refresh or not local_path or not local_path.is_file():
-            path, _, error, _ = download_attachment("standalone", info, force=refresh)
-            standalone.local_path = str(path.relative_to(PROJECT_ROOT)) if path else None
-            standalone.error = error
-            db.commit()
+        standalone, _ = _ensure_document_cached(db, standalone, refresh=refresh)
         payload = _document_payload(standalone)
         if not payload["cached"]:
             return JSONResponse(payload, status_code=502)
@@ -961,20 +1003,16 @@ async def resolve_document(
             )
             db.add(cached_document)
             db.commit()
-        local_path = PROJECT_ROOT / cached_document.local_path if cached_document.local_path else None
-        if refresh or not local_path or not local_path.is_file():
-            path, _, error, _ = download_attachment("standalone", info, force=refresh)
-            cached_document.local_path = str(path.relative_to(PROJECT_ROOT)) if path else None
-            cached_document.error = error
-            db.commit()
+        cached_document, _ = _ensure_document_cached(db, cached_document, refresh=refresh)
         payload = _document_payload(cached_document)
         if not payload["cached"]:
             return JSONResponse(payload, status_code=502)
         return payload
 
-    local_path = PROJECT_ROOT / attachment.local_path if attachment and attachment.local_path else None
-    if refresh or not attachment or not local_path or not local_path.is_file():
+    if not attachment:
         attachment = process_attachment(db, circular, info, force_download=refresh)
+    else:
+        attachment, _ = _ensure_document_cached(db, attachment, refresh=refresh)
 
     payload = _document_payload(attachment)
     if not payload["cached"]:
@@ -987,14 +1025,19 @@ async def document_content(attachment_id: str, db: Session = Depends(get_db)):
     attachment = db.query(Attachment).filter(Attachment.id == attachment_id).first()
     if not attachment:
         attachment = db.query(CachedDocument).filter(CachedDocument.id == attachment_id).first()
-    if not attachment or not attachment.local_path:
+    if not attachment:
         return JSONResponse({"error": "Cached document not found."}, status_code=404)
-    path = (PROJECT_ROOT / attachment.local_path).resolve()
-    attachments_root = (PROJECT_ROOT / "attachments").resolve()
-    if attachments_root not in path.parents or not path.is_file():
-        return JSONResponse({"error": "Cached document not found."}, status_code=404)
-    disposition = "inline" if attachment.file_type == "pdf" else "attachment"
-    media_type = "application/pdf" if attachment.file_type == "pdf" else "application/octet-stream"
+    attachment, path = _ensure_document_cached(db, attachment)
+    if path is None:
+        error = (
+            getattr(attachment, "extraction_error", None)
+            or getattr(attachment, "error", None)
+            or "Cached document not found."
+        )
+        return JSONResponse({"error": error}, status_code=502)
+    file_type = (attachment.file_type or "").lower()
+    disposition = "inline" if file_type == "pdf" else "attachment"
+    media_type = "application/pdf" if file_type == "pdf" else "application/octet-stream"
     return FileResponse(
         path,
         media_type=media_type,

@@ -658,7 +658,7 @@ onBeforeUnmount(() => searchController?.abort())
               </span>
               <CircularResultContent
                 :circular="circular"
-                :show-snippet="!selectedCircularId"
+                :show-snippet="true"
                 :max-tags="selectedCircularId ? 1 : 3"
               />
             </button>
@@ -677,7 +677,7 @@ onBeforeUnmount(() => searchController?.abort())
             </span>
             <CircularResultContent
               :circular="row"
-              :show-snippet="!selectedCircularId"
+              :show-snippet="true"
               :max-tags="selectedCircularId ? 1 : 3"
             />
           </button>

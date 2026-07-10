@@ -37,6 +37,7 @@ from .scraper.circulars import (
     fetch_page_cached,
     process_attachment,
     process_circular,
+    scrape_circulars,
 )
 from .scraper.ecodata import scrape_ecodata
 from .scraper.clean_html import clean_sbp_html, extract_sbp_text
@@ -115,6 +116,23 @@ def fail_interrupted_ai_jobs() -> None:
         db.close()
 
 
+def fail_interrupted_sync_jobs() -> None:
+    """Mark a previous process' in-flight circular sync as failed."""
+    db = SessionLocal()
+    try:
+        interrupted = db.query(SyncStatus).filter(
+            SyncStatus.status.in_(("queued", "running"))
+        ).all()
+        for job in interrupted:
+            job.status = "failed"
+            job.error = "Sync was interrupted by a server restart."
+            job.completed_at = datetime.utcnow()
+        if interrupted:
+            db.commit()
+    finally:
+        db.close()
+
+
 def _warm_up_search_index() -> None:
     db = SessionLocal()
     try:
@@ -179,6 +197,7 @@ def _ensure_document_cached(
 @asynccontextmanager
 async def app_lifespan(_app: FastAPI):
     fail_interrupted_ai_jobs()
+    fail_interrupted_sync_jobs()
     threading.Thread(target=_warm_up_search_index, daemon=True).start()
     yield
 
@@ -203,6 +222,139 @@ SPA_ASSETS_DIR = SPA_DIR / "assets"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 if SPA_ASSETS_DIR.exists():
     app.mount("/spa/assets", StaticFiles(directory=SPA_ASSETS_DIR), name="spa-assets")
+
+
+_CIRCULAR_SYNC_LOCK = threading.Lock()
+ACTIVE_SYNC_STATUSES = {"queued", "running"}
+
+
+def _latest_sync_status(db: Session) -> SyncStatus | None:
+    return db.query(SyncStatus).order_by(SyncStatus.id.desc()).first()
+
+
+def _latest_successful_sync(db: Session) -> SyncStatus | None:
+    return (
+        db.query(SyncStatus)
+        .filter(SyncStatus.status == "success", SyncStatus.last_sync_date.isnot(None))
+        .order_by(SyncStatus.last_sync_date.desc())
+        .first()
+    )
+
+
+def _parse_sync_parameters(raw: str | None) -> dict:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _sync_status_payload(sync_status: SyncStatus | None, last_success: SyncStatus | None = None) -> dict:
+    last_sync_dt = None
+    if last_success and isinstance(last_success.last_sync_date, datetime):
+        last_sync_dt = last_success.last_sync_date
+    elif sync_status and isinstance(sync_status.last_sync_date, datetime):
+        last_sync_dt = sync_status.last_sync_date
+
+    status = sync_status.status if sync_status and sync_status.status else "idle"
+    return {
+        "job_id": sync_status.job_id if sync_status else None,
+        "status": status,
+        "live_status": status.upper(),
+        "running": status in ACTIVE_SYNC_STATUSES,
+        "started_at": _isoformat(sync_status.started_at) if sync_status else None,
+        "completed_at": _isoformat(sync_status.completed_at) if sync_status else None,
+        "last_sync_display": _format_timestamp(last_sync_dt),
+        "last_sync": _format_timestamp(last_sync_dt),
+        "last_sync_dt": last_sync_dt.isoformat() if isinstance(last_sync_dt, datetime) else None,
+        "last_sync_raw": last_sync_dt.isoformat() if isinstance(last_sync_dt, datetime) else None,
+        "error": sync_status.error if sync_status else None,
+        "parameters": _parse_sync_parameters(sync_status.parameters if sync_status else None),
+        "processed_count": sync_status.processed_count if sync_status else None,
+        "skipped_count": sync_status.skipped_count if sync_status else None,
+        "error_count": sync_status.error_count if sync_status else None,
+    }
+
+
+def _as_string_list(value) -> list[str]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()]
+
+
+def _sync_options_from_payload(data: dict) -> dict:
+    departments = _as_string_list(data.get("departments", data.get("department")))
+    years = _as_string_list(data.get("years", data.get("year")))
+    invalid_years = [year for year in years if not (year.isdigit() and len(year) == 4)]
+    if invalid_years:
+        raise ValueError("Years must be four-digit values.")
+
+    try:
+        limit = int(data.get("limit") or 0)
+        workers = int(data.get("workers") or 1)
+    except (TypeError, ValueError):
+        raise ValueError("Limit and workers must be integers.") from None
+
+    if limit < 0:
+        raise ValueError("Limit cannot be negative.")
+    if workers < 1 or workers > 8:
+        raise ValueError("Workers must be between 1 and 8.")
+
+    include_attachments = bool(data.get("include_attachments", not data.get("no_attachments", False)))
+    return {
+        "departments": departments or None,
+        "years": years or None,
+        "limit": limit,
+        "skip_llm": bool(data.get("skip_llm", True)),
+        "verbose": bool(data.get("verbose", False)),
+        "force_fetch": bool(data.get("force_fetch", False)),
+        "force_download": bool(data.get("force_download", False)),
+        "include_attachments": include_attachments,
+        "workers": workers,
+        "full_listing": bool(data.get("full_listing", False)),
+    }
+
+
+def _run_circular_sync(job_id: str, options: dict) -> None:
+    db = SessionLocal()
+    try:
+        job = db.query(SyncStatus).filter(SyncStatus.job_id == job_id).first()
+        if not job:
+            return
+        job.status = "running"
+        job.started_at = datetime.utcnow()
+        db.commit()
+
+        result = scrape_circulars(db, **options) or {}
+
+        job = db.query(SyncStatus).filter(SyncStatus.job_id == job_id).first()
+        if not job:
+            return
+        job.status = "success"
+        job.completed_at = datetime.utcnow()
+        job.last_sync_date = job.completed_at
+        job.error = None
+        job.processed_count = int(result.get("processed") or 0)
+        job.skipped_count = int(result.get("skipped") or 0)
+        job.error_count = int(result.get("errors") or 0)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        job = db.query(SyncStatus).filter(SyncStatus.job_id == job_id).first()
+        if job:
+            job.status = "failed"
+            job.completed_at = datetime.utcnow()
+            job.error = str(exc)
+            db.commit()
+    finally:
+        db.close()
+        _CIRCULAR_SYNC_LOCK.release()
 
 
 def spa_index_response() -> FileResponse:
@@ -239,24 +391,25 @@ async def ecodata_page():
 
 @app.get("/api/app/status")
 async def get_app_status(db: Session = Depends(get_db)):
-    sync_status = db.query(SyncStatus).order_by(SyncStatus.id.desc()).first()
-    last_sync_dt = sync_status.last_sync_date if sync_status else None
+    sync_status = _latest_sync_status(db)
+    sync_payload = _sync_status_payload(sync_status, _latest_successful_sync(db))
     total_circulars = db.query(func.count(Circular.id)).scalar() or 0
     department_count = db.query(func.count(func.distinct(Circular.department))).filter(Circular.department.isnot(None)).scalar() or 0
     indexed_today = db.query(func.count(Circular.id)).filter(func.date(Circular.indexed_at) == datetime.utcnow().date()).scalar() or 0
     vector_db_ready = has_vector_store_data()
 
     return {
-        "sync_status": sync_status.status if sync_status and sync_status.status else "idle",
-        "live_status": (sync_status.status if sync_status and sync_status.status else "idle").upper(),
+        "sync_status": sync_payload["status"],
+        "live_status": sync_payload["live_status"],
+        "sync": sync_payload,
         "total_circulars": total_circulars,
         "department_count": department_count,
         "indexed_today": indexed_today,
         "vector_db_state": "READY" if vector_db_ready else "NOT_INDEXED",
-        "last_sync_display": _format_timestamp(last_sync_dt),
-        "last_sync": _format_timestamp(last_sync_dt),
-        "last_sync_dt": last_sync_dt.isoformat() if isinstance(last_sync_dt, datetime) else None,
-        "last_sync_raw": last_sync_dt.isoformat() if isinstance(last_sync_dt, datetime) else None,
+        "last_sync_display": sync_payload["last_sync_display"],
+        "last_sync": sync_payload["last_sync"],
+        "last_sync_dt": sync_payload["last_sync_dt"],
+        "last_sync_raw": sync_payload["last_sync_raw"],
     }
 
 
@@ -354,6 +507,57 @@ async def get_tags(db: Session = Depends(get_db)):
             tag_counts[t] = tag_counts.get(t, 0) + 1
     sorted_tags = sorted(tag_counts.items(), key=lambda x: -x[1])
     return [{"tag": t, "count": c} for t, c in sorted_tags]
+
+
+@app.get("/api/circulars/sync/status")
+def get_circular_sync_status(db: Session = Depends(get_db)):
+    return _sync_status_payload(_latest_sync_status(db), _latest_successful_sync(db))
+
+
+@app.post("/api/circulars/sync")
+def start_circular_sync(data: dict | None = Body(default=None), db: Session = Depends(get_db)):
+    try:
+        options = _sync_options_from_payload(data or {})
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    if not _CIRCULAR_SYNC_LOCK.acquire(blocking=False):
+        active = _latest_sync_status(db)
+        return JSONResponse(
+            {
+                "error": "A circular sync is already running.",
+                "sync": _sync_status_payload(active, _latest_successful_sync(db)),
+            },
+            status_code=409,
+        )
+
+    job = SyncStatus(
+        job_id=str(uuid.uuid4()),
+        status="queued",
+        started_at=datetime.utcnow(),
+        parameters=json.dumps(options),
+    )
+    try:
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+        job_id = job.job_id
+        response_payload = _sync_status_payload(job, _latest_successful_sync(db))
+        db.close()
+    except Exception as exc:
+        db.rollback()
+        _CIRCULAR_SYNC_LOCK.release()
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    threading.Thread(
+        target=_run_circular_sync,
+        args=(job_id, options),
+        daemon=True,
+    ).start()
+    return JSONResponse(
+        response_payload,
+        status_code=202,
+    )
 
 
 @app.get("/api/ecodata")

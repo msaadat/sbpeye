@@ -5,10 +5,9 @@ split and the Phase 1c chat-session dedup can be proven behavior-preserving.
 """
 
 import json
-
 import sbpeye.database as database_module
 import sbpeye.main as main_module
-from sbpeye.models import Attachment, CachedDocument, ChatMessage, ChatSession, CircularRelationship
+from sbpeye.models import Attachment, CachedDocument, ChatMessage, ChatSession, CircularRelationship, SyncStatus
 
 from conftest import make_circular
 
@@ -75,6 +74,64 @@ def test_circular_relationships_shape(client):
     assert rel["confidence"] == 0.9
     assert body["incoming"] == []
 
+
+def test_circular_sync_worker_updates_status(db_factory, monkeypatch):
+    captured = {}
+
+    def fake_scrape_circulars(db, **kwargs):
+        captured.update(kwargs)
+        return {"processed": 2, "skipped": 1, "errors": 0}
+
+    monkeypatch.setattr(main_module, "SessionLocal", db_factory)
+    monkeypatch.setattr(main_module, "scrape_circulars", fake_scrape_circulars)
+
+    db = db_factory()
+    try:
+        db.add(SyncStatus(job_id="sync-1", status="queued"))
+        db.commit()
+    finally:
+        db.close()
+
+    options = main_module._sync_options_from_payload(
+        {
+            "departments": "bprd, epd",
+            "years": "2025",
+            "limit": 2,
+            "include_attachments": False,
+        }
+    )
+    assert main_module._CIRCULAR_SYNC_LOCK.acquire(blocking=False)
+    main_module._run_circular_sync("sync-1", options)
+
+    db = db_factory()
+    try:
+        status = db.query(SyncStatus).filter(SyncStatus.job_id == "sync-1").one()
+        assert status.status == "success"
+        assert status.processed_count == 2
+        assert status.skipped_count == 1
+        assert status.error_count == 0
+    finally:
+        db.close()
+
+    assert captured["departments"] == ["bprd", "epd"]
+    assert captured["years"] == ["2025"]
+    assert captured["limit"] == 2
+    assert captured["include_attachments"] is False
+    assert captured["skip_llm"] is True
+
+
+def test_circular_sync_payload_validation():
+    status = SyncStatus(job_id="sync-1", status="running", parameters='{"limit": 5}')
+    payload = main_module._sync_status_payload(status)
+    assert payload["running"] is True
+    assert payload["parameters"] == {"limit": 5}
+
+    try:
+        main_module._sync_options_from_payload({"years": "25"})
+    except ValueError as exc:
+        assert "four-digit" in str(exc)
+    else:
+        raise AssertionError("Expected invalid sync year to be rejected")
 
 def test_document_content_redownloads_missing_attachment_file(client, monkeypatch, tmp_path):
     test_client, db_factory = client

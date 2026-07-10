@@ -1,14 +1,16 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import Button from 'primevue/button'
 import ConfirmDialog from 'primevue/confirmdialog'
 import Message from 'primevue/message'
 import Toast from 'primevue/toast'
+import { useToast } from 'primevue/usetoast'
 import SbpNewsPanel from '@/components/SbpNewsPanel.vue'
-import { getAppStatus, getLlmStatus, type AppStatus, type LlmStatus } from '@/lib/api'
+import { getAppStatus, getLlmStatus, startCircularSync, type ApiError, type AppStatus, type CircularSyncStatus, type LlmStatus } from '@/lib/api'
 
 const route = useRoute()
+const toast = useToast()
 const darkMode = ref(localStorage.getItem('sbpeye-theme') === 'dark')
 const status = ref<AppStatus | null>(null)
 const statusLoading = ref(false)
@@ -16,6 +18,8 @@ const statusError = ref('')
 const llmStatus = ref<LlmStatus | null>(null)
 const llmLoading = ref(false)
 const llmError = ref('')
+const syncStarting = ref(false)
+let statusPollId: ReturnType<typeof setInterval> | null = null
 
 const navItems = computed(() => [
   {
@@ -63,12 +67,24 @@ const statusLabel = computed(() => {
     return 'Status pending'
   }
 
+  if (syncRunning.value) {
+    return 'Circular sync running'
+  }
+
   const total = status.value.total_circulars ?? 0
   const departments = status.value.department_count ?? 0
   return `${total.toLocaleString()} circulars / ${departments.toLocaleString()} departments`
 })
 
 const statusDetail = computed(() => {
+  if (syncRunning.value && status.value?.sync?.started_at) {
+    return `Started ${new Date(status.value.sync.started_at).toLocaleString()}`
+  }
+
+  if (status.value?.sync?.status === 'failed' && status.value.sync.error) {
+    return `Last sync failed: ${status.value.sync.error}`
+  }
+
   if (status.value?.last_sync_display) {
     return `Last sync ${status.value.last_sync_display}`
   }
@@ -79,6 +95,56 @@ const statusDetail = computed(() => {
 
   return 'API status will appear here when available'
 })
+
+const syncStatus = computed<CircularSyncStatus | null>(() => status.value?.sync ?? null)
+const syncRunning = computed(() => Boolean(syncStatus.value?.running))
+const syncStaleness = computed(() => {
+  if (statusLoading.value) {
+    return 'checking'
+  }
+  if (statusError.value || syncStatus.value?.status === 'failed') {
+    return 'error'
+  }
+  if (syncRunning.value) {
+    return 'running'
+  }
+  const lastSync = status.value?.last_sync_dt || syncStatus.value?.last_sync_dt
+  if (!lastSync) {
+    return 'stale'
+  }
+  const lastSyncTime = new Date(lastSync).getTime()
+  if (Number.isNaN(lastSyncTime)) {
+    return 'stale'
+  }
+  const ageHours = (Date.now() - lastSyncTime) / (1000 * 60 * 60)
+  return ageHours > 24 ? 'stale' : 'fresh'
+})
+const syncIcon = computed(() => {
+  if (statusLoading.value || syncRunning.value) {
+    return 'pi pi-spin pi-refresh'
+  }
+  if (syncStaleness.value === 'error') {
+    return 'pi pi-exclamation-circle'
+  }
+  return 'pi pi-refresh'
+})
+const syncButtonTitle = computed(() => {
+  return `${statusLabel.value}\n${statusDetail.value}`
+})
+
+function updateStatusPolling() {
+  if (syncRunning.value && !statusPollId) {
+    statusPollId = setInterval(() => {
+      void loadStatus()
+    }, 5000)
+    return
+  }
+
+  if (!syncRunning.value && statusPollId) {
+    clearInterval(statusPollId)
+    statusPollId = null
+  }
+}
 
 async function loadStatus() {
   statusLoading.value = true
@@ -91,6 +157,43 @@ async function loadStatus() {
     statusError.value = error instanceof Error ? error.message : 'Unable to load status'
   } finally {
     statusLoading.value = false
+    updateStatusPolling()
+  }
+}
+
+async function startSync() {
+  if (syncRunning.value || syncStarting.value) {
+    return
+  }
+
+  syncStarting.value = true
+
+  try {
+    const sync = await startCircularSync({})
+    status.value = {
+      ...(status.value || {}),
+      sync,
+      sync_status: sync.status,
+      live_status: sync.live_status,
+    }
+    updateStatusPolling()
+    toast.add({
+      severity: 'success',
+      summary: 'Circular sync started',
+      detail: 'The app remains available while sync runs in the background.',
+      life: 3500,
+    })
+    void loadStatus()
+  } catch (error) {
+    const apiError = error as ApiError
+    toast.add({
+      severity: apiError.status === 409 ? 'warn' : 'error',
+      summary: apiError.status === 409 ? 'Sync already running' : 'Sync could not start',
+      detail: apiError.message,
+      life: 4500,
+    })
+  } finally {
+    syncStarting.value = false
   }
 }
 
@@ -186,6 +289,12 @@ onMounted(() => {
   void loadStatus()
   void loadLlmStatus()
 })
+
+onBeforeUnmount(() => {
+  if (statusPollId) {
+    clearInterval(statusPollId)
+  }
+})
 </script>
 
 <template>
@@ -215,20 +324,17 @@ onMounted(() => {
       </div>
 
       <div class="sidebar-tools">
-        <div
-          class="sidebar-status"
-          :title="`${statusLabel}\n${statusDetail}`"
-          :aria-label="statusLabel"
-        >
-          <i
-            class="pi"
-            :class="{
-              'pi-spin pi-spinner': statusLoading,
-              'pi-exclamation-circle': statusError,
-              'pi-check-circle': !statusLoading && !statusError,
-            }"
-          />
-        </div>
+        <Button
+          text
+          rounded
+          class="sync-status-button"
+          :class="`is-${syncStaleness}`"
+          :icon="syncIcon"
+          :aria-label="syncRunning ? 'Circular sync running' : 'Sync circulars'"
+          :title="syncButtonTitle"
+          :disabled="syncRunning || syncStarting"
+          @click="startSync"
+        />
 
         <button
           type="button"

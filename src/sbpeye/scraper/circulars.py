@@ -750,6 +750,13 @@ def scrape_circulars(
         f"\nScrape complete. Processed: {len(pending) - errors}, "
         f"errors: {errors}, skipped (existing): {skipped}"
     )
+    return {
+        "discovered": len(discovered),
+        "pending": len(pending),
+        "processed": len(pending) - errors,
+        "errors": errors,
+        "skipped": skipped,
+    }
 
 
 def process_circular(

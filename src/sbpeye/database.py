@@ -144,6 +144,24 @@ def _ensure_columns():
                         f"ALTER TABLE ai_generation_jobs ADD COLUMN {col_name} {col_type}"
                     ))
 
+        if "sync_status" in table_names:
+            existing = {c["name"] for c in insp.get_columns("sync_status")}
+            new_columns = [
+                ("job_id", "VARCHAR"),
+                ("started_at", "DATETIME"),
+                ("completed_at", "DATETIME"),
+                ("error", "TEXT"),
+                ("parameters", "TEXT"),
+                ("processed_count", "INTEGER"),
+                ("skipped_count", "INTEGER"),
+                ("error_count", "INTEGER"),
+            ]
+            for col_name, col_type in new_columns:
+                if col_name not in existing:
+                    conn.execute(text(
+                        f"ALTER TABLE sync_status ADD COLUMN {col_name} {col_type}"
+                    ))
+
         if "research_workspaces" in table_names:
             existing = {c["name"] for c in insp.get_columns("research_workspaces")}
             if "is_default" not in existing:

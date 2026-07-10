@@ -211,8 +211,16 @@ class SyncStatus(Base):
     __tablename__ = "sync_status"
 
     id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(String, nullable=True, index=True)
     last_sync_date = Column(DateTime)
     status = Column(String)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    error = Column(Text, nullable=True)
+    parameters = Column(Text, nullable=True)
+    processed_count = Column(Integer, nullable=True)
+    skipped_count = Column(Integer, nullable=True)
+    error_count = Column(Integer, nullable=True)
     ecodata_index_time = Column(DateTime, nullable=True)
 
 class Settings(Base):

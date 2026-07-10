@@ -173,6 +173,32 @@ a {
   cursor: help;
 }
 
+.sync-status-button {
+  width: 2rem;
+  height: 2rem;
+}
+
+.sync-status-button:disabled {
+  opacity: 1;
+}
+
+.sync-status-button.is-checking,
+.sync-status-button.is-running {
+  color: var(--sbp-muted);
+}
+
+.sync-status-button.is-fresh {
+  color: #16a34a;
+}
+
+.sync-status-button.is-stale {
+  color: #d97706;
+}
+
+.sync-status-button.is-error {
+  color: #dc2626;
+}
+
 .llm-status {
   background: none;
   border: none;

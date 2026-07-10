@@ -24,6 +24,7 @@ export interface SbpNewsResponse {
 export interface AppStatus {
   sync_status?: string
   live_status?: string
+  sync?: CircularSyncStatus
   total_circulars?: number
   department_count?: number
   indexed_today?: number
@@ -32,6 +33,37 @@ export interface AppStatus {
   last_sync?: string
   last_sync_dt?: string | null
   last_sync_raw?: string | null
+}
+
+export interface CircularSyncStatus {
+  job_id?: string | null
+  status: string
+  live_status?: string
+  running: boolean
+  started_at?: string | null
+  completed_at?: string | null
+  last_sync_display?: string | null
+  last_sync?: string | null
+  last_sync_dt?: string | null
+  last_sync_raw?: string | null
+  error?: string | null
+  parameters?: Record<string, unknown>
+  processed_count?: number | null
+  skipped_count?: number | null
+  error_count?: number | null
+}
+
+export interface CircularSyncRequest {
+  departments?: string | string[] | null
+  years?: string | string[] | null
+  limit?: number
+  skip_llm?: boolean
+  verbose?: boolean
+  force_fetch?: boolean
+  force_download?: boolean
+  include_attachments?: boolean
+  workers?: number
+  full_listing?: boolean
 }
 
 export type LlmStatusState =
@@ -482,6 +514,20 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
 
 export async function getAppStatus(): Promise<AppStatus> {
   return requestJson<AppStatus>('/app/status')
+}
+
+export async function getCircularSyncStatus(): Promise<CircularSyncStatus> {
+  return requestJson<CircularSyncStatus>('/circulars/sync/status')
+}
+
+export async function startCircularSync(payload: CircularSyncRequest): Promise<CircularSyncStatus> {
+  return requestJson<CircularSyncStatus>('/circulars/sync', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  })
 }
 
 export async function getLlmStatus(): Promise<LlmStatus> {

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { VueFlow, Handle, Position, MarkerType, type Node, type Edge } from '@vue-flow/core'
+import { VueFlow, Handle, Position, MarkerType, BaseEdge, type Node, type Edge } from '@vue-flow/core'
 import type { CircularDetail } from '@/lib/api'
 import '@vue-flow/core/dist/style.css'
 
@@ -8,128 +8,213 @@ const props = defineProps<{ circular: CircularDetail }>()
 const emit = defineEmits<{ navigate: [id: string] }>()
 
 const NODE_W = 210
-const CX = 520
-const CY = 300
-const H_GAP = 370
-const V_GAP = 200
-const V_STEP = 120
-const H_STEP = 240
+const COL_PITCH = 300
+const ROW_PITCH = 104
+// past this many nodes, collapse to one column per year with vertical stacks
+const MAX_SINGLE_ROW = 10
 
 interface NodeData {
   label: string
   status: string | null
+  dateLabel: string | null
   resolved: boolean
   isCurrent: boolean
   circularId: string | null
 }
 
-function makeNode(id: string, cx: number, cy: number, data: NodeData, type: string): Node<NodeData> {
-  return { id, type, position: { x: cx - NODE_W / 2, y: cy - 40 }, data }
+interface TimelineEntry {
+  key: string
+  label: string
+  status: string | null
+  resolved: boolean
+  circularId: string | null
+  sortTime: number | null
+  dateLabel: string | null
+  isCurrent: boolean
+  rels: { type: string; dir: 'out' | 'in' }[]
 }
 
-function spreadV(count: number, i: number): number {
-  return CY + (i - (count - 1) / 2) * V_STEP
+const TYPE_STYLES: Record<string, { label: string; color: string }> = {
+  amends: { label: 'Amends', color: 'var(--sbp-green)' },
+  adds_to: { label: 'Adds to', color: 'var(--p-blue-500)' },
+  supersedes: { label: 'Supersedes', color: 'var(--p-orange-500)' },
+  clarifies: { label: 'Clarifies', color: 'var(--p-purple-400)' },
+  cancels: { label: 'Cancels', color: 'var(--p-red-500)' },
 }
 
-function spreadH(count: number, i: number): number {
-  return CX + (i - (count - 1) / 2) * H_STEP
+function typeStyle(type: string): { label: string; color: string } {
+  return TYPE_STYLES[type] ?? {
+    label: type.replace(/_/g, ' ').replace(/^\w/, ch => ch.toUpperCase()),
+    color: 'var(--sbp-gold)',
+  }
 }
 
-const graphNodes = computed<Node<NodeData>[]>(() => {
-  const nodes: Node<NodeData>[] = []
+function parseNodeDate(dateStr: string | null | undefined, reference: string): { sortTime: number | null; dateLabel: string | null } {
+  if (dateStr) {
+    const d = new Date(dateStr)
+    if (!Number.isNaN(d.getTime())) {
+      return { sortTime: d.getTime(), dateLabel: d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) }
+    }
+  }
+  // references reliably embed the year, e.g. "EPD Circular Letter No. 16 of 2019"
+  const years = reference.match(/\b(19|20)\d{2}\b/g)
+  if (years && years.length > 0) {
+    const y = Number(years[years.length - 1])
+    return { sortTime: new Date(y, 5, 30).getTime(), dateLabel: String(y) }
+  }
+  return { sortTime: null, dateLabel: null }
+}
+
+const relatedEntries = computed<TimelineEntry[]>(() => {
   const c = props.circular
+  const map = new Map<string, TimelineEntry>()
 
-  nodes.push(makeNode('curr', CX, CY, {
-    label: c.reference || c.title,
-    status: c.status,
-    resolved: true,
-    isCurrent: true,
-    circularId: c.id,
-  }, 'current'))
+  function upsert(other: { id?: string; reference?: string | null; title?: string | null; status?: string | null; date?: string | null } | null | undefined, otherId: string | null | undefined, fallbackRef: string | null | undefined, type: string, dir: 'out' | 'in') {
+    if (otherId && otherId === c.id) return
+    const label = other?.reference || other?.title || fallbackRef || 'Unknown'
+    const key = otherId || `ref:${label.trim().toLowerCase()}`
+    let entry = map.get(key)
+    if (!entry) {
+      const { sortTime, dateLabel } = parseNodeDate(other?.date, label)
+      entry = {
+        key,
+        label,
+        status: other?.status ?? null,
+        resolved: Boolean(otherId),
+        circularId: otherId ?? null,
+        sortTime,
+        dateLabel,
+        isCurrent: false,
+        rels: [],
+      }
+      map.set(key, entry)
+    }
+    entry.rels.push({ type, dir })
+  }
 
-  const outAmends = c.relationships.outgoing.filter(r => r.type === 'amends')
-  outAmends.forEach((rel, i) => {
-    nodes.push(makeNode(`out-amends-${i}`, CX - H_GAP, spreadV(outAmends.length, i), {
-      label: rel.target?.reference || rel.target?.title || rel.target_reference || 'Unknown',
-      status: rel.target?.status || null,
-      resolved: Boolean(rel.target_id),
-      isCurrent: false,
-      circularId: rel.target_id || null,
-    }, 'related'))
-  })
-
-  const inAmends = c.relationships.incoming.filter(r => r.type === 'amends')
-  inAmends.forEach((rel, i) => {
-    nodes.push(makeNode(`in-amends-${i}`, CX + H_GAP, spreadV(inAmends.length, i), {
-      label: rel.source?.reference || rel.source?.title || 'Unknown',
-      status: rel.source?.status || null,
-      resolved: Boolean(rel.source_id),
-      isCurrent: false,
-      circularId: rel.source_id || null,
-    }, 'related'))
-  })
-
-  const otherOut = c.relationships.outgoing.filter(r => r.type !== 'amends')
-  otherOut.forEach((rel, i) => {
-    nodes.push(makeNode(`out-other-${i}`, spreadH(otherOut.length, i), CY - V_GAP, {
-      label: rel.target?.reference || rel.target?.title || rel.target_reference || 'Unknown',
-      status: rel.target?.status || null,
-      resolved: Boolean(rel.target_id),
-      isCurrent: false,
-      circularId: rel.target_id || null,
-    }, 'related'))
-  })
-
-  const otherIn = c.relationships.incoming.filter(r => r.type !== 'amends')
-  otherIn.forEach((rel, i) => {
-    nodes.push(makeNode(`in-other-${i}`, spreadH(otherIn.length, i), CY + V_GAP, {
-      label: rel.source?.reference || rel.source?.title || 'Unknown',
-      status: rel.source?.status || null,
-      resolved: Boolean(rel.source_id),
-      isCurrent: false,
-      circularId: rel.source_id || null,
-    }, 'related'))
-  })
-
-  return nodes
+  c.relationships.outgoing.forEach(r => upsert(r.target, r.target_id, r.target_reference, r.type, 'out'))
+  c.relationships.incoming.forEach(r => upsert(r.source, r.source_id, null, r.type, 'in'))
+  return [...map.values()]
 })
 
-const graphEdges = computed<Edge[]>(() => {
-  const edges: Edge[] = []
+const layout = computed(() => {
   const c = props.circular
+  const currentRef = c.reference || c.title
+  const current: TimelineEntry = {
+    key: '__current__',
+    label: currentRef,
+    status: c.status,
+    resolved: true,
+    circularId: c.id,
+    ...parseNodeDate(c.date, currentRef),
+    isCurrent: true,
+    rels: [],
+  }
 
-  function edgeBase(color: string): Partial<Edge> {
-    return {
-      type: 'smoothstep',
-      markerEnd: { type: MarkerType.ArrowClosed, color, width: 16, height: 16 },
-      style: { stroke: color, strokeWidth: 1.5 },
-      labelStyle: { fill: color, fontSize: '10px', fontWeight: '600', fontFamily: 'inherit' },
-      labelBgStyle: { fill: 'var(--sbp-surface)', fillOpacity: 0.92 },
-      labelBgPadding: [4, 6] as [number, number],
-      labelBgBorderRadius: 4,
+  const sorted = [current, ...relatedEntries.value]
+    .sort((a, b) => (a.sortTime ?? -Infinity) - (b.sortTime ?? -Infinity))
+
+  const colOf = new Map<string, number>()
+  const rowOf = new Map<string, number>()
+
+  if (sorted.length <= MAX_SINGLE_ROW) {
+    sorted.forEach((e, i) => {
+      colOf.set(e.key, i)
+      rowOf.set(e.key, 0)
+    })
+  } else {
+    const groups = new Map<string, TimelineEntry[]>()
+    sorted.forEach(e => {
+      const year = e.sortTime != null ? String(new Date(e.sortTime).getFullYear()) : 'unknown'
+      const group = groups.get(year)
+      if (group) group.push(e)
+      else groups.set(year, [e])
+    })
+    let col = 0
+    for (const group of groups.values()) {
+      const ordered = [...group.filter(e => e.isCurrent), ...group.filter(e => !e.isCurrent)]
+      ordered.forEach((e, row) => {
+        colOf.set(e.key, col)
+        rowOf.set(e.key, row)
+      })
+      col++
     }
   }
 
-  c.relationships.outgoing.filter(r => r.type === 'amends').forEach((_, i) => {
-    edges.push({ id: `e-out-amends-${i}`, source: 'curr', target: `out-amends-${i}`, label: 'Amends', ...edgeBase('var(--sbp-green)') })
-  })
+  return { sorted, colOf, rowOf }
+})
 
-  c.relationships.incoming.filter(r => r.type === 'amends').forEach((_, i) => {
-    edges.push({ id: `e-in-amends-${i}`, source: `in-amends-${i}`, target: 'curr', label: 'Amends', ...edgeBase('var(--sbp-green)') })
-  })
+const graphNodes = computed<Node<NodeData>[]>(() => {
+  const { sorted, colOf, rowOf } = layout.value
+  return sorted.map(e => ({
+    id: e.key,
+    type: e.isCurrent ? 'current' : 'related',
+    position: {
+      x: (colOf.get(e.key) ?? 0) * COL_PITCH,
+      y: (rowOf.get(e.key) ?? 0) * ROW_PITCH,
+    },
+    data: {
+      label: e.label,
+      status: e.status,
+      dateLabel: e.dateLabel,
+      resolved: e.resolved,
+      isCurrent: e.isCurrent,
+      circularId: e.circularId,
+    },
+  }))
+})
 
-  c.relationships.outgoing.filter(r => r.type !== 'amends').forEach((rel, i) => {
-    const label = rel.type.replace(/_/g, ' ').replace(/\b\w/g, ch => ch.toUpperCase())
-    edges.push({ id: `e-out-other-${i}`, source: 'curr', target: `out-other-${i}`, label, ...edgeBase('var(--sbp-gold)') })
-  })
+const graphEdges = computed<Edge[]>(() => {
+  const { colOf } = layout.value
+  const edges: Edge[] = []
+  const pairCount = new Map<string, number>()
+  const currentCol = colOf.get('__current__') ?? 0
 
-  c.relationships.incoming.filter(r => r.type !== 'amends').forEach((rel, i) => {
-    const label = rel.type.replace(/_/g, ' ').replace(/\b\w/g, ch => ch.toUpperCase())
-    edges.push({ id: `e-in-other-${i}`, source: `in-other-${i}`, target: 'curr', label, ...edgeBase('var(--sbp-gold)') })
+  relatedEntries.value.forEach(entry => {
+    entry.rels.forEach((rel, i) => {
+      const dup = pairCount.get(entry.key) ?? 0
+      pairCount.set(entry.key, dup + 1)
+      const span = Math.max(1, Math.abs((colOf.get(entry.key) ?? 0) - currentCol))
+      const { color } = typeStyle(rel.type)
+      edges.push({
+        id: `e-${entry.key}-${rel.type}-${rel.dir}-${i}`,
+        source: rel.dir === 'out' ? '__current__' : entry.key,
+        target: rel.dir === 'out' ? entry.key : '__current__',
+        sourceHandle: 'top-s',
+        targetHandle: 'top-t',
+        type: 'arc',
+        data: { arcHeight: 120 * Math.sqrt(span) + dup * 56 },
+        markerEnd: { type: MarkerType.ArrowClosed, color, width: 16, height: 16 },
+        style: { stroke: color, strokeWidth: 1.5 },
+      })
+    })
   })
 
   return edges
 })
+
+const legendItems = computed(() => {
+  const seen = new Map<string, { label: string; color: string }>()
+  relatedEntries.value.forEach(e => {
+    e.rels.forEach(r => {
+      const style = typeStyle(r.type)
+      seen.set(style.label, style)
+    })
+  })
+  return [...seen.values()]
+})
+
+function arcPath(p: { sourceX: number; sourceY: number; targetX: number; targetY: number; data?: { arcHeight?: number } }): string {
+  const h = p.data?.arcHeight ?? 120
+  if (Math.abs(p.sourceX - p.targetX) < 1) {
+    // same column (stacked): bulge sideways instead of arcing through the stack
+    const my = (p.sourceY + p.targetY) / 2
+    return `M ${p.sourceX},${p.sourceY} Q ${p.sourceX - NODE_W * 0.85},${my} ${p.targetX},${p.targetY}`
+  }
+  const mx = (p.sourceX + p.targetX) / 2
+  const my = Math.min(p.sourceY, p.targetY) - h
+  return `M ${p.sourceX},${p.sourceY} Q ${mx},${my} ${p.targetX},${p.targetY}`
+}
 
 function statusColor(status: string | null): string {
   const s = (status || '').toLowerCase()
@@ -161,18 +246,18 @@ function onNodeClick({ node }: { node: Node<NodeData> }) {
       class="cg-flow"
       @node-click="onNodeClick"
     >
+      <template #edge-arc="p">
+        <BaseEdge :path="arcPath(p)" :marker-end="p.markerEnd" :style="p.style" />
+      </template>
       <template #node-current="{ data }">
         <div class="cg-node cg-node--current">
-          <Handle type="source" :position="Position.Left" class="cg-handle" />
-          <Handle type="target" :position="Position.Left" class="cg-handle" />
-          <Handle type="source" :position="Position.Right" class="cg-handle" />
-          <Handle type="target" :position="Position.Right" class="cg-handle" />
-          <Handle type="source" :position="Position.Top" class="cg-handle" />
-          <Handle type="target" :position="Position.Top" class="cg-handle" />
-          <Handle type="source" :position="Position.Bottom" class="cg-handle" />
-          <Handle type="target" :position="Position.Bottom" class="cg-handle" />
+          <Handle id="top-s" type="source" :position="Position.Top" class="cg-handle" />
+          <Handle id="top-t" type="target" :position="Position.Top" class="cg-handle" />
           <div class="cg-node-label">{{ data.label }}</div>
-          <div v-if="data.status" class="cg-node-status" :style="{ color: statusColor(data.status) }">{{ data.status }}</div>
+          <div class="cg-node-meta">
+            <span v-if="data.dateLabel" class="cg-node-date">{{ data.dateLabel }}</span>
+            <span v-if="data.status" class="cg-node-status" :style="{ color: statusColor(data.status) }">{{ data.status }}</span>
+          </div>
         </div>
       </template>
       <template #node-related="{ data }">
@@ -183,23 +268,22 @@ function onNodeClick({ node }: { node: Node<NodeData> }) {
             'cg-node--clickable': data.resolved && data.circularId,
           }"
         >
-          <Handle type="source" :position="Position.Left" class="cg-handle" />
-          <Handle type="target" :position="Position.Left" class="cg-handle" />
-          <Handle type="source" :position="Position.Right" class="cg-handle" />
-          <Handle type="target" :position="Position.Right" class="cg-handle" />
-          <Handle type="source" :position="Position.Top" class="cg-handle" />
-          <Handle type="target" :position="Position.Top" class="cg-handle" />
-          <Handle type="source" :position="Position.Bottom" class="cg-handle" />
-          <Handle type="target" :position="Position.Bottom" class="cg-handle" />
+          <Handle id="top-s" type="source" :position="Position.Top" class="cg-handle" />
+          <Handle id="top-t" type="target" :position="Position.Top" class="cg-handle" />
           <div class="cg-node-label">{{ data.label }}</div>
-          <div v-if="data.status" class="cg-node-status" :style="{ color: statusColor(data.status) }">{{ data.status }}</div>
+          <div class="cg-node-meta">
+            <span v-if="data.dateLabel" class="cg-node-date">{{ data.dateLabel }}</span>
+            <span v-if="data.status" class="cg-node-status" :style="{ color: statusColor(data.status) }">{{ data.status }}</span>
+          </div>
         </div>
       </template>
     </VueFlow>
 
     <div class="cg-legend">
-      <span class="cg-legend-item"><span class="cg-legend-dot cg-legend-dot--green" /> Amends</span>
-      <span class="cg-legend-item"><span class="cg-legend-dot cg-legend-dot--gold" /> Other</span>
+      <span v-for="item in legendItems" :key="item.label" class="cg-legend-item">
+        <span class="cg-legend-dot" :style="{ background: item.color }" /> {{ item.label }}
+      </span>
+      <span class="cg-legend-item cg-legend-muted">Oldest <i class="pi pi-arrow-right" style="font-size:0.6rem" /> newest</span>
       <span class="cg-legend-item cg-legend-muted"><i class="pi pi-arrows-h" style="font-size:0.7rem"/> Pan &nbsp;·&nbsp; <i class="pi pi-search-plus" style="font-size:0.7rem" /> Scroll to zoom</span>
     </div>
   </div>
@@ -232,10 +316,7 @@ function onNodeClick({ node }: { node: Node<NodeData> }) {
 
 :deep(.vue-flow__edge-path) {
   stroke-width: 1.5;
-}
-
-:deep(.vue-flow__edge-label) {
-  pointer-events: none;
+  fill: none;
 }
 
 .cg-node {
@@ -279,11 +360,23 @@ function onNodeClick({ node }: { node: Node<NodeData> }) {
   -webkit-box-orient: vertical;
 }
 
+.cg-node-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 5px;
+}
+
+.cg-node-date {
+  font-size: 0.66rem;
+  font-weight: 500;
+  color: var(--sbp-muted);
+}
+
 .cg-node-status {
   font-size: 0.62rem;
   font-weight: 600;
   text-transform: uppercase;
-  margin-top: 5px;
   letter-spacing: 0.03em;
 }
 
@@ -321,7 +414,4 @@ function onNodeClick({ node }: { node: Node<NodeData> }) {
   display: inline-block;
   flex-shrink: 0;
 }
-
-.cg-legend-dot--green { background: var(--sbp-green); }
-.cg-legend-dot--gold  { background: var(--sbp-gold); }
 </style>

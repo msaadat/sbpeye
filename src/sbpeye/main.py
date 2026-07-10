@@ -861,11 +861,11 @@ async def get_circular_detail(circular_id: str, db: Session = Depends(get_db)):
         if r.source_id:
             sc = db.query(Circular).filter(Circular.id == r.source_id).first()
             if sc:
-                source = {"id": sc.id, "title": sc.title, "reference": sc.reference, "url": sc.url, "status": sc.status or "active"}
+                source = {"id": sc.id, "title": sc.title, "reference": sc.reference, "url": sc.url, "status": sc.status or "active", "date": sc.date.strftime("%Y-%m-%d") if sc.date else None}
         if r.target_id:
             tc = db.query(Circular).filter(Circular.id == r.target_id).first()
             if tc:
-                target = {"id": tc.id, "title": tc.title, "reference": tc.reference, "url": tc.url, "status": tc.status or "active"}
+                target = {"id": tc.id, "title": tc.title, "reference": tc.reference, "url": tc.url, "status": tc.status or "active", "date": tc.date.strftime("%Y-%m-%d") if tc.date else None}
         return {
             "type": r.type,
             "source_id": r.source_id,
@@ -1124,11 +1124,11 @@ async def get_circular_relationships(circular_id: str, db: Session = Depends(get
         if r.source_id:
             sc = db.query(Circular).filter(Circular.id == r.source_id).first()
             if sc:
-                source = {"id": sc.id, "title": sc.title, "reference": sc.reference, "url": sc.url, "status": sc.status or "active"}
+                source = {"id": sc.id, "title": sc.title, "reference": sc.reference, "url": sc.url, "status": sc.status or "active", "date": sc.date.strftime("%Y-%m-%d") if sc.date else None}
         if r.target_id:
             tc = db.query(Circular).filter(Circular.id == r.target_id).first()
             if tc:
-                target = {"id": tc.id, "title": tc.title, "reference": tc.reference, "url": tc.url, "status": tc.status or "active"}
+                target = {"id": tc.id, "title": tc.title, "reference": tc.reference, "url": tc.url, "status": tc.status or "active", "date": tc.date.strftime("%Y-%m-%d") if tc.date else None}
         return {
             "type": r.type,
             "source_id": r.source_id,

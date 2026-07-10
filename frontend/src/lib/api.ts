@@ -113,6 +113,7 @@ export interface CircularRelationshipTarget {
   reference?: string | null
   url?: string | null
   status?: string | null
+  date?: string | null
 }
 
 export interface CircularRelationship {

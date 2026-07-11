@@ -86,7 +86,7 @@ class TestResolveChain:
         chain = resolve_chain(db, "newer")
         assert [item.id for item in chain] == ["older", "newer"]
 
-    def test_multi_target_amendments_form_one_chain(self, db_factory):
+    def test_multi_target_amender_sees_all_its_targets(self, db_factory):
         db = db_factory()
         a = make_circular("a", date=datetime(2024, 1, 1))
         b = make_circular("b", date=datetime(2024, 2, 1))
@@ -95,7 +95,20 @@ class TestResolveChain:
         db.add(amends("c", "a"))
         db.add(amends("c", "b"))
         db.commit()
-        assert [item.id for item in resolve_chain(db, "a")] == ["a", "b", "c"]
+        assert [item.id for item in resolve_chain(db, "c")] == ["a", "b", "c"]
+
+    def test_sibling_rulebooks_sharing_an_amender_stay_separate(self, db_factory):
+        """From a base circular, a shared amender's OTHER targets don't join."""
+        db = db_factory()
+        a = make_circular("a", date=datetime(2024, 1, 1))
+        b = make_circular("b", date=datetime(2024, 2, 1))
+        c = make_circular("c", date=datetime(2024, 3, 1))
+        db.add_all([a, b, c])
+        db.add(amends("c", "a"))
+        db.add(amends("c", "b"))
+        db.commit()
+        assert [item.id for item in resolve_chain(db, "a")] == ["a", "c"]
+        assert [item.id for item in resolve_chain(db, "b")] == ["b", "c"]
 
     def test_adds_to_relationships_are_chain_members(self, db_factory):
         db = db_factory()

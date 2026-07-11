@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Button from 'primevue/button'
 import Message from 'primevue/message'
 import ProgressSpinner from 'primevue/progressspinner'
@@ -31,6 +31,25 @@ const chainById = computed(() => {
 })
 
 const consolidation = computed(() => payload.value?.consolidation ?? null)
+
+const timelineEl = ref<HTMLElement | null>(null)
+const chainExpanded = ref(false)
+const chainCount = computed(() => payload.value?.chain?.length ?? 0)
+
+/** Bring the current circular's chip into view within the scrollable strip. */
+function scrollCurrentIntoView() {
+  const el = timelineEl.value?.querySelector<HTMLElement>('.chain-chip.current')
+  el?.scrollIntoView({ inline: 'center', block: 'nearest' })
+}
+
+watch(
+  () => [payload.value?.available, chainExpanded.value] as const,
+  () => {
+    if (payload.value?.available && !chainExpanded.value) {
+      void nextTick(scrollCurrentIntoView)
+    }
+  },
+)
 
 interface RequirementGroup {
   section: string
@@ -169,21 +188,41 @@ onBeforeUnmount(stopPolling)
       </Message>
 
       <template v-else>
-        <div class="chain-timeline" role="list" aria-label="Amendment chain">
-          <template v-for="(member, index) in payload.chain" :key="member.id">
-            <i v-if="index > 0" class="pi pi-arrow-right chain-arrow" aria-hidden="true" />
+        <div class="chain-section">
+          <div class="chain-heading">
+            <span class="chain-count">{{ chainCount }} circulars in this chain</span>
             <button
+              v-if="chainCount > 4"
               type="button"
-              class="chain-chip"
-              :class="{ current: member.id === props.circularId }"
-              role="listitem"
-              :title="member.title || undefined"
-              @click="emit('navigate', member.id)"
+              class="chain-toggle"
+              @click="chainExpanded = !chainExpanded"
             >
-              <span class="chain-chip-ref">{{ member.reference || member.title }}</span>
-              <span v-if="member.date" class="chain-chip-date">{{ formatDate(member.date) }}</span>
+              <i :class="chainExpanded ? 'pi pi-minus' : 'pi pi-th-large'" />
+              {{ chainExpanded ? 'Collapse' : 'Show all' }}
             </button>
-          </template>
+          </div>
+          <div
+            ref="timelineEl"
+            class="chain-timeline"
+            :class="{ expanded: chainExpanded }"
+            role="list"
+            aria-label="Amendment chain"
+          >
+            <template v-for="(member, index) in payload.chain" :key="member.id">
+              <i v-if="index > 0" class="pi pi-arrow-right chain-arrow" aria-hidden="true" />
+              <button
+                type="button"
+                class="chain-chip"
+                :class="{ current: member.id === props.circularId }"
+                role="listitem"
+                :title="member.title || undefined"
+                @click="emit('navigate', member.id)"
+              >
+                <span class="chain-chip-ref">{{ member.reference || member.title }}</span>
+                <span v-if="member.date" class="chain-chip-date">{{ formatDate(member.date) }}</span>
+              </button>
+            </template>
+          </div>
         </div>
 
         <Message v-if="payload.has_attachments" severity="warn" :closable="false">
@@ -332,19 +371,86 @@ onBeforeUnmount(stopPolling)
   font-size: 1.4rem;
 }
 
+.chain-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.chain-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.chain-count {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--p-text-muted-color, #6b7280);
+}
+
+.chain-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--p-content-border-color, #e5e7eb);
+  border-radius: 999px;
+  background: transparent;
+  font: inherit;
+  font-size: 0.68rem;
+  color: var(--p-text-muted-color, #6b7280);
+  cursor: pointer;
+}
+
+.chain-toggle:hover {
+  border-color: var(--p-primary-color, #14532d);
+  color: var(--p-primary-color, #14532d);
+}
+
 .chain-timeline {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 0.35rem;
+  overflow-x: auto;
+  padding-bottom: 0.35rem;
+  scroll-padding-inline: 1.5rem;
+  /* Fade the edges to hint that the strip scrolls horizontally. */
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    #000 1.5rem,
+    #000 calc(100% - 1.5rem),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    #000 1.5rem,
+    #000 calc(100% - 1.5rem),
+    transparent 100%
+  );
+}
+
+.chain-timeline.expanded {
+  flex-wrap: wrap;
+  overflow-x: visible;
+  -webkit-mask-image: none;
+  mask-image: none;
 }
 
 .chain-arrow {
+  flex: 0 0 auto;
   font-size: 0.65rem;
   color: var(--p-text-muted-color, #9ca3af);
 }
 
 .chain-chip {
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   align-items: flex-start;

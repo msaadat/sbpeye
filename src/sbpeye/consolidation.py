@@ -1,10 +1,13 @@
 """Amendment-chain consolidation.
 
-A consolidation belongs to a *chain*: the base circular plus every circular
-that (transitively) amends it or adds to it. The chain is discovered
-deterministically from ``circular_relationships`` rows of type ``amends`` or
-``adds_to`` with a resolved target, then an AI pass extracts the base
-circular's requirements and folds each later circular into a running
+A consolidation belongs to a *chain*: a circular's amendment lineage,
+discovered deterministically from ``circular_relationships`` rows of type
+``amends`` or ``adds_to`` with a resolved target. The lineage is directional:
+first the ancestors (everything the circular transitively amends — the base
+rules), then every circular that transitively amends or adds to any of those.
+An amender's *other* targets are never pulled in, so two rulebooks that merely
+share an amending circular stay separate chains. An AI pass then extracts the
+base circular's requirements and folds each later circular into a running
 consolidated state. The result is one merged requirement list
 where every item carries provenance: which circular introduced it, and — when
 later modified — the previous value and the amending circular that changed it.
@@ -18,43 +21,56 @@ import json
 import re
 from datetime import datetime
 
-from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from .models import Circular, CircularConsolidation, CircularRelationship
 
 # Chains beyond this size are almost certainly a relationship-extraction error
 # (or a hub circular), and each member costs an alignment call — refuse them.
-CHAIN_MAX_MEMBERS = 25
+CHAIN_MAX_MEMBERS = 50
 CHAIN_RELATIONSHIP_TYPES = ("amends", "adds_to")
 
 
-def resolve_chain(db: Session, circular_id: str) -> list[Circular]:
-    """All circulars connected through ``amends`` or ``adds_to`` edges.
+def _closure(db: Session, seen: set[str], forward: bool) -> set[str]:
+    """Expand ``seen`` along ``amends``/``adds_to`` edges in one direction.
 
-    Reachability is undirected so any member of the chain resolves to the same
-    set. Returns members ordered oldest-first (the first element is the base
-    circular and defines the chain id); a list of fewer than two members means
-    the circular is not part of an amendment chain.
+    ``forward=False`` follows source→target (what the members amend);
+    ``forward=True`` follows target→source (what amends the members).
     """
-    seen: set[str] = {circular_id}
-    frontier: list[str] = [circular_id]
+    frontier = list(seen)
     while frontier and len(seen) <= CHAIN_MAX_MEMBERS:
+        column = (
+            CircularRelationship.target_id if forward
+            else CircularRelationship.source_id
+        )
         rows = db.query(CircularRelationship).filter(
             CircularRelationship.type.in_(CHAIN_RELATIONSHIP_TYPES),
             CircularRelationship.target_id.isnot(None),
-            or_(
-                CircularRelationship.source_id.in_(frontier),
-                CircularRelationship.target_id.in_(frontier),
-            ),
+            column.in_(frontier),
         ).all()
         next_frontier: list[str] = []
         for row in rows:
-            for member_id in (row.source_id, row.target_id):
-                if member_id and member_id not in seen:
-                    seen.add(member_id)
-                    next_frontier.append(member_id)
+            member_id = row.source_id if forward else row.target_id
+            if member_id and member_id not in seen:
+                seen.add(member_id)
+                next_frontier.append(member_id)
         frontier = next_frontier
+    return seen
+
+
+def resolve_chain(db: Session, circular_id: str) -> list[Circular]:
+    """The circular's amendment lineage along ``amends``/``adds_to`` edges.
+
+    Walks backwards first (everything the circular transitively amends), then
+    forwards from that set (everything that transitively amends or adds to a
+    member). Sideways hops are excluded: an amender's other targets do not
+    join, so rulebooks that share an amending circular remain separate chains.
+    Returns members ordered oldest-first (the first element is the base
+    circular and defines the chain id); a list of fewer than two members means
+    the circular is not part of an amendment chain.
+    """
+    seen = _closure(db, {circular_id}, forward=False)
+    seen = _closure(db, seen, forward=True)
 
     members = db.query(Circular).filter(Circular.id.in_(seen)).all()
     members.sort(key=lambda item: (item.date or datetime.min, item.id))

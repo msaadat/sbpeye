@@ -707,6 +707,10 @@ _DEFAULT_CONTEXT_WINDOW = 8_192
 _CONTEXT_INPUT_FRACTION = 0.6
 # Structured-output capability tiers, strongest first.
 _STRUCTURED_MODES = ("json_schema", "json_object", "text")
+# Relationship extraction reads the whole cover letter: supersession clauses often sit
+# at the very end, past the default max_context_tokens clip. 24k chars covers the
+# longest cover letter observed in the DB while still bounding pathological inputs.
+RELATIONSHIP_CONTEXT_CHARS = 24_000
 
 
 def _status_code(exc: Exception) -> int | None:
@@ -1036,9 +1040,10 @@ class AIClient:
             {"role": "user", "content": "\n\n".join(synthesis_context)},
         ]
 
-    def _truncate_context(self, content_text: str) -> str:
+    def _truncate_context(self, content_text: str, limit: int | None = None) -> str:
         """Clip document text to the configured context budget before prompting."""
-        limit = self.config.max_context_tokens
+        if limit is None:
+            limit = self.config.max_context_tokens
         return content_text[:limit] if len(content_text) > limit else content_text
 
     def summarize(self, title: str, content_text: str) -> str:
@@ -1906,9 +1911,20 @@ SOURCE BLOCK:
             "instructions stand withdrawn', 'consolidated the existing instructions on the subject'). In that "
             "case set 'supersedes_all_previous' to true and set 'subject' to a short noun phrase naming that "
             "subject (e.g. 'Cash Reserve Requirement'). If there is no such blanket clause, set "
-            "'supersedes_all_previous' to false and 'subject' to an empty string."
+            "'supersedes_all_previous' to false and 'subject' to an empty string.\n"
+            "Also detect ATTACHMENT LISTS: when the circular states that the withdrawn/superseded/cancelled "
+            "circulars are LISTED in an attached annexure, appendix, or enclosure rather than named in the "
+            "text (e.g. 'the circulars listed at Annexure-A stand withdrawn/superseded'). In that case set "
+            "'references_attachment_list' to true, set 'attachment_list_label' to the label as written "
+            "(e.g. 'Annexure-A'), and set 'attachment_list_action' to 'supersedes' (consolidation or "
+            "withdrawn/superseded wording) or 'cancels' (pure cancellation/withdrawal without replacement). "
+            "If there is no such attachment list, set 'references_attachment_list' to false, "
+            "'attachment_list_label' to an empty string, and 'attachment_list_action' to 'supersedes'."
         )
-        truncated = self._truncate_context(content_text)
+        truncated = self._truncate_context(
+            content_text,
+            limit=max(self.config.max_context_tokens, RELATIONSHIP_CONTEXT_CHARS),
+        )
         user = f"Title: {title}\nReference: {reference}\n\nContent:\n{truncated}"
         relationship_properties = {
             key: {"type": "array", "items": {"type": "string"}}
@@ -1916,6 +1932,12 @@ SOURCE BLOCK:
         }
         relationship_properties["supersedes_all_previous"] = {"type": "boolean"}
         relationship_properties["subject"] = {"type": "string"}
+        relationship_properties["references_attachment_list"] = {"type": "boolean"}
+        relationship_properties["attachment_list_label"] = {"type": "string"}
+        relationship_properties["attachment_list_action"] = {
+            "type": "string",
+            "enum": ["supersedes", "cancels"],
+        }
         result = self._complete(
             system,
             user,
@@ -1942,6 +1964,11 @@ SOURCE BLOCK:
         relationships["supersedes_all_previous"] = bool(parsed.get("supersedes_all_previous", False))
         subject = parsed.get("subject", "")
         relationships["subject"] = subject.strip() if isinstance(subject, str) else ""
+        relationships["references_attachment_list"] = bool(parsed.get("references_attachment_list", False))
+        label = parsed.get("attachment_list_label", "")
+        relationships["attachment_list_label"] = label.strip() if isinstance(label, str) else ""
+        action = parsed.get("attachment_list_action", "supersedes")
+        relationships["attachment_list_action"] = action if action in ("supersedes", "cancels") else "supersedes"
         return relationships
 
     def select_superseded(

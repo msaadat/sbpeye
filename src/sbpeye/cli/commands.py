@@ -12,7 +12,7 @@ from sbpeye.database import PROJECT_ROOT, engine, Base, SessionLocal
 from sbpeye.models import Attachment, CachedDocument, Circular, CircularEntity, CircularRelationship
 from sbpeye.ai import get_ai_client, is_rate_limit_error
 from sbpeye.link_routing import resolve_reference_in_context
-from sbpeye.supersession import apply_blanket_supersession
+from sbpeye.supersession import apply_annexure_supersession, apply_blanket_supersession
 
 
 @click.group()
@@ -574,6 +574,9 @@ def graph(circular_id, depth, limit, refresh, verbose, delay):
 
                     for target in apply_blanket_supersession(db, client, circular, rels):
                         new_rels.append(("supersedes", "(all previous on subject)", target))
+
+                    for rel in apply_annexure_supersession(db, circular, rels):
+                        new_rels.append((rel.type, rel.target_reference, rel.target))
 
                     circular.relationships_generated_at = datetime.utcnow()
                     db.commit()
@@ -1275,6 +1278,7 @@ def _run_relationships(db, client, url, dept, year, limit, refresh, verbose, del
                 all_rels.append(rel)
 
         all_rels.extend(apply_blanket_supersession(db, client, c, rels))
+        all_rels.extend(apply_annexure_supersession(db, c, rels))
 
         c.relationships_generated_at = datetime.utcnow()
         return _BatchOutcome(detail=f"{len(all_rels)} relationships", count=len(all_rels))

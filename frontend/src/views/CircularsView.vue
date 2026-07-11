@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useConfirm } from 'primevue/useconfirm'
 import { useToast } from 'primevue/usetoast'
@@ -58,6 +58,7 @@ const errorMessage = ref('')
 const totalRecords = ref(0)
 const page = ref(1)
 const perPage = ref(20)
+const resultsListRef = ref<HTMLElement | null>(null)
 
 const query = ref('')
 const department = ref<string | null>(null)
@@ -150,6 +151,11 @@ function routeQuery(): Record<string, string> {
   if (page.value > 1) result.page = String(page.value)
   if (perPage.value !== 20) result.per_page = String(perPage.value)
   return result
+}
+
+async function scrollResultsToTop() {
+  await nextTick()
+  resultsListRef.value?.scrollTo({ top: 0 })
 }
 
 async function syncRoute() {
@@ -258,7 +264,7 @@ async function loadOptions() {
   } finally { optionsLoading.value = false }
 }
 
-async function loadCirculars(resetPage = false) {
+async function loadCirculars(resetPage = false, scrollToTop = false) {
   if (resetPage) page.value = 1
   searchController?.abort()
   const controller = new AbortController()
@@ -273,6 +279,7 @@ async function loadCirculars(resetPage = false) {
     totalRecords.value = response.total
     page.value = response.page
     perPage.value = response.per_page
+    if (scrollToTop) await scrollResultsToTop()
     await syncRoute()
     await saveActiveWorkspaceState()
   } catch (error) {
@@ -329,7 +336,7 @@ function cancelCreateWorkspace() {
 async function openWorkspaceTab(workspaceId: string) {
   if (workspaceId === activeWorkspaceId.value || workspacesLoading.value) return
   await activateWorkspace(workspaceId, true)
-  await loadCirculars()
+  await loadCirculars(false, true)
 }
 
 function confirmDeleteWorkspace() {
@@ -356,7 +363,7 @@ async function removeWorkspace(workspaceId: string) {
       if (fallbackId) {
         localStorage.setItem('sbpeye-active-workspace', fallbackId)
         await activateWorkspace(fallbackId, true)
-        await loadCirculars()
+        await loadCirculars(false, true)
       } else {
         localStorage.removeItem('sbpeye-active-workspace')
         await syncRoute()
@@ -397,7 +404,7 @@ function clearFilters() {
   startYear.value = null
   endYear.value = null
   sortBy.value = 'relevance'
-  void loadCirculars(true)
+  void loadCirculars(true, true)
 }
 
 function togglePageSelection() {
@@ -449,10 +456,15 @@ function handoffWorkspaceToChat() {
 
 function changePage(offset: number) {
   page.value = Math.min(totalPages.value, Math.max(1, page.value + offset))
-  void loadCirculars()
+  void loadCirculars(false, true)
 }
 
 watch(perPage, () => { if (!loading.value) void loadCirculars(true) })
+watch(activeWorkspaceId, (nextWorkspaceId, previousWorkspaceId) => {
+  if (nextWorkspaceId && previousWorkspaceId && nextWorkspaceId !== previousWorkspaceId) {
+    void scrollResultsToTop()
+  }
+})
 
 onMounted(async () => {
   readRouteFilters()
@@ -632,7 +644,7 @@ onBeforeUnmount(() => searchController?.abort())
     >
       <main class="circular-results-pane glass-panel">
         <Message v-if="errorMessage" severity="error" :closable="false">{{ errorMessage }}</Message>
-        <div class="circular-result-list" :class="{ loading }">
+        <div ref="resultsListRef" class="circular-result-list" :class="{ loading }">
           <section v-if="pinnedCirculars.length" class="pinned-results-section" aria-label="Pinned circulars">
 
             <button

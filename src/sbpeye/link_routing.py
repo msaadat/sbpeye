@@ -40,7 +40,7 @@ _full_name_alts = "|".join(
     re.escape(k) for k in sorted(_DEPT_FULL_NAME_TO_ABBR, key=len, reverse=True)
 )
 CIRCULAR_REFERENCE_RE = re.compile(
-    rf"\b(?P<prefix>{_full_name_alts}|[A-Z][A-Z&]{{1,12}})\s+Circular"
+    rf"\b(?P<prefix>{_full_name_alts}|[A-Z][A-Z&]{{1,12}}(?:\s?&\s?[A-Z]{{2,12}})?)\s+Circular"
     r"(?P<letter>\s+Letter)?\s+(?:No\.?\s*)?"
     r"(?P<number>\d{1,3})"
     r"(?P<more>(?:\s*,\s*\d{1,3}|\s+and\s+\d{1,3})*)"
@@ -50,7 +50,9 @@ CIRCULAR_REFERENCE_RE = re.compile(
 
 
 def _normalize_prefix(prefix: str) -> str:
-    return _DEPT_FULL_NAME_TO_ABBR.get(prefix.lower(), prefix.upper())
+    # "BC & CPD" and "BC&CPD" appear interchangeably across the site and annexures.
+    collapsed = re.sub(r"\s*&\s*", "&", prefix)
+    return _DEPT_FULL_NAME_TO_ABBR.get(collapsed.lower(), collapsed.upper())
 DATED_YEAR_RE = re.compile(
     r"\bdated\s+"
     r"(?:[A-Z][a-z]+\s+\d{1,2}(?:st|nd|rd|th)?,?\s+|\d{1,2}(?:st|nd|rd|th)?\s+[A-Z][a-z]+,?\s+)"
@@ -141,10 +143,13 @@ def _resolve_circular_reference_from_parts(
     current: Circular,
     db: Session,
 ) -> Circular | None:
+    # The DB may store "BC & CPD" where the normalized prefix is "BC&CPD"; let the
+    # SQL prefilter match either spacing — the exact parts comparison below keeps precision.
+    prefix_pattern = parts["prefix"].replace("&", "%&%")
     query = db.query(Circular).filter(
         or_(
-            Circular.reference.ilike(f"{parts['prefix']}%Circular%"),
-            Circular.title.ilike(f"{parts['prefix']}%Circular%"),
+            Circular.reference.ilike(f"{prefix_pattern}%Circular%"),
+            Circular.title.ilike(f"{prefix_pattern}%Circular%"),
         )
     )
     if parts["year"]:
@@ -176,6 +181,13 @@ def _resolve_circular_reference_from_parts(
     if len(matches) == 1:
         return matches[0]
     return None
+
+
+def resolve_reference_parts(parts: dict, current: Circular, db: Session) -> Circular | None:
+    """Resolve an already-parsed reference (e.g. a CircularReference from
+    ``iter_circular_references``) to a stored circular. Public entry point for callers
+    that harvest references in bulk, such as annexure withdrawal lists."""
+    return _resolve_circular_reference_from_parts(parts, current, db)
 
 
 def _resolve_circular_reference(

@@ -149,6 +149,8 @@ def _persist_outputs(db: Session, circular: Circular, outputs: dict, client=None
         if client is not None:
             from .supersession import apply_blanket_supersession
             apply_blanket_supersession(db, client, circular, relationships)
+        from .supersession import apply_annexure_supersession
+        apply_annexure_supersession(db, circular, relationships)
         circular.relationships_generated_at = generated_at
         db.flush()
         _recompute_statuses(db)

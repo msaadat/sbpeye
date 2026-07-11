@@ -7,6 +7,7 @@ from sqlalchemy.orm import sessionmaker
 
 from sbpeye.database import Base
 from sbpeye.link_routing import (
+    normalize_reference,
     normalize_sbp_url,
     resolve_reference_in_context,
     rewrite_document_links,
@@ -143,6 +144,55 @@ def test_grouped_references_link_each_number_with_year_inference():
     # The grouped numbers are linked as bare numbers; surrounding text is preserved.
     assert [a.string for a in links] == ["DMMD Circular no. 20", "21", "22"]
     assert "DMMD Circular no. 20, 21 and 22 dated November 03, 2011" in soup.get_text()
+
+
+def test_reference_with_of_month_date_links_to_matching_year():
+    db = make_session()
+    source = Circular(
+        id="source",
+        title="BPRD Circular Letter No. 17 of 2025",
+        department="BPRD",
+        date=datetime(2025, 7, 22),
+        url="https://www.sbp.org.pk/source.htm",
+        reference="BPRD Circular Letter No. 17 of 2025",
+        content_text=(
+            "Please refer to BPRD Circular No. 01 of April 08, 2024 on the captioned subject."
+        ),
+    )
+    db.add_all([
+        source,
+        Circular(
+            id="bprd-01-2023",
+            title="Older framework",
+            department="BPRD",
+            date=datetime(2023, 1, 1),
+            url="https://www.sbp.org.pk/bprd/2023/old.htm",
+            reference="BPRD Circular No. 01 of 2023",
+            content_text="Body",
+        ),
+        Circular(
+            id="bprd-01-2024",
+            title="BISP Sahulat Account",
+            department="BPRD",
+            date=datetime(2024, 4, 8),
+            url="https://www.sbp.org.pk/bprd/2024/new.htm",
+            reference="BPRD Circular No. 01 of 2024",
+            content_text="Body",
+        ),
+    ])
+    db.commit()
+
+    result = rewrite_document_links(f"<p>{source.content_text}</p>", source, db)
+    soup = BeautifulSoup(result, "html.parser")
+    link = soup.find("a")
+
+    assert normalize_reference("BPRD Circular No. 01 of April 08, 2024") == (
+        "BPRD CIRCULAR NO 1 OF 2024"
+    )
+    assert link is not None
+    assert link["href"] == "/circulars/bprd-01-2024"
+    assert "document-pill" in link.get("class", [])
+    assert soup.get_text() == source.content_text
 
 
 def test_resolve_reference_in_context_uses_content_year():

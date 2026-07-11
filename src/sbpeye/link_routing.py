@@ -53,8 +53,8 @@ def _normalize_prefix(prefix: str) -> str:
     # "BC & CPD" and "BC&CPD" appear interchangeably across the site and annexures.
     collapsed = re.sub(r"\s*&\s*", "&", prefix)
     return _DEPT_FULL_NAME_TO_ABBR.get(collapsed.lower(), collapsed.upper())
-DATED_YEAR_RE = re.compile(
-    r"\bdated\s+"
+REFERENCE_DATE_YEAR_RE = re.compile(
+    r"\b(?:dated|of)\s+"
     r"(?:[A-Z][a-z]+\s+\d{1,2}(?:st|nd|rd|th)?,?\s+|\d{1,2}(?:st|nd|rd|th)?\s+[A-Z][a-z]+,?\s+)"
     r"(?P<year>(?:19|20)\d{2})\b",
     re.IGNORECASE,
@@ -92,6 +92,11 @@ def attachment_info(url: str) -> dict:
     return {"url": url, "filename": path.name or f"document{extension}", "file_type": extension.lstrip(".")}
 
 
+def _nearby_reference_year(text: str, start: int) -> int | None:
+    match = REFERENCE_DATE_YEAR_RE.search(text[start:start + 90])
+    return int(match.group("year")) if match else None
+
+
 def _reference_parts(text: str | None, inferred_year: int | None = None) -> dict | None:
     if not text:
         return None
@@ -99,11 +104,12 @@ def _reference_parts(text: str | None, inferred_year: int | None = None) -> dict
     if not match:
         return None
     explicit_year = int(match.group("year")) if match.group("year") else None
+    nearby_year = _nearby_reference_year(text, match.end()) if explicit_year is None else None
     return {
         "prefix": _normalize_prefix(match.group("prefix")),
         "is_letter": bool(match.group("letter")),
         "number": int(match.group("number")),
-        "year": explicit_year or inferred_year,
+        "year": explicit_year or inferred_year or nearby_year,
     }
 
 
@@ -202,11 +208,6 @@ def _resolve_circular_reference(
     return _resolve_circular_reference_from_parts(parts, current, db)
 
 
-def _nearby_dated_year(text: str, start: int) -> int | None:
-    match = DATED_YEAR_RE.search(text[start:start + 90])
-    return int(match.group("year")) if match else None
-
-
 class CircularReference(NamedTuple):
     """A single circular number found in text, with its display span and inferred year.
 
@@ -245,7 +246,7 @@ def iter_circular_references(text: str):
         prefix = _normalize_prefix(match.group("prefix"))
         is_letter = bool(match.group("letter"))
         explicit_year = int(match.group("year")) if match.group("year") else None
-        year = explicit_year or _nearby_dated_year(text, match.end())
+        year = explicit_year or _nearby_reference_year(text, match.end())
         for index, (number, num_start, num_end) in enumerate(_grouped_numbers(match)):
             label_start = match.start() if index == 0 else num_start
             yield CircularReference(prefix, is_letter, number, year, label_start, num_end)

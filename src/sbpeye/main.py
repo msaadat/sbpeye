@@ -381,6 +381,16 @@ async def documents_spa_fallback(path: str):
     return spa_index_response()
 
 
+@app.get("/values")
+async def values_spa():
+    return spa_index_response()
+
+
+@app.get("/about.html")
+async def about_page():
+    return FileResponse(SPA_DIR / "about.html")
+
+
 
 ECODATA_CACHE_TTL_HOURS = 1
 

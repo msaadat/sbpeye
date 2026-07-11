@@ -349,6 +349,17 @@ onBeforeUnmount(() => {
 
         <SbpNewsPanel />
 
+        <a
+          class="sidebar-status"
+          href="/about.html"
+          target="_blank"
+          rel="noopener"
+          title="About SBPEye"
+          aria-label="About SBPEye"
+        >
+          <i class="pi pi-info-circle" />
+        </a>
+
         <Button
           text
           rounded

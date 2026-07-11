@@ -1,11 +1,44 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { VueFlow, Handle, Position, MarkerType, BaseEdge, type Node, type Edge } from '@vue-flow/core'
-import type { CircularDetail } from '@/lib/api'
+import { getCircularDetail, type CircularDetail } from '@/lib/api'
 import '@vue-flow/core/dist/style.css'
 
 const props = defineProps<{ circular: CircularDetail }>()
-const emit = defineEmits<{ navigate: [id: string] }>()
+const emit = defineEmits<{ navigate: [id: string]; focuschange: [label: string] }>()
+
+// the graph re-centers on whichever circular is focused; clicking a node pushes
+// onto this stack (traverse), the back button pops it. props.circular is the root.
+const focusStack = ref<CircularDetail[]>([props.circular])
+const source = computed(() => focusStack.value[focusStack.value.length - 1])
+const loading = ref(false)
+
+watch(() => props.circular, c => { focusStack.value = [c] })
+
+async function traverseTo(id: string) {
+  if (loading.value || id === source.value.id) return
+  loading.value = true
+  try {
+    const detail = await getCircularDetail(id)
+    focusStack.value = [...focusStack.value, detail]
+    emit('focuschange', detail.reference || detail.title)
+  } catch {
+    emit('navigate', id)
+  } finally {
+    loading.value = false
+  }
+}
+
+function goBack() {
+  if (focusStack.value.length <= 1) return
+  focusStack.value = focusStack.value.slice(0, -1)
+  const s = source.value
+  emit('focuschange', s.reference || s.title)
+}
+
+function openCircular(id: string) {
+  emit('navigate', id)
+}
 
 const NODE_W = 210
 const COL_PITCH = 300
@@ -66,7 +99,7 @@ function parseNodeDate(dateStr: string | null | undefined, reference: string): {
 }
 
 const relatedEntries = computed<TimelineEntry[]>(() => {
-  const c = props.circular
+  const c = source.value
   const map = new Map<string, TimelineEntry>()
 
   function upsert(other: { id?: string; reference?: string | null; title?: string | null; status?: string | null; date?: string | null } | null | undefined, otherId: string | null | undefined, fallbackRef: string | null | undefined, type: string, dir: 'out' | 'in') {
@@ -98,7 +131,7 @@ const relatedEntries = computed<TimelineEntry[]>(() => {
 })
 
 const layout = computed(() => {
-  const c = props.circular
+  const c = source.value
   const currentRef = c.reference || c.title
   const current: TimelineEntry = {
     key: '__current__',
@@ -227,14 +260,19 @@ function statusColor(status: string | null): string {
 function onNodeClick({ node }: { node: Node<NodeData> }) {
   const data = node.data
   if (data?.circularId && !data.isCurrent) {
-    emit('navigate', data.circularId)
+    traverseTo(data.circularId)
   }
 }
 </script>
 
 <template>
   <div class="cg-root">
+    <button v-if="focusStack.length > 1" class="cg-back" @click="goBack">
+      <i class="pi pi-arrow-left" style="font-size:0.72rem" /> Back
+    </button>
+    <div v-if="loading" class="cg-loading"><i class="pi pi-spinner pi-spin" /></div>
     <VueFlow
+      :key="source.id"
       :nodes="graphNodes"
       :edges="graphEdges"
       :nodes-draggable="false"
@@ -253,6 +291,13 @@ function onNodeClick({ node }: { node: Node<NodeData> }) {
         <div class="cg-node cg-node--current">
           <Handle id="top-s" type="source" :position="Position.Top" class="cg-handle" />
           <Handle id="top-t" type="target" :position="Position.Top" class="cg-handle" />
+          <button
+            v-if="data.circularId"
+            class="cg-open-btn"
+            title="Open this circular"
+            aria-label="Open this circular"
+            @click.stop="openCircular(data.circularId)"
+          ><i class="pi pi-external-link" /></button>
           <div class="cg-node-label">{{ data.label }}</div>
           <div class="cg-node-meta">
             <span v-if="data.dateLabel" class="cg-node-date">{{ data.dateLabel }}</span>
@@ -270,6 +315,13 @@ function onNodeClick({ node }: { node: Node<NodeData> }) {
         >
           <Handle id="top-s" type="source" :position="Position.Top" class="cg-handle" />
           <Handle id="top-t" type="target" :position="Position.Top" class="cg-handle" />
+          <button
+            v-if="data.resolved && data.circularId"
+            class="cg-open-btn"
+            title="Open this circular"
+            aria-label="Open this circular"
+            @click.stop="openCircular(data.circularId)"
+          ><i class="pi pi-external-link" /></button>
           <div class="cg-node-label">{{ data.label }}</div>
           <div class="cg-node-meta">
             <span v-if="data.dateLabel" class="cg-node-date">{{ data.dateLabel }}</span>
@@ -284,7 +336,7 @@ function onNodeClick({ node }: { node: Node<NodeData> }) {
         <span class="cg-legend-dot" :style="{ background: item.color }" /> {{ item.label }}
       </span>
       <span class="cg-legend-item cg-legend-muted">Oldest <i class="pi pi-arrow-right" style="font-size:0.6rem" /> newest</span>
-      <span class="cg-legend-item cg-legend-muted"><i class="pi pi-arrows-h" style="font-size:0.7rem"/> Pan &nbsp;·&nbsp; <i class="pi pi-search-plus" style="font-size:0.7rem" /> Scroll to zoom</span>
+      <span class="cg-legend-item cg-legend-muted">Click to explore &nbsp;·&nbsp; <i class="pi pi-external-link" style="font-size:0.68rem" /> to open</span>
     </div>
   </div>
 </template>
@@ -320,6 +372,7 @@ function onNodeClick({ node }: { node: Node<NodeData> }) {
 }
 
 .cg-node {
+  position: relative;
   width: 210px;
   padding: 10px 14px;
   border-radius: 8px;
@@ -327,6 +380,35 @@ function onNodeClick({ node }: { node: Node<NodeData> }) {
   background: var(--sbp-surface);
   font-family: inherit;
   transition: border-color 0.15s, background 0.15s;
+}
+
+.cg-open-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid var(--sbp-border);
+  background: var(--sbp-surface);
+  color: var(--sbp-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s, border-color 0.15s;
+  font-size: 0.68rem;
+}
+
+.cg-node:hover .cg-open-btn {
+  opacity: 1;
+}
+
+.cg-open-btn:hover {
+  color: var(--sbp-green);
+  border-color: var(--sbp-green);
 }
 
 .cg-node--current {
@@ -378,6 +460,40 @@ function onNodeClick({ node }: { node: Node<NodeData> }) {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.03em;
+}
+
+.cg-back {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--sbp-surface);
+  border: 1px solid var(--sbp-border);
+  color: var(--sbp-text);
+  font-size: 0.72rem;
+  font-family: inherit;
+  cursor: pointer;
+  box-shadow: var(--sbp-shadow-sm);
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.cg-back:hover {
+  border-color: var(--sbp-green);
+  color: var(--sbp-green);
+}
+
+.cg-loading {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 5;
+  color: var(--sbp-green);
+  font-size: 1rem;
 }
 
 .cg-legend {

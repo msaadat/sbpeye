@@ -60,6 +60,11 @@ const summaryExpanded = ref(false)
 const generationPopover = ref<InstanceType<typeof Popover> | null>(null)
 const activeJob = ref<AIGenerationJob | null>(null)
 const graphVisible = ref(false)
+const graphFocusLabel = ref<string | null>(null)
+watch(graphVisible, visible => { if (visible) graphFocusLabel.value = null })
+const graphHeader = computed(
+  () => `Related — ${graphFocusLabel.value || circular.value?.reference || circular.value?.title || ''}`,
+)
 const detailTab = ref<'document' | 'details'>('document')
 const detailRail = useResizablePane('sbp:detailRailWidth', 336, 240, 480, { reverse: true })
 let pollTimer: ReturnType<typeof setTimeout> | null = null
@@ -749,13 +754,13 @@ onBeforeUnmount(stopPolling)
     <Dialog
       v-if="circular"
       v-model:visible="graphVisible"
-      :header="`Related — ${circular.reference || circular.title}`"
+      :header="graphHeader"
       modal
       :style="{ width: '90vw', maxWidth: '1100px', height: '75vh' }"
       :content-style="{ height: 'calc(75vh - 60px)', padding: 0 }"
       :draggable="false"
     >
-      <CircularGraph :circular="circular" @navigate="navigateFromGraph" />
+      <CircularGraph :circular="circular" @navigate="navigateFromGraph" @focuschange="graphFocusLabel = $event" />
     </Dialog>
   </aside>
 </template>

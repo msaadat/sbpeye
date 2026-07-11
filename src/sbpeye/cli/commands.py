@@ -442,6 +442,92 @@ def entities(circular_id, dept, year, limit, refresh, verbose, delay):
         db.close()
 
 
+@circulars.command()
+@click.argument("circular_id", required=False)
+@click.option("--limit", "-l", type=int, default=0, help="Max chains to process (0=unlimited)")
+@click.option("--force", is_flag=True, help="Regenerate chains that already have a fresh consolidation")
+@click.option("--verbose", "-v", is_flag=True, help="Print chain members and per-chain progress")
+@click.option("--delay", type=float, default=1.0, help="Delay between chains in seconds")
+def consolidate(circular_id, limit, force, verbose, delay):
+    """Consolidate amendment chains into merged requirement views.
+
+    With CIRCULAR_ID, consolidates that circular's chain. Without it, processes
+    every resolved amendment chain that has no consolidation yet or whose
+    consolidation is stale; use --force to also regenerate fresh ones.
+    """
+    from sbpeye.consolidation import (
+        CHAIN_RELATIONSHIP_TYPES,
+        generate_consolidation,
+        resolve_chain,
+    )
+    from sbpeye.models import CircularConsolidation
+
+    db = SessionLocal()
+    try:
+        client = get_ai_client(db)
+        if circular_id:
+            seed = db.get(Circular, circular_id)
+            if not seed:
+                raise click.ClickException(f"Circular not found: {circular_id}")
+            seeds = [seed]
+        else:
+            member_ids = set()
+            for rel in db.query(CircularRelationship).filter(
+                CircularRelationship.type.in_(CHAIN_RELATIONSHIP_TYPES),
+                CircularRelationship.target_id.isnot(None),
+            ):
+                member_ids.add(rel.source_id)
+                member_ids.add(rel.target_id)
+            seeds = db.query(Circular).filter(Circular.id.in_(member_ids)).all()
+
+        processed_chains: set[str] = set()
+        generated = skipped = failed = 0
+        for seed in seeds:
+            members = resolve_chain(db, seed.id)
+            if len(members) < 2:
+                continue
+            base_id = members[0].id
+            if base_id in processed_chains:
+                continue
+            processed_chains.add(base_id)
+            if limit and generated + failed >= limit:
+                break
+
+            existing = db.get(CircularConsolidation, base_id)
+            current_ids = json.dumps([item.id for item in members])
+            fresh = (
+                existing is not None
+                and not existing.stale
+                and existing.member_ids == current_ids
+            )
+            if fresh and not force and not circular_id:
+                skipped += 1
+                continue
+
+            label = f"{members[0].display_name} … {members[-1].display_name} ({len(members)} circulars)"
+            if verbose:
+                click.echo(f"Consolidating chain: {label}")
+                for member in members:
+                    click.echo(f"  - {member.display_name} ({member.date:%Y-%m-%d})" if member.date else f"  - {member.display_name}")
+            try:
+                generate_consolidation(db, client, seed)
+                db.commit()
+                generated += 1
+                click.echo(f"  consolidated: {label}")
+            except Exception as exc:
+                db.rollback()
+                failed += 1
+                click.echo(f"  FAILED {label}: {exc}", err=True)
+                if is_rate_limit_error(exc):
+                    raise click.ClickException("Rate limited by the AI provider; stopping.") from exc
+            time.sleep(delay)
+        click.echo(
+            f"Done. {generated} chain(s) consolidated, {skipped} already fresh, {failed} failed."
+        )
+    finally:
+        db.close()
+
+
 @circulars.command("resolve-targets")
 @click.option("--verbose", "-v", is_flag=True, help="Print each resolved relationship")
 def resolve_targets(verbose):

@@ -1145,6 +1145,20 @@ async def get_circular_relationships(circular_id: str, db: Session = Depends(get
     }
 
 
+@app.get("/api/circulars/{circular_id}/consolidation")
+async def get_circular_consolidation(circular_id: str, db: Session = Depends(get_db)):
+    """The consolidated requirement view of the circular's amendment chain.
+
+    Shared by every chain member: any circular connected through resolved
+    `amends` relationships returns the same chain and stored consolidation."""
+    from .consolidation import consolidation_payload
+
+    circular = db.query(Circular).filter(Circular.id == circular_id).first()
+    if not circular:
+        return JSONResponse({"error": "Circular not found"}, status_code=404)
+    return consolidation_payload(db, circular)
+
+
 @app.get("/api/sbp_news")
 def get_sbp_news(db: Session = Depends(get_db)):
     try:

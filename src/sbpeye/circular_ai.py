@@ -11,7 +11,9 @@ from .models import AIGenerationJob, Circular, CircularEntity, CircularRelations
 
 
 GENERATION_FEATURES = ("summary", "tags", "checklist", "relationships", "entities")
-GENERATION_ACTIONS = (*GENERATION_FEATURES, "all")
+# Consolidation is a chain-level, multi-call operation, so it is a standalone
+# action rather than part of "all".
+GENERATION_ACTIONS = (*GENERATION_FEATURES, "consolidation", "all")
 
 
 def _resolve_reference(
@@ -154,6 +156,10 @@ def _persist_outputs(db: Session, circular: Circular, outputs: dict, client=None
         circular.relationships_generated_at = generated_at
         db.flush()
         _recompute_statuses(db)
+        # The amendment chain may have gained or lost a member; stored
+        # consolidations touching any affected circular need regeneration.
+        from .consolidation import mark_stale
+        mark_stale(db, {circular.id} | produced_target_ids)
     if "entities" in outputs:
         db.query(CircularEntity).filter(
             CircularEntity.circular_id == circular.id
@@ -189,13 +195,21 @@ def run_generation_job(job_id: str) -> None:
             job.progress_total = total
             db.commit()
 
-        outputs = _compute_outputs(
-            client,
-            circular,
-            job.feature,
-            progress_callback=update_progress,
-        )
-        _persist_outputs(db, circular, outputs, client=client)
+        if job.feature == "consolidation":
+            # Chain-level: computes and upserts its own row (consolidation.py).
+            from .consolidation import generate_consolidation
+            generate_consolidation(
+                db, client, circular, progress_callback=update_progress
+            )
+            outputs = {}
+        else:
+            outputs = _compute_outputs(
+                client,
+                circular,
+                job.feature,
+                progress_callback=update_progress,
+            )
+            _persist_outputs(db, circular, outputs, client=client)
         job.status = "succeeded"
         if "checklist" in outputs:
             job.result_status = outputs["checklist"].get("status")

@@ -112,6 +112,26 @@ class Attachment(Base):
     circular = relationship("Circular", back_populates="attachments")
 
 
+class CircularConsolidation(Base):
+    """The consolidated requirement state of an amendment chain.
+
+    One row per chain, keyed by the base (oldest) circular's id. `requirements`
+    holds the merged, provenance-tracked requirement list produced by folding
+    each amending circular into the base (see consolidation.py). `stale` is set
+    when a relationships pass touches a chain member, signalling that the
+    stored merge may no longer include the newest amendment."""
+
+    __tablename__ = "circular_consolidations"
+
+    chain_id = Column(String, ForeignKey("circulars.id"), primary_key=True)
+    member_ids = Column(Text, nullable=False)
+    as_of_circular_id = Column(String, ForeignKey("circulars.id"), nullable=False)
+    requirements = Column(Text, nullable=False)
+    model = Column(String, nullable=True)
+    stale = Column(Integer, nullable=False, default=0)
+    generated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class CachedDocument(Base):
     __tablename__ = "cached_documents"
 

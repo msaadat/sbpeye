@@ -1971,6 +1971,208 @@ SOURCE BLOCK:
         relationships["attachment_list_action"] = action if action in ("supersedes", "cancels") else "supersedes"
         return relationships
 
+    _REQUIREMENTS_SYSTEM_PROMPT = (
+        "You are a conservative SBP regulatory analyst. Extract the discrete "
+        "REQUIREMENTS this circular currently imposes, so they can later be "
+        "diffed against amending circulars.\n"
+        "A requirement is one self-contained obligation, prohibition, rate, "
+        "limit, procedure step, or condition. Keep each item atomic: one "
+        "requirement per changeable fact, so a later amendment to a single "
+        "rate or threshold maps to exactly one item.\n"
+        "EXCLUDE greetings, addresses, signature blocks, and narrative that "
+        "imposes nothing.\n"
+        "For each item output:\n"
+        "- requirement: one self-contained sentence stating the obligation, "
+        "preserving exact figures, rates, and dates as written.\n"
+        "- section: the heading or topic the item falls under, as written in "
+        "the circular (empty string if none).\n"
+        "- value: the single key figure the requirement pins down (e.g. "
+        "'11.00%', 'Rs. 5 million', '30 days'), exactly as written; empty "
+        "string when the requirement has no central figure.\n"
+        "- applies_to: who the item binds (e.g. 'All Commercial Banks'); "
+        "empty string if unspecified.\n"
+        "Return only a JSON object {\"items\": [...]}."
+    )
+
+    @staticmethod
+    def _requirements_schema() -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "requirement": {"type": "string"},
+                            "section": {"type": "string"},
+                            "value": {"type": "string"},
+                            "applies_to": {"type": "string"},
+                        },
+                        "required": ["requirement"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["items"],
+            "additionalProperties": False,
+        }
+
+    def _parse_requirement_items(self, result: str) -> list[dict[str, Any]]:
+        parsed = self._parse_json_object(result)
+        entries = parsed.get("items", parsed.get("requirements"))
+        if not isinstance(entries, list):
+            raise ValueError("The model returned a payload without an items array.")
+        cleaned: list[dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            requirement = re.sub(r"\s+", " ", str(entry.get("requirement") or "")).strip()
+            if len(requirement) < 8:
+                continue
+            cleaned.append({
+                "requirement": requirement,
+                "section": re.sub(r"\s+", " ", str(entry.get("section") or "")).strip(),
+                "value": re.sub(r"\s+", " ", str(entry.get("value") or "")).strip(),
+                "applies_to": re.sub(r"\s+", " ", str(entry.get("applies_to") or "")).strip(),
+            })
+        if not cleaned:
+            raise ValueError("The model returned no usable requirements.")
+        return cleaned
+
+    def extract_requirements(
+        self, title: str, reference: str, content_text: str
+    ) -> list[dict[str, Any]]:
+        """Extract the base circular's requirement list for chain consolidation."""
+        user = (
+            f"Circular: {reference or title}\nTitle: {title}\n\n"
+            f"CIRCULAR TEXT:\n{self._truncate_context(content_text)}"
+        )
+        schema = self._requirements_schema()
+        result = self._complete_json(
+            self._REQUIREMENTS_SYSTEM_PROMPT, user, json_schema=schema, temperature=0.0
+        )
+        try:
+            return self._parse_requirement_items(result)
+        except ValueError:
+            retry_system = (
+                self._REQUIREMENTS_SYSTEM_PROMPT
+                + "\n\nYour previous response was malformed. Return the "
+                "schema-compliant JSON object only."
+            )
+            return self._parse_requirement_items(
+                self._complete_json(retry_system, user, json_schema=schema, temperature=0.0)
+            )
+
+    _ALIGNMENT_SYSTEM_PROMPT = (
+        "You are a conservative SBP regulatory analyst consolidating an "
+        "amendment chain. You are given the CURRENT consolidated requirement "
+        "list (each item has a req_id) and the full text of an AMENDING "
+        "circular. Decide what the amendment changes.\n"
+        "Report ONLY the changes — do not restate unchanged requirements. "
+        "Amendments typically change a few figures and state that 'other "
+        "instructions remain unchanged'; take that literally.\n"
+        "Each change is one of:\n"
+        "- {\"action\": \"modify\", \"req_id\": \"...\", \"requirement\": "
+        "\"the full updated sentence\", \"value\": \"the new key figure as "
+        "written in the amending circular\"} — when an existing item's "
+        "figure, deadline, scope, or wording is changed. Preserve the exact "
+        "new figures from the amending text.\n"
+        "- {\"action\": \"add\", \"requirement\": \"...\", \"section\": "
+        "\"...\", \"value\": \"...\", \"applies_to\": \"...\"} — when the "
+        "amendment introduces a genuinely new requirement that matches no "
+        "existing req_id.\n"
+        "- {\"action\": \"remove\", \"req_id\": \"...\"} — when the "
+        "amendment withdraws or deletes an existing requirement.\n"
+        "Never invent figures: every value you output must appear verbatim "
+        "in the amending circular's text. If the amendment changes nothing "
+        "in the list, return an empty changes array.\n"
+        "Return only a JSON object {\"changes\": [...]}."
+    )
+
+    @staticmethod
+    def _alignment_schema() -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "changes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": ["modify", "add", "remove"],
+                            },
+                            "req_id": {"type": "string"},
+                            "requirement": {"type": "string"},
+                            "section": {"type": "string"},
+                            "value": {"type": "string"},
+                            "applies_to": {"type": "string"},
+                        },
+                        "required": ["action"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["changes"],
+            "additionalProperties": False,
+        }
+
+    def _parse_alignment_changes(self, result: str) -> list[dict[str, Any]]:
+        parsed = self._parse_json_object(result)
+        entries = parsed.get("changes", parsed.get("items"))
+        if not isinstance(entries, list):
+            raise ValueError("The model returned a payload without a changes array.")
+        cleaned: list[dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            action = str(entry.get("action") or "").strip().lower()
+            if action not in ("modify", "add", "remove"):
+                continue
+            cleaned.append({
+                "action": action,
+                "req_id": str(entry.get("req_id") or "").strip(),
+                "requirement": re.sub(r"\s+", " ", str(entry.get("requirement") or "")).strip(),
+                "section": re.sub(r"\s+", " ", str(entry.get("section") or "")).strip(),
+                "value": re.sub(r"\s+", " ", str(entry.get("value") or "")).strip(),
+                "applies_to": re.sub(r"\s+", " ", str(entry.get("applies_to") or "")).strip(),
+            })
+        return cleaned
+
+    def align_requirements(
+        self,
+        *,
+        current_requirements: list[dict[str, Any]],
+        amending_reference: str,
+        amending_title: str,
+        amending_text: str,
+    ) -> list[dict[str, Any]]:
+        """Classify what one amending circular changes in the consolidated state."""
+        user = (
+            f"Amending circular: {amending_reference or amending_title}\n"
+            f"Title: {amending_title}\n\n"
+            "CURRENT CONSOLIDATED REQUIREMENTS:\n"
+            f"{json.dumps(current_requirements, indent=1)}\n\n"
+            f"AMENDING CIRCULAR TEXT:\n{self._truncate_context(amending_text)}"
+        )
+        schema = self._alignment_schema()
+        result = self._complete_json(
+            self._ALIGNMENT_SYSTEM_PROMPT, user, json_schema=schema, temperature=0.0
+        )
+        try:
+            return self._parse_alignment_changes(result)
+        except ValueError:
+            retry_system = (
+                self._ALIGNMENT_SYSTEM_PROMPT
+                + "\n\nYour previous response was malformed. Return the "
+                "schema-compliant JSON object only."
+            )
+            return self._parse_alignment_changes(
+                self._complete_json(retry_system, user, json_schema=schema, temperature=0.0)
+            )
+
     def select_superseded(
         self,
         current_title: str,

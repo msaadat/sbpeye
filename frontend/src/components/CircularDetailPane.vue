@@ -32,6 +32,7 @@ import { useResizablePane } from '@/lib/useResizablePane'
 
 const PdfPreviewDialog = defineAsyncComponent(() => import('@/components/PdfPreviewDialog.vue'))
 const CircularGraph = defineAsyncComponent(() => import('@/components/CircularGraph.vue'))
+const ConsolidatedView = defineAsyncComponent(() => import('@/components/ConsolidatedView.vue'))
 
 type PreviewAttachment = Pick<CircularAttachment, 'id' | 'filename' | 'file_type'>
 
@@ -60,6 +61,7 @@ const summaryExpanded = ref(false)
 const generationPopover = ref<InstanceType<typeof Popover> | null>(null)
 const activeJob = ref<AIGenerationJob | null>(null)
 const graphVisible = ref(false)
+const consolidatedVisible = ref(false)
 const graphFocusLabel = ref<string | null>(null)
 watch(graphVisible, visible => { if (visible) graphFocusLabel.value = null })
 const graphHeader = computed(
@@ -170,6 +172,7 @@ const INCOMING_LABELS: Record<string, string> = {
 }
 
 const TYPE_ORDER = ['supersedes', 'amends', 'cancels', 'clarifies', 'adds_to']
+const CONSOLIDATION_RELATION_TYPES = new Set(['amends', 'adds_to'])
 const COLLAPSE_THRESHOLD = 12
 
 interface RelationGroupItem {
@@ -303,6 +306,14 @@ const allGenerated = computed(() => generationFeatures.every(({ feature }) => ha
 const hasRelationships = computed(() =>
   Boolean(circular.value?.relationships.outgoing.length || circular.value?.relationships.incoming.length),
 )
+const hasConsolidationChain = computed(() => {
+  const relationships = circular.value?.relationships
+  if (!relationships) return false
+  return (
+    relationships.outgoing.some((relation) => CONSOLIDATION_RELATION_TYPES.has(relation.type) && relation.target?.id) ||
+    relationships.incoming.some((relation) => CONSOLIDATION_RELATION_TYPES.has(relation.type) && relation.source?.id)
+  )
+})
 const hasIntelligence = computed(() =>
   Boolean(
     circular.value?.summary ||
@@ -314,6 +325,11 @@ const hasIntelligence = computed(() =>
 
 function navigateFromGraph(id: string) {
   graphVisible.value = false
+  void router.push({ path: `/circulars/${id}`, query: router.currentRoute.value.query })
+}
+
+function navigateFromConsolidated(id: string) {
+  consolidatedVisible.value = false
   void router.push({ path: `/circulars/${id}`, query: router.currentRoute.value.query })
 }
 
@@ -382,6 +398,7 @@ async function loadCircular() {
   stopPolling()
   activeJob.value = null
   summaryExpanded.value = false
+  consolidatedVisible.value = false
   detailTab.value = 'document'
   expandedGroups.value = new Set()
   loading.value = true
@@ -530,6 +547,16 @@ onBeforeUnmount(stopPolling)
               title="Related circulars"
               @click="graphVisible = true"
             />
+            <Button
+              v-if="hasConsolidationChain"
+              icon="pi pi-history"
+              text
+              rounded
+              severity="warn"
+              aria-label="View consolidated chain"
+              title="Consolidated view of the amendment and addendum chain"
+              @click="consolidatedVisible = true"
+            />
             <span class="detail-actions-sep" aria-hidden="true" />
             <Button icon="pi pi-comments" text rounded severity="contrast" aria-label="Open in chat" title="Open in chat" @click="handoffToChat" />
           </div>
@@ -538,7 +565,8 @@ onBeforeUnmount(stopPolling)
           <i class="pi pi-sparkles" />
           Generating {{ activeJob.feature === 'all' ? 'all AI analysis' : activeJob.feature }} in the background
           <span v-if="activeJob.progress_total">
-            ({{ activeJob.progress_completed }}/{{ activeJob.progress_total }} source units)
+            ({{ activeJob.progress_completed }}/{{ activeJob.progress_total }}
+            {{ activeJob.feature === 'consolidation' ? 'circulars' : 'source units' }})
           </span>
         </div>
       </header>
@@ -556,6 +584,17 @@ onBeforeUnmount(stopPolling)
             :disabled="Boolean(activeJob)"
             @click="generate(item.feature)"
           />
+          <template v-if="hasConsolidationChain">
+            <div class="generation-menu-divider" />
+            <Button
+              icon="pi pi-history"
+              label="Generate Consolidated View"
+              text
+              size="small"
+              :disabled="Boolean(activeJob)"
+              @click="generate('consolidation')"
+            />
+          </template>
           <div class="generation-menu-divider" />
           <Button
             icon="pi pi-sparkles"
@@ -761,6 +800,18 @@ onBeforeUnmount(stopPolling)
       :draggable="false"
     >
       <CircularGraph :circular="circular" @navigate="navigateFromGraph" @focuschange="graphFocusLabel = $event" />
+    </Dialog>
+
+    <Dialog
+      v-if="circular"
+      v-model:visible="consolidatedVisible"
+      :header="`Consolidated view — ${circular.reference || circular.title}`"
+      modal
+      :style="{ width: '90vw', maxWidth: '900px', height: '80vh' }"
+      :content-style="{ height: 'calc(80vh - 60px)', padding: 0 }"
+      :draggable="false"
+    >
+      <ConsolidatedView :circular-id="circular.id" @navigate="navigateFromConsolidated" />
     </Dialog>
   </aside>
 </template>

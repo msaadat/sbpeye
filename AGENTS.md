@@ -67,6 +67,7 @@ SBPEye/
 - **Circular** (`circulars`): `id` (UUID5 from URL), `reference`, `title`, `department`, `date`, `url`, `content_text`, `summary`, `tags` (JSON), `compliance_checklist` (JSON), `status` (active/amended/superseded/cancelled)
 - **CircularRelationship** (`circular_relationships`): `source_id`, `target_id` (nullable), `target_reference` (raw text), `type` (amends/supersedes/cancels/adds_to/clarifies), `confidence` (float)
 - **Settings** (`settings`): `key` (PK), `value` — stores AI config (provider, API key, model, etc.)
+- **CircularConsolidation** (`circular_consolidations`): one row per amendment chain, keyed by `chain_id` (the base circular's id); `member_ids` (JSON, date-ordered), `as_of_circular_id`, `requirements` (JSON merged requirement list with per-item provenance and old/new values), `stale` flag (set when a relationships pass touches a chain member). Built by `consolidation.py`.
 - **ChatSession** (`chat_sessions`): `id` (UUID), `title`, `created_at`
 - **ChatMessage** (`chat_messages`): `id` (UUID), `session_id`, `role`, `content`, `circular_ids` (JSON), `created_at`
 - **EcoDataSeries**, **EcoDataEntry**, **EcoDataCache**, **SyncStatus** — unchanged
@@ -85,6 +86,7 @@ Task methods:
 - `generate_tags()` — Selects 1-5 tags from predefined taxonomy of ~50 SBP-relevant categories
 - `generate_checklist()` — Compliance checklist with action_required flags
 - `extract_relationships()` — Identifies amends/supersedes/cancels/adds_to/clarifies references
+- `extract_requirements()` / `align_requirements()` — Chain consolidation: extract a base circular's requirement list, then classify what each amending circular changes (modify/add/remove); orchestrated by `consolidation.py`
 - `chat()` — Conversational Q&A with circular context
 - `test_connection()` — Validates API connectivity
 
@@ -99,6 +101,7 @@ sbpeye circulars summarize          # Generate summaries
 sbpeye circulars tags               # Assign tags from taxonomy
 sbpeye circulars checklist          # Generate compliance checklists
 sbpeye circulars relationships      # Extract circular relationships
+sbpeye circulars consolidate        # Consolidate amendment chains (merged requirement views)
 sbpeye circulars status             # Recompute status from relationships
 
 # Run full pipeline

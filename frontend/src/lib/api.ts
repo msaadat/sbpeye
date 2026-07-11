@@ -204,7 +204,56 @@ export interface ComplianceChecklist {
 }
 
 export type GenerationFeature = 'summary' | 'tags' | 'checklist' | 'relationships' | 'entities'
-export type GenerationAction = GenerationFeature | 'all'
+export type GenerationAction = GenerationFeature | 'consolidation' | 'all'
+
+export interface ConsolidationChainMember {
+  id: string
+  reference?: string | null
+  title?: string | null
+  date?: string | null
+  status?: string | null
+  has_attachments: boolean
+}
+
+export interface ConsolidatedRequirementHistoryEntry {
+  circular_id: string
+  action: 'added' | 'modified' | 'removed'
+  old_value?: string | null
+  new_value?: string | null
+}
+
+export interface ConsolidatedRequirement {
+  req_id: string
+  section: string
+  text: string
+  value: string
+  applies_to: string
+  status: 'unchanged' | 'modified' | 'added' | 'removed'
+  introduced_by: string
+  last_changed_by?: string | null
+  old_text?: string | null
+  old_value?: string | null
+  removed_by?: string | null
+  confidence: 'high' | 'low'
+  history: ConsolidatedRequirementHistoryEntry[]
+}
+
+export interface CircularConsolidation {
+  as_of_circular_id: string
+  member_ids: string[]
+  requirements: ConsolidatedRequirement[]
+  model?: string | null
+  generated_at?: string | null
+  stale: boolean
+}
+
+export interface ConsolidationResponse {
+  available: boolean
+  chain_id?: string
+  chain: ConsolidationChainMember[]
+  has_attachments?: boolean
+  consolidation: CircularConsolidation | null
+}
 
 export interface CircularGenerationState {
   summary?: string | null
@@ -586,6 +635,10 @@ export async function startCircularGeneration(id: string, feature: GenerationAct
 
 export async function getAIGenerationJob(jobId: string): Promise<AIGenerationJob> {
   return requestJson<AIGenerationJob>(`/ai/jobs/${encodeURIComponent(jobId)}`)
+}
+
+export async function getCircularConsolidation(id: string): Promise<ConsolidationResponse> {
+  return requestJson<ConsolidationResponse>(`/circulars/${encodeURIComponent(id)}/consolidation`)
 }
 
 export async function getCircularSource(id: string): Promise<CircularSourceContent> {

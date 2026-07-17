@@ -33,6 +33,22 @@ export interface AppStatus {
   last_sync?: string
   last_sync_dt?: string | null
   last_sync_raw?: string | null
+  remote_check_status?: RemoteCircularCheckStatus
+  remote_checked_at?: string | null
+  remote_new_count?: number | null
+  remote_newest?: RemoteCircularNewest | null
+  remote_error?: string | null
+}
+
+export type RemoteCircularCheckStatus = 'checking' | 'fresh' | 'new_available' | 'error'
+
+export interface RemoteCircularNewest {
+  id?: string
+  title: string
+  reference?: string | null
+  department?: string | null
+  date?: string | null
+  url?: string | null
 }
 
 export interface CircularSyncStatus {
@@ -51,6 +67,11 @@ export interface CircularSyncStatus {
   processed_count?: number | null
   skipped_count?: number | null
   error_count?: number | null
+  remote_check_status?: RemoteCircularCheckStatus
+  remote_checked_at?: string | null
+  remote_new_count?: number | null
+  remote_newest?: RemoteCircularNewest | null
+  remote_error?: string | null
 }
 
 export interface CircularSyncRequest {

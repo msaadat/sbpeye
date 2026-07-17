@@ -31,10 +31,14 @@ from .link_routing import (
 )
 
 from .scraper.circulars import (
+    CIRCULARS_LISTING_URL_FIRST,
     HEADERS,
     attachment_id,
+    circular_identity,
     download_attachment,
+    fetch_page,
     fetch_page_cached,
+    parse_circular_listing,
     process_attachment,
     process_circular,
     scrape_circulars,
@@ -226,10 +230,113 @@ if SPA_ASSETS_DIR.exists():
 
 _CIRCULAR_SYNC_LOCK = threading.Lock()
 ACTIVE_SYNC_STATUSES = {"queued", "running"}
+REMOTE_CIRCULAR_CHECK_TTL = timedelta(minutes=30)
+_REMOTE_CIRCULAR_CHECK_LOCK = threading.Lock()
+_REMOTE_CIRCULAR_CHECK_CACHE: dict | None = None
+_REMOTE_CIRCULAR_CHECK_RUNNING = False
 
 
 def _latest_sync_status(db: Session) -> SyncStatus | None:
     return db.query(SyncStatus).order_by(SyncStatus.id.desc()).first()
+
+
+def _remote_circular_availability_payload(db: Session) -> dict:
+    """Fetch the first SBP circular listing page and compare it with local rows."""
+    checked_at = datetime.utcnow()
+    items = parse_circular_listing(fetch_page(CIRCULARS_LISTING_URL_FIRST))
+    listing_rows = [
+        {
+            **item,
+            "id": circular_identity(item.get("reference"), item["url"]),
+        }
+        for item in items
+        if item.get("url")
+    ]
+    listing_ids = [item["id"] for item in listing_rows]
+    existing_ids: set[str] = set()
+    if listing_ids:
+        existing_ids = {
+            row[0]
+            for row in db.query(Circular.id).filter(Circular.id.in_(listing_ids)).all()
+        }
+    missing = [item for item in listing_rows if item["id"] not in existing_ids]
+    newest = missing[0] if missing else None
+
+    return {
+        "remote_check_status": "new_available" if missing else "fresh",
+        "remote_checked_at": checked_at.isoformat(),
+        "remote_new_count": len(missing),
+        "remote_newest": (
+            {
+                "id": newest["id"],
+                "title": newest.get("title") or "",
+                "reference": newest.get("reference") or None,
+                "department": newest.get("department") or None,
+                "date": newest.get("date") or None,
+                "url": newest.get("url") or None,
+            }
+            if newest
+            else None
+        ),
+        "remote_error": None,
+    }
+
+
+def _set_remote_circular_check_cache(payload: dict) -> None:
+    global _REMOTE_CIRCULAR_CHECK_CACHE
+    _REMOTE_CIRCULAR_CHECK_CACHE = {
+        **payload,
+        "_expires_at": datetime.utcnow() + REMOTE_CIRCULAR_CHECK_TTL,
+    }
+
+
+def _clear_remote_circular_check_cache() -> None:
+    global _REMOTE_CIRCULAR_CHECK_CACHE
+    with _REMOTE_CIRCULAR_CHECK_LOCK:
+        _REMOTE_CIRCULAR_CHECK_CACHE = None
+
+
+def _run_remote_circular_check() -> None:
+    global _REMOTE_CIRCULAR_CHECK_RUNNING
+    db = SessionLocal()
+    try:
+        payload = _remote_circular_availability_payload(db)
+    except Exception as exc:
+        payload = {
+            "remote_check_status": "error",
+            "remote_checked_at": datetime.utcnow().isoformat(),
+            "remote_new_count": 0,
+            "remote_newest": None,
+            "remote_error": str(exc),
+        }
+    finally:
+        db.close()
+
+    with _REMOTE_CIRCULAR_CHECK_LOCK:
+        _set_remote_circular_check_cache(payload)
+        _REMOTE_CIRCULAR_CHECK_RUNNING = False
+
+
+def _remote_circular_check_status() -> dict:
+    """Return cached remote availability and refresh it asynchronously when stale."""
+    global _REMOTE_CIRCULAR_CHECK_RUNNING
+    now = datetime.utcnow()
+    with _REMOTE_CIRCULAR_CHECK_LOCK:
+        cache = _REMOTE_CIRCULAR_CHECK_CACHE
+        if cache and cache.get("_expires_at") and cache["_expires_at"] > now:
+            return {key: value for key, value in cache.items() if not key.startswith("_")}
+
+        if not _REMOTE_CIRCULAR_CHECK_RUNNING:
+            _REMOTE_CIRCULAR_CHECK_RUNNING = True
+            threading.Thread(target=_run_remote_circular_check, daemon=True).start()
+
+    return {
+        "remote_check_status": "checking",
+        "remote_checked_at": None,
+        "remote_new_count": None,
+        "remote_newest": None,
+        "remote_error": None,
+    }
 
 
 def _latest_successful_sync(db: Session) -> SyncStatus | None:
@@ -344,6 +451,7 @@ def _run_circular_sync(job_id: str, options: dict) -> None:
         job.skipped_count = int(result.get("skipped") or 0)
         job.error_count = int(result.get("errors") or 0)
         db.commit()
+        _clear_remote_circular_check_cache()
     except Exception as exc:
         db.rollback()
         job = db.query(SyncStatus).filter(SyncStatus.job_id == job_id).first()
@@ -352,6 +460,7 @@ def _run_circular_sync(job_id: str, options: dict) -> None:
             job.completed_at = datetime.utcnow()
             job.error = str(exc)
             db.commit()
+        _clear_remote_circular_check_cache()
     finally:
         db.close()
         _CIRCULAR_SYNC_LOCK.release()
@@ -403,6 +512,8 @@ async def ecodata_page():
 async def get_app_status(db: Session = Depends(get_db)):
     sync_status = _latest_sync_status(db)
     sync_payload = _sync_status_payload(sync_status, _latest_successful_sync(db))
+    remote_payload = _remote_circular_check_status()
+    sync_payload = {**sync_payload, **remote_payload}
     total_circulars = db.query(func.count(Circular.id)).scalar() or 0
     department_count = db.query(func.count(func.distinct(Circular.department))).filter(Circular.department.isnot(None)).scalar() or 0
     indexed_today = db.query(func.count(Circular.id)).filter(func.date(Circular.indexed_at) == datetime.utcnow().date()).scalar() or 0
@@ -420,6 +531,7 @@ async def get_app_status(db: Session = Depends(get_db)):
         "last_sync": sync_payload["last_sync"],
         "last_sync_dt": sync_payload["last_sync_dt"],
         "last_sync_raw": sync_payload["last_sync_raw"],
+        **remote_payload,
     }
 
 

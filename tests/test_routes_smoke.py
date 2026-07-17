@@ -5,9 +5,11 @@ split and the Phase 1c chat-session dedup can be proven behavior-preserving.
 """
 
 import json
+from bs4 import BeautifulSoup
 import sbpeye.database as database_module
 import sbpeye.main as main_module
 from sbpeye.models import Attachment, CachedDocument, ChatMessage, ChatSession, CircularRelationship, SyncStatus
+from sbpeye.scraper.circulars import circular_identity
 
 from conftest import make_circular
 
@@ -84,6 +86,10 @@ def test_circular_sync_worker_updates_status(db_factory, monkeypatch):
 
     monkeypatch.setattr(main_module, "SessionLocal", db_factory)
     monkeypatch.setattr(main_module, "scrape_circulars", fake_scrape_circulars)
+    main_module._REMOTE_CIRCULAR_CHECK_CACHE = {
+        "remote_check_status": "new_available",
+        "_expires_at": main_module.datetime.utcnow() + main_module.REMOTE_CIRCULAR_CHECK_TTL,
+    }
 
     db = db_factory()
     try:
@@ -118,6 +124,7 @@ def test_circular_sync_worker_updates_status(db_factory, monkeypatch):
     assert captured["limit"] == 2
     assert captured["include_attachments"] is False
     assert captured["skip_llm"] is True
+    assert main_module._REMOTE_CIRCULAR_CHECK_CACHE is None
 
 
 def test_circular_sync_payload_validation():
@@ -132,6 +139,79 @@ def test_circular_sync_payload_validation():
         assert "four-digit" in str(exc)
     else:
         raise AssertionError("Expected invalid sync year to be rejected")
+
+
+def _listing_html(reference: str, slug: str = "new-circular") -> str:
+    return f"""
+    <div class="publication-box-new">
+      <h4 class="mb-2"><a href="/circulars/{slug}">New Prudential Rules</a></h4>
+      <p class="mb-3 date">{reference}</p>
+      <p class="date">July 17 2026 | <span class="dept">BPRD</span> | <span class="cat">Banking</span> | <span class="type">Circulars</span></p>
+    </div>
+    """
+
+
+def test_remote_circular_availability_detects_missing_listing_item(db_factory, monkeypatch):
+    monkeypatch.setattr(
+        main_module,
+        "fetch_page",
+        lambda url: BeautifulSoup(_listing_html("BPRD Circular No. 17 of 2026"), "html.parser"),
+    )
+
+    db = db_factory()
+    try:
+        payload = main_module._remote_circular_availability_payload(db)
+    finally:
+        db.close()
+
+    assert payload["remote_check_status"] == "new_available"
+    assert payload["remote_new_count"] == 1
+    assert payload["remote_newest"]["reference"] == "BPRD Circular No. 17 of 2026"
+
+
+def test_remote_circular_availability_is_fresh_when_listing_item_exists(db_factory, monkeypatch):
+    reference = "BPRD Circular No. 17 of 2026"
+    url = "https://www.sbp.org.pk/circulars/new-circular"
+    circular_id = circular_identity(reference, url)
+    monkeypatch.setattr(
+        main_module,
+        "fetch_page",
+        lambda url: BeautifulSoup(_listing_html(reference), "html.parser"),
+    )
+
+    db = db_factory()
+    try:
+        db.add(make_circular(circular_id=circular_id, reference=reference, url=url))
+        db.commit()
+        payload = main_module._remote_circular_availability_payload(db)
+    finally:
+        db.close()
+
+    assert payload["remote_check_status"] == "fresh"
+    assert payload["remote_new_count"] == 0
+    assert payload["remote_newest"] is None
+
+
+def test_app_status_includes_remote_circular_fields(client, monkeypatch):
+    test_client, _ = client
+    monkeypatch.setattr(
+        main_module,
+        "_remote_circular_check_status",
+        lambda: {
+            "remote_check_status": "new_available",
+            "remote_checked_at": "2026-07-17T12:00:00",
+            "remote_new_count": 2,
+            "remote_newest": {"title": "New Prudential Rules"},
+            "remote_error": None,
+        },
+    )
+
+    resp = test_client.get("/api/app/status")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["remote_check_status"] == "new_available"
+    assert body["remote_new_count"] == 2
+    assert body["sync"]["remote_check_status"] == "new_available"
 
 def test_document_content_redownloads_missing_attachment_file(client, monkeypatch, tmp_path):
     test_client, db_factory = client

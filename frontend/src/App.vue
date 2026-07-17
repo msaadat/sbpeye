@@ -71,6 +71,10 @@ const statusLabel = computed(() => {
     return 'Circular sync running'
   }
 
+  if ((remoteNewCount.value ?? 0) > 0) {
+    return `${remoteNewCount.value?.toLocaleString()} new SBP circular${remoteNewCount.value === 1 ? '' : 's'} found`
+  }
+
   const total = status.value.total_circulars ?? 0
   const departments = status.value.department_count ?? 0
   return `${total.toLocaleString()} circulars / ${departments.toLocaleString()} departments`
@@ -83,6 +87,26 @@ const statusDetail = computed(() => {
 
   if (status.value?.sync?.status === 'failed' && status.value.sync.error) {
     return `Last sync failed: ${status.value.sync.error}`
+  }
+
+  if ((remoteNewCount.value ?? 0) > 0) {
+    const newest = status.value?.remote_newest || syncStatus.value?.remote_newest
+    const label = newest?.reference || newest?.title
+    return label ? `Sync recommended. Newest: ${label}` : 'Sync recommended.'
+  }
+
+  if (remoteStatus.value === 'checking') {
+    return 'Checking SBP for new circulars'
+  }
+
+  if (remoteStatus.value === 'error') {
+    const error = status.value?.remote_error || syncStatus.value?.remote_error
+    return error ? `Could not check SBP: ${error}` : 'Could not check SBP for new circulars'
+  }
+
+  if (remoteStatus.value === 'fresh') {
+    const checkedAt = status.value?.remote_checked_at || syncStatus.value?.remote_checked_at
+    return checkedAt ? `No new SBP circulars found. Checked ${new Date(checkedAt).toLocaleString()}` : 'No new SBP circulars found'
   }
 
   if (status.value?.last_sync_display) {
@@ -98,6 +122,9 @@ const statusDetail = computed(() => {
 
 const syncStatus = computed<CircularSyncStatus | null>(() => status.value?.sync ?? null)
 const syncRunning = computed(() => Boolean(syncStatus.value?.running))
+const remoteStatus = computed(() => status.value?.remote_check_status || syncStatus.value?.remote_check_status || null)
+const remoteNewCount = computed(() => status.value?.remote_new_count ?? syncStatus.value?.remote_new_count ?? null)
+const shouldPollStatus = computed(() => syncRunning.value || remoteStatus.value === 'checking')
 const syncStaleness = computed(() => {
   if (statusLoading.value) {
     return 'checking'
@@ -108,16 +135,19 @@ const syncStaleness = computed(() => {
   if (syncRunning.value) {
     return 'running'
   }
-  const lastSync = status.value?.last_sync_dt || syncStatus.value?.last_sync_dt
-  if (!lastSync) {
+  if (remoteStatus.value === 'error') {
+    return 'error'
+  }
+  if (remoteStatus.value === 'checking') {
+    return 'checking'
+  }
+  if ((remoteNewCount.value ?? 0) > 0 || remoteStatus.value === 'new_available') {
     return 'stale'
   }
-  const lastSyncTime = new Date(lastSync).getTime()
-  if (Number.isNaN(lastSyncTime)) {
-    return 'stale'
+  if (remoteStatus.value === 'fresh') {
+    return 'fresh'
   }
-  const ageHours = (Date.now() - lastSyncTime) / (1000 * 60 * 60)
-  return ageHours > 24 ? 'stale' : 'fresh'
+  return 'checking'
 })
 const syncIcon = computed(() => {
   if (statusLoading.value || syncRunning.value) {
@@ -126,6 +156,9 @@ const syncIcon = computed(() => {
   if (syncStaleness.value === 'error') {
     return 'pi pi-exclamation-circle'
   }
+  if (syncStaleness.value === 'stale') {
+    return 'pi pi-exclamation-triangle'
+  }
   return 'pi pi-refresh'
 })
 const syncButtonTitle = computed(() => {
@@ -133,14 +166,14 @@ const syncButtonTitle = computed(() => {
 })
 
 function updateStatusPolling() {
-  if (syncRunning.value && !statusPollId) {
+  if (shouldPollStatus.value && !statusPollId) {
     statusPollId = setInterval(() => {
       void loadStatus()
     }, 5000)
     return
   }
 
-  if (!syncRunning.value && statusPollId) {
+  if (!shouldPollStatus.value && statusPollId) {
     clearInterval(statusPollId)
     statusPollId = null
   }

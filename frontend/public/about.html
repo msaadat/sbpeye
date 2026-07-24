@@ -134,7 +134,8 @@
   }
   .aurora {
     position: absolute;
-    inset: -20% -10%;
+    inset: 0;
+    overflow: hidden;
     z-index: -1;
     filter: blur(70px);
     opacity: 0.55;
@@ -178,7 +179,7 @@
     font-weight: 800;
     max-width: 17ch;
   }
-  .hero h1 .grad {
+  .grad {
     background: linear-gradient(100deg, var(--sbp-green), var(--sbp-gold));
     -webkit-background-clip: text;
     background-clip: text;
@@ -186,9 +187,9 @@
   }
   .hero-sub {
     max-width: 56ch;
-    font-size: clamp(1.02rem, 1.6vw, 1.2rem);
-    color: var(--sbp-muted);
-    margin: 0 0 2rem;
+    font-size: clamp(1.05rem, 1.6vw, 1.22rem);
+    color: color-mix(in srgb, var(--sbp-text) 88%, var(--sbp-bg));
+    margin: 0 0 0.5rem;
   }
   .hero-ctas { display: flex; flex-wrap: wrap; gap: 0.8rem; margin-bottom: 3rem; }
 
@@ -535,14 +536,100 @@
   .slide { height: 100%; padding: 0; position: relative; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; }
   .slide::-webkit-scrollbar { width: 9px; }
   .slide::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--sbp-text) 18%, transparent); border-radius: 999px; }
-  .slide-inner { min-height: 100%; display: flex; flex-direction: column; justify-content: center; padding: 2.4rem 1.5rem; box-sizing: border-box; }
+  .slide-inner { min-height: 100%; display: flex; flex-direction: column; justify-content: flex-start; padding: clamp(2rem, 5vh, 3.4rem) 1.5rem 2.6rem; box-sizing: border-box; }
   .slide-hero { isolation: isolate; }
-  .slide-hero .hero-inner { margin: 0 auto; }
+  .slide-hero .hero-inner { margin: 0; }
   .slide.moat { border-top: 0; border-bottom: 0; }
 
-  .slide .section-head { margin-bottom: 1.8rem; }
-  .slide .hero-shot { margin-top: 2rem; }
+  /* headings sit at the top of every slide (eyebrows removed) */
+  .section-head h2 { margin-top: 0; }
+  .slide .section-head { margin-bottom: 1.6rem; }
+  .slide .hero-shot { margin-top: 0; }
   .slide .chainviz { margin-bottom: 1.6rem; }
+
+  /* ---------- two-column: commentary left, screenshot right ---------- */
+  .hero-layout,
+  .split {
+    display: grid;
+    gap: clamp(1.8rem, 4vw, 3.2rem);
+    align-items: start;
+    width: 100%;
+    max-width: 1280px;
+    margin: 0 auto;
+  }
+  .hero-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); }
+  .split { grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr); }
+
+  /* let the cells fill their column instead of their own max-widths / centering */
+  .hero-layout .hero-inner { max-width: none; }
+  .hero-layout .hero-shot,
+  .split .search-demo { max-width: none; margin: 0; }
+  .split .section-head { margin-bottom: 0; max-width: none; }
+  /* visuals ride alongside the taller commentary column */
+  .hero-layout .hero-shot,
+  .split .search-demo,
+  .split .shot-cell { align-self: center; }
+
+  @media (max-width: 960px) {
+    .hero-layout,
+    .split { grid-template-columns: 1fr; gap: 1.7rem; align-items: stretch; }
+  }
+
+  /* ---------- key-feature list (hero) ---------- */
+  .feature-list { list-style: none; margin: 1.5rem 0 0; padding: 0; display: grid; gap: 0.85rem; }
+  .feature-list li { display: grid; grid-template-columns: 1.55rem 1fr; gap: 0.7rem; align-items: start; }
+  .feature-list .fi { margin-top: 0.1rem; width: 1.55rem; height: 1.55rem; flex: none;
+    display: grid; place-items: center; border-radius: 0.5rem;
+    background: color-mix(in srgb, var(--sbp-green) 12%, transparent); color: var(--sbp-green); }
+  :root.sbpeye-dark .feature-list .fi { color: #7fd6b6; }
+  .feature-list .fi svg { width: 0.95rem; height: 0.95rem; }
+  .feature-list b { font-size: 1.05rem; }
+  .feature-list span.t { font-size: 1.05rem; color: color-mix(in srgb, var(--sbp-text) 88%, var(--sbp-bg)); }
+  .feature-list span.t b { color: var(--sbp-text); }
+
+  /* ---------- punchy bullet commentary ---------- */
+  .lead-points { list-style: none; margin: 0.6rem 0 0; padding: 0; display: grid; gap: 0.55rem; max-width: 62ch; }
+  .lead-points li { position: relative; padding-left: 1.2rem; color: color-mix(in srgb, var(--sbp-text) 88%, var(--sbp-bg)); font-size: 1.12rem; line-height: 1.5; }
+  .lead-points li::before { content: ""; position: absolute; left: 0; top: 0.6em; width: 0.46rem; height: 0.46rem; border-radius: 50%;
+    background: linear-gradient(135deg, var(--sbp-green), var(--sbp-gold)); }
+  .lead-points b { color: var(--sbp-text); font-weight: 800; }
+
+  /* ---------- sub-topic heading inside a split ---------- */
+  .sub-head { margin: 0.35rem 0 0.35rem; font-size: 1.3rem; font-weight: 800; letter-spacing: -0.015em; }
+  .split .card-kicker { display: block; margin-bottom: 0.15rem; }
+
+  /* ---------- workbench: minicard icons + under-the-hood spacing ---------- */
+  .minicards { margin-top: 0.3rem; gap: 1.1rem; }
+  .minicard { padding: 0.9rem 1.05rem; }
+  .minicard .ic svg { width: 1.3rem; height: 1.3rem; }
+  .under-hood { margin-top: 1.5rem; }
+  .under-hood .section-head { margin-bottom: 0.9rem; }
+  .under-hood .section-head h2 { font-size: clamp(1.5rem, 2.8vw, 2rem); }
+  .closer-foot { margin-top: 1.1rem; padding-top: 1.1rem; }
+  .closer-foot .chips { margin: 0.7rem 0 0.9rem; }
+  /* keep the five pipeline steps on one row on desktop */
+  @media (min-width: 760px) { .pipeline { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
+  .under-hood .step { padding: 1rem 1rem 0.95rem; }
+  .under-hood .step h3 { margin-bottom: 0.2rem; }
+
+  /* ---------- consolidated: callouts left, screenshot right & smaller ---------- */
+  .moat-showcase { grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr); align-items: start; gap: 1.8rem; }
+  .moat-showcase .shot-cell { align-self: center; }
+  .moat-showcase .shot-cell .frame { max-width: 470px; margin: 0 auto; }
+  .callouts { position: static; top: auto; gap: 0.75rem; }
+  .moat-showcase .callout { padding: 0.72rem 1rem; }
+  .moat-showcase .callout h4 { margin-bottom: 0.15rem; }
+
+  /* ---------- semantic search: a touch smaller so it always fits ---------- */
+  .split .search-demo .search-ui { padding: 0.95rem 1rem 1.05rem; }
+  .split .search-demo .result { padding: 0.6rem 0.75rem; }
+  .split .search-demo .kw-note { margin: 0.7rem 0 0.7rem; }
+  .split .search-demo .results { gap: 0.5rem; }
+  /* on shorter screens, trim the third result so the demo always fits */
+  @media (max-height: 840px) {
+    .split .search-demo .results .result:nth-child(3) { display: none; }
+  }
+  .split .search-demo .search-demo, .split .search-demo { max-width: 560px; }
 
   .deck-progress { position: fixed; left: 0; top: var(--bar-h); height: 2px; width: 0; z-index: 45;
     background: linear-gradient(90deg, var(--sbp-green), var(--sbp-gold)); transition: width 0.7s var(--sbp-ease); }
@@ -600,24 +687,21 @@
 <section class="slide slide-hero" data-name="Intro">
   <div class="slide-inner">
       <div class="aurora" aria-hidden="true"><span></span><span></span><span></span></div>
+      <div class="hero-layout">
       <div class="hero-inner">
-        <span class="eyebrow reveal in-view">Internal showcase · Regulatory intelligence</span>
-        <h1 class="reveal in-view" style="--d:.08s">Every circular.<br />Every amendment.<br /><span class="grad">One source of truth.</span></h1>
-        <p class="hero-sub reveal in-view" style="--d:.16s">
-          SBPEye independently indexes State Bank of Pakistan circulars and economic data —
-          hybrid search, AI analysis, and a relationship engine that reconstructs what a
-          regulation actually says <em>today</em>.
+        <div class="section-head">
+          <h2 class="reveal in-view">Every circular. Every amendment.<br /><span class="grad">One source of truth.</span></h2>
+        </div>
+        <p class="hero-sub reveal in-view" style="--d:.08s">
+          An independent index of every State Bank of Pakistan circular and economic dataset —
+          built to tell you what a regulation actually says <em>today</em>.
         </p>
-        <div class="hero-ctas reveal in-view" style="--d:.24s">
-          <a class="btn btn-primary" href="/circulars">Explore the circulars</a>
-          <button class="btn" type="button" data-goto="1">See the moat ↓</button>
-        </div>
-        <div class="stats reveal in-view" style="--d:.32s">
-          <div class="stat"><b data-count="3638">0</b><span>circulars indexed</span></div>
-          <div class="stat"><b data-count="29">0</b><span>SBP departments</span></div>
-          <div class="stat"><b data-count="2253">0</b><span>relationships extracted</span></div>
-          <div class="stat"><b data-count="5">0</b><span>relationship types</span></div>
-        </div>
+        <ul class="feature-list reveal in-view" style="--d:.16s">
+          <li><span class="fi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span><span class="t"><b>Complete index</b> — 3,600+ circulars, annexures &amp; economic datasets in one place.</span></li>
+          <li><span class="fi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span><span class="t"><b>Hybrid search</b> — keyword + semantic; ask in plain English.</span></li>
+          <li><span class="fi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span><span class="t"><b>AI on every circular</b> — summaries, checklists &amp; extracted regulatory values.</span></li>
+          <li><span class="fi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span><span class="t"><b>Relationship engine</b> — amendment chains rebuilt to what stands today.</span></li>
+        </ul>
       </div>
       <div class="hero-shot reveal" id="heroShot">
         <div class="frame">
@@ -626,6 +710,7 @@
           <img class="shot-dark zoomable" src="about_assets/about-image-02-76a80bc039de18fc.png" alt="SBPEye search results with circular detail pane (dark theme)" />
         </div>
       </div>
+      </div>
   </div>
 </section>
 
@@ -633,14 +718,12 @@
   <div class="slide-inner">
     <div class="section-inner">
     <div class="section-head reveal">
-      <span class="eyebrow">The moat</span>
       <h2>A circular is never the whole story.</h2>
-      <p>
-        SBP regulation accretes. A 2008 instruction on savings-deposit returns has been
-        amended, extended, clarified and superseded by <b>43 linked circulars over 18 years</b>.
-        Reading any one of them — even the newest — tells you neither what changed nor what
-        still stands.
-      </p>
+      <ul class="lead-points">
+        <li>SBP regulation accretes — amended, extended, clarified, superseded.</li>
+        <li>One 2008 instruction now carries <b>43 linked circulars across 18 years</b>.</li>
+        <li>Read any single one — even the newest — and you miss what changed and what still stands.</li>
+      </ul>
     </div>
     <div class="chainviz reveal" id="chainviz">
       <svg viewBox="0 0 1160 150" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Timeline of one regulation chain from 2008 to 2026">
@@ -652,8 +735,7 @@
         <g class="node" style="transition-delay:2.0s"><rect x="775" y="70" width="118" height="46" rx="7"/><text x="787" y="90">…38 more links</text><text class="sub" x="787" y="106">amend · clarify · cancel</text></g>
         <g class="node hot" style="transition-delay:2.5s"><rect x="985" y="60" width="150" height="52" rx="7"/><text x="997" y="80">BPRD CL 15 / 2026</text><text class="sub" x="997" y="96">current, consolidated</text><text class="badge" x="997" y="52">AS AMENDED</text></g>
       </svg>
-      <p class="chain-caption"><b>18 years · 43 circulars · one answer.</b> SBPEye extracts typed links — amends,
-      supersedes, adds&nbsp;to, clarifies, cancels — from every circular <i>and its annexures</i>, then walks the chain both ways.</p>
+      <p class="chain-caption"><b>18 years · 43 circulars · one answer.</b> SBPEye extracts typed links — amends, supersedes, adds&nbsp;to, clarifies, cancels — from every circular <i>and its annexures</i>, then walks the chain both ways.</p>
     </div>
     </div>
   </div>
@@ -663,9 +745,11 @@
   <div class="slide-inner">
     <div class="section-inner">
       <div class="section-head reveal">
-        <span class="eyebrow">The relationship engine</span>
         <h2>The related circulars, mapped.</h2>
-        <p>Every circular SBPEye ingests is linked to the ones it amends, adds to or supersedes &mdash; so opening one circular opens onto its whole neighbourhood.</p>
+        <ul class="lead-points">
+          <li>Each circular is linked to the ones it amends, adds to or supersedes.</li>
+          <li>Open one circular &mdash; and its whole neighbourhood opens with it.</li>
+        </ul>
       </div>
     <div class="appgraph reveal">
       <div class="appgraph-head">
@@ -715,7 +799,7 @@
         <div class="appgraph-legend"><span><span class="dot"></span> Adds to</span><span class="muted">Oldest &rarr; newest</span></div>
       </div>
     </div>
-    <p class="chain-caption"><b>One regulation, its whole lineage.</b> This is SBPEye&rsquo;s own relationship graph for BPRD 05/2024 &mdash; the engine links each circular to the ones it amends and adds to, then walks the chain both ways so you always land on what still stands today.</p>
+    <p class="chain-caption"><b>One regulation, its whole lineage.</b> SBPEye&rsquo;s own graph for BPRD 05/2024 &mdash; links walked both ways, so you always land on what still stands today.</p>
     </div>
   </div>
 </section>
@@ -724,36 +808,38 @@
   <div class="slide-inner">
     <div class="section-inner">
       <div class="section-head reveal">
-        <span class="eyebrow">Consolidated view</span>
         <h2>What the regulation says today.</h2>
-        <p>SBPEye walks the chain and rebuilds the as-amended regulation &mdash; every requirement, with the exact circular that set it.</p>
+        <ul class="lead-points">
+          <li>SBPEye walks the chain and rebuilds the as-amended regulation.</li>
+          <li>Every requirement carries the exact circular that set it.</li>
+        </ul>
       </div>
     <div class="moat-showcase">
-      <div class="reveal">
+      <aside class="callouts">
+        <div class="callout reveal" style="--d:.05s">
+          <h4>Chain timeline</h4>
+          <p>Every circular, oldest → newest, one click from any member.</p>
+        </div>
+        <div class="callout gold reveal" style="--d:.12s">
+          <h4>Amendments with receipts</h4>
+          <p>Superseded values stay visible — struck through, with their source circular.</p>
+        </div>
+        <div class="callout reveal" style="--d:.19s">
+          <h4>Requirements, not prose</h4>
+          <p>Distilled into discrete, audience-tagged requirements by topic.</p>
+        </div>
+        <div class="callout gold reveal" style="--d:.26s">
+          <h4>Staleness detection</h4>
+          <p>Flags when a newer circular touches the chain, and offers to regenerate.</p>
+        </div>
+      </aside>
+      <div class="reveal shot-cell">
         <div class="frame">
           <div class="frame-bar"><i></i><i></i><i></i><span class="addr">Consolidated view — IFRS 9 implementation chain</span></div>
           <img class="shot-light zoomable" src="about_assets/about-image-03-6a73fe52aa2253af.png" alt="Consolidated view of the IFRS 9 amendment chain (light theme)" />
           <img class="shot-dark zoomable" src="about_assets/about-image-04-124f48275e6f1781.png" alt="Consolidated view of the IFRS 9 amendment chain (dark theme)" />
         </div>
       </div>
-      <aside class="callouts">
-        <div class="callout reveal" style="--d:.05s">
-          <h4>Chain timeline</h4>
-          <p>Every circular in the chain, oldest → newest, one click from any member.</p>
-        </div>
-        <div class="callout gold reveal" style="--d:.15s">
-          <h4>Amendments with receipts</h4>
-          <p>Superseded values stay visible — struck through, with the exact circular that changed them.</p>
-        </div>
-        <div class="callout reveal" style="--d:.25s">
-          <h4>Requirements, not prose</h4>
-          <p>The chain is distilled into discrete, audience-tagged requirements grouped by topic.</p>
-        </div>
-        <div class="callout gold reveal" style="--d:.35s">
-          <h4>Staleness detection</h4>
-          <p>If a new circular touches the chain after consolidation, SBPEye flags it and offers to regenerate.</p>
-        </div>
-      </aside>
     </div>
     </div>
   </div>
@@ -762,10 +848,15 @@
 <section class="slide" data-name="Semantic search">
   <div class="slide-inner">
     <div class="section-inner">
+    <div class="split">
     <div class="section-head reveal">
-      <span class="eyebrow">Search that reads intent</span>
       <h2>Ask in plain words. Find what the wording hides.</h2>
-      <p>Keyword search only returns the words you type. SBPEye fuses SQLite full-text ranking with vector similarity, so a plain-English query lands on the right circular even when the regulation never uses your word &mdash; and you can still narrow by department, tag or year.</p>
+      <ul class="lead-points">
+        <li>Keyword search only returns the words you type.</li>
+        <li>SBPEye fuses full-text ranking with vector similarity.</li>
+        <li>A plain-English query lands on the right circular &mdash; even when it never uses your word.</li>
+        <li>Still narrow by department, tag or year.</li>
+      </ul>
     </div>
 
     <div class="search-demo reveal">
@@ -816,113 +907,151 @@
       </div>
     </div>
     </div>
+    </div>
   </div>
 </section>
 
-<section class="slide" data-name="AI intelligence">
+<section class="slide" data-name="Intelligence · summaries">
   <div class="slide-inner">
     <div class="section-inner">
       <div class="section-head reveal">
-        <span class="eyebrow">On every circular</span>
         <h2>Intelligence, not just retrieval.</h2>
-        <p>Beyond finding the right circular, SBPEye reads it &mdash; turning prose into summaries, checklists and structured regulatory values.</p>
+        <ul class="lead-points">
+          <li>SBPEye doesn&rsquo;t just find the circular &mdash; it reads it.</li>
+          <li>Prose becomes summaries, checklists and structured data.</li>
+        </ul>
       </div>
-      <div class="grid">
-      <article class="card reveal" style="--d:.08s">
-        <div class="card-shot">
-          <img class="shot-light zoomable" src="about_assets/about-image-05-fc24608ed5dec445.png" alt="AI intelligence pane (light theme)" />
-          <img class="shot-dark zoomable" src="about_assets/about-image-06-082da04270a43137.png" alt="AI intelligence pane (dark theme)" />
+      <div class="split">
+        <div class="reveal">
+          <span class="card-kicker">On every circular</span>
+          <h3 class="sub-head">Summaries, checklists &amp; cross-references</h3>
+          <ul class="lead-points">
+            <li>An AI summary and topic tags on every circular.</li>
+            <li>Compliance checklists &mdash; exportable to Excel.</li>
+            <li>Inline cross-references you can jump straight through.</li>
+          </ul>
         </div>
-        <div class="card-body">
-          <h3><span class="card-kicker">AI</span> Intelligence on every circular</h3>
-          <p>Summaries, topic tags, and compliance checklists (exportable to Excel) generated per circular — plus inline cross-references you can jump through.</p>
+        <div class="reveal shot-cell">
+          <div class="frame">
+            <div class="frame-bar"><i></i><i></i><i></i><span class="addr">Circular &mdash; AI intelligence</span></div>
+            <img class="shot-light zoomable" src="about_assets/about-image-05-fc24608ed5dec445.png" alt="AI intelligence pane (light theme)" />
+            <img class="shot-dark zoomable" src="about_assets/about-image-06-082da04270a43137.png" alt="AI intelligence pane (dark theme)" />
+          </div>
         </div>
-      </article>
-      <article class="card reveal" style="--d:.16s">
-        <div class="card-shot">
-          <img class="shot-light zoomable" src="about_assets/about-image-07-cc92496babdde763.png" alt="Regulatory values database (light theme)" />
-          <img class="shot-dark zoomable" src="about_assets/about-image-08-e850b3ae86fe771d.png" alt="Regulatory values database (dark theme)" />
-        </div>
-        <div class="card-body">
-          <h3><span class="card-kicker">Values</span> Regulatory values, structured</h3>
-          <p>Ratios, thresholds, limits and deadlines extracted into a queryable database — ask “thresholds above 10%” or “current minimum capital for MFBs”.</p>
-        </div>
-      </article>
       </div>
     </div>
   </div>
 </section>
 
-<section class="slide" data-name="More & under the hood">
+<section class="slide" data-name="Intelligence · values">
   <div class="slide-inner">
     <div class="section-inner">
       <div class="section-head reveal">
-        <span class="eyebrow">Everything else it does</span>
+        <h2>Intelligence, not just retrieval.</h2>
+        <ul class="lead-points">
+          <li>SBPEye doesn&rsquo;t just find the circular &mdash; it reads it.</li>
+          <li>Prose becomes summaries, checklists and structured data.</li>
+        </ul>
+      </div>
+      <div class="split">
+        <div class="reveal">
+          <span class="card-kicker">Structured values</span>
+          <h3 class="sub-head">Ratios, thresholds &amp; deadlines, extracted</h3>
+          <ul class="lead-points">
+            <li>Ratios, thresholds, limits and deadlines pulled into a database.</li>
+            <li>Query it: &ldquo;thresholds above 10%&rdquo; or &ldquo;current minimum capital for MFBs&rdquo;.</li>
+            <li>Every value linked back to the circular that set it.</li>
+          </ul>
+        </div>
+        <div class="reveal shot-cell">
+          <div class="frame">
+            <div class="frame-bar"><i></i><i></i><i></i><span class="addr">Regulatory values &mdash; structured database</span></div>
+            <img class="shot-light zoomable" src="about_assets/about-image-07-cc92496babdde763.png" alt="Regulatory values database (light theme)" />
+            <img class="shot-dark zoomable" src="about_assets/about-image-08-e850b3ae86fe771d.png" alt="Regulatory values database (dark theme)" />
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="slide" data-name="Intelligence · Q&amp;A">
+  <div class="slide-inner">
+    <div class="section-inner">
+      <div class="section-head reveal">
+        <h2>Intelligence, not just retrieval.</h2>
+        <ul class="lead-points">
+          <li>SBPEye doesn&rsquo;t just find the circular &mdash; it reads it.</li>
+          <li>Prose becomes summaries, checklists and structured data.</li>
+        </ul>
+      </div>
+      <div class="split">
+        <div class="reveal">
+          <span class="card-kicker">Grounded Q&amp;A</span>
+          <h3 class="sub-head">Workspaces that answer from your circulars</h3>
+          <ul class="lead-points">
+            <li>Pin circulars into a research workspace.</li>
+            <li>Interrogate them with streaming answers.</li>
+            <li>Grounded in the pinned documents &mdash; not the model&rsquo;s imagination.</li>
+          </ul>
+        </div>
+        <div class="reveal shot-cell">
+          <div class="frame">
+            <div class="frame-bar"><i></i><i></i><i></i><span class="addr">Grounded Q&amp;A workspace</span></div>
+            <img class="shot-light zoomable" src="about_assets/about-image-09-e97b6803830b1228.png" alt="Grounded chat (light theme)" />
+            <img class="shot-dark zoomable" src="about_assets/about-image-10-5a783dd2ea165347.png" alt="Grounded chat (dark theme)" />
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="slide" data-name="Workbench & internals">
+  <div class="slide-inner">
+    <div class="section-inner">
+      <div class="section-head reveal">
         <h2>A full regulatory workbench.</h2>
+        <ul class="lead-points">
+          <li>Beyond circulars &mdash; the tooling that keeps the whole desk usable.</li>
+        </ul>
       </div>
-      <div class="grid">
-      <article class="card reveal" style="--d:.0s">
-        <div class="card-shot">
-          <img class="shot-light zoomable" src="about_assets/about-image-01-d5beeb9154592a19.png" alt="Hybrid search (light theme)" />
-          <img class="shot-dark zoomable" src="about_assets/about-image-02-76a80bc039de18fc.png" alt="Hybrid search (dark theme)" />
+      <div class="minicards">
+        <div class="minicard reveal" style="--d:.05s">
+          <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M8 17v-5"/><path d="M13 17V8"/><path d="M18 17v-8"/></svg></span>
+          <div><h3>EcoData, same roof</h3><p>SBP economic datasets — auctions, OMO, rate corridors — indexed with freshness tracking and one-click AI summaries.</p></div>
         </div>
-        <div class="card-body">
-          <h3><span class="card-kicker">Search</span> Hybrid keyword + semantic</h3>
-          <p>SQLite FTS5 ranking fused with ChromaDB vector similarity — exact references and fuzzy policy questions both land. Filter by department, tag, year; export CSV or batch-download ZIPs.</p>
+        <div class="minicard reveal" style="--d:.12s">
+          <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg></span>
+          <div><h3>Quiet automation</h3><p>Background sync keeps the index fresh — live status, staleness flags and a batch CLI.</p></div>
         </div>
-      </article>
-      <article class="card reveal" style="--d:.0s">
-        <div class="card-shot">
-          <img class="shot-light zoomable" src="about_assets/about-image-09-e97b6803830b1228.png" alt="Grounded chat (light theme)" />
-          <img class="shot-dark zoomable" src="about_assets/about-image-10-5a783dd2ea165347.png" alt="Grounded chat (dark theme)" />
+        <div class="minicard reveal" style="--d:.19s">
+          <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="7" width="10" height="10" rx="1.5"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg></span>
+          <div><h3>Bring your own model</h3><p>LM Studio (local), OpenAI or Gemini via one switch — sensitive work never leaves the machine.</p></div>
         </div>
-        <div class="card-body">
-          <h3><span class="card-kicker">Chat</span> Grounded Q&amp;A workspaces</h3>
-          <p>Pin circulars into research workspaces and interrogate them — streaming answers grounded in the pinned documents, not the model’s imagination.</p>
-        </div>
-      </article>
-      <article class="card reveal" style="--d:.08s">
-        <div class="card-shot">
-          <img class="shot-light zoomable" src="about_assets/about-image-11-c664aa769d145d18.png" alt="EcoData browser (light theme)" />
-          <img class="shot-dark zoomable" src="about_assets/about-image-12-7f90ad9bd2d7b7d4.png" alt="EcoData browser (dark theme)" />
-        </div>
-        <div class="card-body">
-          <h3><span class="card-kicker">EcoData</span> Economic data, same roof</h3>
-          <p>SBP’s economic datasets — auction results, OMO history, rate corridors — indexed with freshness tracking and one-click AI summaries of the underlying PDFs.</p>
-        </div>
-      </article>
-      <article class="card reveal" style="--d:.16s">
-        <div class="card-body" style="padding-top:1.45rem">
-          <h3><span class="card-kicker">Ops</span> Quiet automation</h3>
-          <p>Background sync keeps the index fresh while the app stays responsive — with live status, staleness indicators, and a CLI for batch summarisation, tagging, relationship extraction and reindexing.</p>
-        </div>
-        <div class="card-body">
-          <h3><span class="card-kicker">AI backend</span> Bring your own model</h3>
-          <p>LM Studio running fully local, OpenAI, or Google Gemini — one settings switch. Sensitive workflows never have to leave the machine.</p>
-        </div>
-      </article>
       </div>
-      <div style="margin-top:2.8rem">
-    <div class="section-head reveal">
-      <span class="eyebrow">Under the hood</span>
-      <h2>From SBP’s website to an answerable question.</h2>
-    </div>
-    <div class="pipeline">
-      <div class="step reveal" style="--d:.0s"><h3>Scrape</h3><p>Circulars, annexures and EcoData pulled with BeautifulSoup + pdfplumber.</p></div>
-      <div class="step reveal" style="--d:.07s"><h3>Index</h3><p>SQLite FTS5 keyword index + ChromaDB vector embeddings, kept in lockstep.</p></div>
-      <div class="step reveal" style="--d:.14s"><h3>Analyse</h3><p>LLM pass per circular: summary, tags, checklist, regulatory values.</p></div>
-      <div class="step reveal" style="--d:.21s"><h3>Link</h3><p>Typed relationships extracted from body text <i>and</i> annexures; circular chains detected.</p></div>
-      <div class="step reveal" style="--d:.28s"><h3>Consolidate</h3><p>Graph traversal rebuilds the as-amended regulation with per-requirement provenance.</p></div>
-    </div>
+
+      <div class="under-hood">
+        <div class="section-head reveal">
+          <h2>From SBP&rsquo;s website to an answerable question.</h2>
+        </div>
+        <div class="pipeline">
+          <div class="step reveal" style="--d:.0s"><h3>Scrape</h3><p>Circulars, annexures &amp; EcoData via BeautifulSoup + pdfplumber.</p></div>
+          <div class="step reveal" style="--d:.07s"><h3>Index</h3><p>FTS5 keyword index + ChromaDB embeddings, kept in lockstep.</p></div>
+          <div class="step reveal" style="--d:.14s"><h3>Analyse</h3><p>LLM pass per circular: summary, tags, checklist, values.</p></div>
+          <div class="step reveal" style="--d:.21s"><h3>Link</h3><p>Typed relationships from body <i>and</i> annexures; chains detected.</p></div>
+          <div class="step reveal" style="--d:.28s"><h3>Consolidate</h3><p>Graph traversal rebuilds the as-amended regulation with provenance.</p></div>
+        </div>
       </div>
+
       <div class="closer-foot">
-    <div class="chips">
-      <span class="chip">Python 3.12</span><span class="chip">FastAPI</span><span class="chip">SQLite · FTS5</span>
-      <span class="chip">ChromaDB</span><span class="chip">Vue 3</span><span class="chip">TypeScript</span>
-      <span class="chip">PrimeVue Aura</span><span class="chip">Vite</span><span class="chip">LM Studio / OpenAI / Gemini</span>
-    </div>
-    <p class="foot-note">Internal project. Independent indexer — not affiliated with the State Bank of Pakistan.
-    Screenshots are live captures from the running app. <a href="/circulars" style="color:var(--sbp-green);font-weight:600">Open SBPEye →</a></p>
+        <div class="chips">
+          <span class="chip">Python 3.12</span><span class="chip">FastAPI</span><span class="chip">SQLite · FTS5</span>
+          <span class="chip">ChromaDB</span><span class="chip">Vue 3</span><span class="chip">TypeScript</span>
+          <span class="chip">PrimeVue Aura</span><span class="chip">Vite</span><span class="chip">LM Studio / OpenAI / Gemini</span>
+        </div>
+        <p class="foot-note">Internal project. Independent indexer — not affiliated with the State Bank of Pakistan.
+        Screenshots are live captures from the running app. <a href="/circulars" style="color:var(--sbp-green);font-weight:600">Open SBPEye →</a></p>
       </div>
     </div>
   </div>

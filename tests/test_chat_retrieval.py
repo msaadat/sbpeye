@@ -8,13 +8,21 @@ from sqlalchemy.orm import sessionmaker
 from sbpeye.ai import AIClient, AIConfig
 from sbpeye.chat_retrieval import (
     ScopedChatRetriever,
+    ScopedChunk,
     build_chat_context,
     estimate_tokens,
+    focused_retrieval_query,
+    query_context_circular_ids,
+    referenced_circular_ids,
 )
 from sbpeye.database import Base
-from sbpeye.main import _truncate_chat_messages, get_chat_session
+from sbpeye.main import (
+    _chat_turn_circular_ids,
+    _truncate_chat_messages,
+    get_chat_session,
+)
 from sbpeye.models import Attachment, ChatMessage, ChatSession, Circular
-from sbpeye.search import SearchEngine
+from sbpeye.search import SearchEngine, backfill_fts
 
 
 def make_session():
@@ -154,6 +162,60 @@ def test_context_includes_small_text_and_bounds_retrieved_passages(monkeypatch):
     assert sum(estimate_tokens(item["passage"]) for item in results) <= 200
 
 
+def test_later_large_passage_uses_remaining_context_budget(monkeypatch):
+    db = make_session()
+    circular = add_circular(db, "one", "Circular body.")
+    retriever = ScopedChatRetriever(db, [circular.id])
+    retriever._chunks = [
+        ScopedChunk(
+            chunk_id="first",
+            circular_id=circular.id,
+            document_id=circular.id,
+            document_type="circular",
+            label="Circular one",
+            text="a" * 1000,
+            chunk_index=0,
+        ),
+        ScopedChunk(
+            chunk_id="second",
+            circular_id=circular.id,
+            document_id="attachment-one",
+            document_type="attachment",
+            label="rules-one.pdf",
+            text="needle value is PKR 3,000,000 " + ("b" * 2000),
+            chunk_index=0,
+        ),
+    ]
+    retriever._chunk_by_id = {
+        chunk.chunk_id: chunk for chunk in retriever._chunks
+    }
+
+    class OrderedCollection:
+        def query(self, **kwargs):
+            return {
+                "ids": [[
+                    "first",
+                    "second",
+                ]],
+                "metadatas": [[{}, {}]],
+            }
+
+    class FakeEmbeddings:
+        def embed_queries(self, texts):
+            return [[0.1]]
+
+    import sbpeye.chat_retrieval as retrieval_module
+
+    monkeypatch.setattr(retrieval_module, "collection", OrderedCollection())
+    monkeypatch.setattr(retrieval_module, "embedding_backend", FakeEmbeddings())
+
+    results = retriever.search("semantic", limit=2, token_budget=600)
+
+    assert len(results) == 2
+    assert "PKR 3,000,000" in results[1]["passage"]
+    assert sum(estimate_tokens(item["passage"]) for item in results) <= 600
+
+
 def test_selected_document_tool_cannot_accept_a_different_scope(monkeypatch):
     disable_vectors(monkeypatch)
     db = make_session()
@@ -169,6 +231,126 @@ def test_selected_document_tool_cannot_accept_a_different_scope(monkeypatch):
     ))
 
     assert payload == {"results": [], "count": 0}
+
+
+def test_explicit_unpinned_reference_is_added_only_to_turn_context():
+    db = make_session()
+    circular = Circular(
+        id="unselected",
+        reference="BPRD Circular Letter No. 09 of 2026",
+        title="Customer Onboarding Framework",
+        department="BPRD",
+        date=datetime(2026, 3, 24),
+        content_text="Circular body.",
+    )
+    db.add(circular)
+    db.commit()
+
+    message = "Check BPRD Circular Letter No. 09 of 2026 for the limit"
+
+    assert referenced_circular_ids(db, message) == ["unselected"]
+    pinned_ids: list[str] = []
+    assert _chat_turn_circular_ids(db, pinned_ids, message) == ["unselected"]
+    assert pinned_ids == []
+
+
+def test_scoped_retrieval_removes_circular_reference_from_focus_query():
+    query = (
+        "Check BPRD Circular Letter No. 09 of 2026: "
+        "what is the maximum credit balance for an Asaan Account?"
+    )
+
+    focused = focused_retrieval_query(query)
+
+    assert "BPRD" not in focused
+    assert "09" not in focused
+    assert "maximum credit balance for an Asaan Account" in focused
+    assert focused_retrieval_query("Is the limit PKR 300?") == "Is the limit PKR 300?"
+
+
+def test_ambiguous_unpinned_reference_is_not_auto_selected():
+    db = make_session()
+    for circular_id, year in (("old", 2024), ("new", 2025)):
+        db.add(Circular(
+            id=circular_id,
+            reference="BPRD Circular No. 04",
+            title=f"Circular {year}",
+            department="BPRD",
+            date=datetime(year, 1, 1),
+            content_text="Body.",
+        ))
+    db.commit()
+
+    assert referenced_circular_ids(db, "Check BPRD Circular No. 04") == []
+
+
+def test_latest_question_auto_scopes_newest_attachment_match(monkeypatch):
+    disable_vectors(monkeypatch)
+    import sbpeye.search as search_module
+
+    monkeypatch.setattr(search_module, "collection", FailingCollection())
+    monkeypatch.setattr(search_module, "embedding_backend", FailingEmbeddings())
+    db = make_session()
+    old = Circular(
+        id="old",
+        reference="BPRD Circular Letter No. 10 of 2022",
+        title="Asaan Account Limits",
+        department="BPRD",
+        date=datetime(2022, 4, 13),
+        content_text="Asaan Account maximum credit balance limit is PKR 1,000,000.",
+    )
+    new = Circular(
+        id="new",
+        reference="BPRD Circular Letter No. 09 of 2026",
+        title="Consolidated Customer Onboarding Framework",
+        department="BPRD",
+        date=datetime(2026, 3, 24),
+        content_text="The consolidated framework is attached.",
+        attachments=[Attachment(
+            id="new-framework",
+            filename="updated-framework.pdf",
+            original_url="https://www.sbp.org.pk/updated-framework.pdf",
+            file_type="pdf",
+            extraction_status="extracted",
+            content_text=(
+                "Asaan Account maximum credit balance limit is PKR 3,000,000."
+            ),
+        )],
+    )
+    db.add_all([old, new])
+    db.commit()
+    backfill_fts(db, force=True)
+
+    query = "What is the latest maximum credit balance limit for Asaan Accounts?"
+    inferred_ids = query_context_circular_ids(db, query)
+    context, _ = build_chat_context(db, inferred_ids, query, 4000)
+
+    assert inferred_ids == ["new"]
+    assert _chat_turn_circular_ids(db, [], query) == ["new"]
+    assert "PKR 3,000,000" in context
+
+
+def test_circular_details_includes_relevant_attachment_context(monkeypatch):
+    disable_vectors(monkeypatch)
+    db = make_session()
+    circular = add_circular(
+        db,
+        "one",
+        "The circular introduces an updated framework.",
+        ("background " * 500) + "Maximum credit balance is PKR 3,000,000.",
+    )
+    client = AIClient(AIConfig(max_context_tokens=800))
+
+    payload = json.loads(client._execute_tool(
+        "get_circular_details",
+        {"circular_reference": circular.reference},
+        db,
+        user_query="What is the maximum credit balance?",
+    ))
+
+    assert "The circular introduces an updated framework." in payload["document_context"]
+    assert "Maximum credit balance is PKR 3,000,000." in payload["document_context"]
+    assert "[[attachment:attachment-one|rules-one.pdf]]" in payload["document_context"]
 
 
 def test_search_department_filter_accepts_partial_department(monkeypatch):

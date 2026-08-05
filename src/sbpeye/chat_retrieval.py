@@ -1,4 +1,5 @@
 import logging
+import re
 from dataclasses import dataclass
 
 from rank_bm25 import BM25Okapi
@@ -8,18 +9,73 @@ from .database import collection, embedding_backend
 from .checklist import prepare_reference_chunks
 from .documents import build_corpus
 from .models import Circular
-from .search import expand_query_tokens, tokenize
+from .search import REFERENCE_PATTERN, SearchEngine, expand_query_tokens, tokenize
 
 
 logger = logging.getLogger(__name__)
 
 RRF_K = 60
 DEFAULT_RESULT_LIMIT = 5
+MAX_AUTO_CONTEXT_CIRCULARS = 3
+FRESHNESS_QUERY_PATTERN = re.compile(
+    r"\b(?:latest|current|currently|newest|most\s+recent|recently\s+revised)\b",
+    re.IGNORECASE,
+)
 
 
 def estimate_tokens(text: str) -> int:
     """Estimate tokens without tying chat retrieval to one model tokenizer."""
     return max(1, (len(text) + 3) // 4)
+
+
+def referenced_circular_ids(
+    db: Session,
+    query: str,
+    *,
+    limit: int = MAX_AUTO_CONTEXT_CIRCULARS,
+) -> list[str]:
+    """Resolve unambiguous circular references explicitly mentioned in a query."""
+    resolved: list[str] = []
+    for match in REFERENCE_PATTERN.finditer(query or ""):
+        candidates = SearchEngine._search_by_reference(match.group(0), db, limit=2)
+        if len(candidates) != 1:
+            continue
+        circular_id = candidates[0].id
+        if circular_id not in resolved:
+            resolved.append(circular_id)
+        if len(resolved) >= max(1, limit):
+            break
+    return resolved
+
+
+def query_context_circular_ids(
+    db: Session,
+    query: str,
+    *,
+    limit: int = MAX_AUTO_CONTEXT_CIRCULARS,
+) -> list[str]:
+    """Resolve explicit references or newest matches for a freshness question."""
+    referenced_ids = referenced_circular_ids(db, query, limit=limit)
+    if referenced_ids or not FRESHNESS_QUERY_PATTERN.search(query or ""):
+        return referenced_ids
+
+    results, _ = SearchEngine().search(
+        query,
+        db,
+        limit=1,
+        sort_by="date",
+    )
+    return [item["circular"].id for item in results]
+
+
+def focused_retrieval_query(query: str) -> str:
+    """Remove reference labels that add no value inside an already scoped corpus."""
+    focused = REFERENCE_PATTERN.sub(
+        lambda match: " " if match.group(2) else match.group(0),
+        query or "",
+    )
+    focused = re.sub(r"\s+", " ", focused).strip(" ,:;-.")
+    return focused or query
 
 
 def _query_centered_excerpt(text: str, query_tokens: list[str], max_chars: int) -> str:
@@ -219,8 +275,6 @@ class ScopedChatRetriever:
             text = chunk.text
             tokens = estimate_tokens(text)
             if tokens > remaining:
-                if results:
-                    continue
                 text = _query_centered_excerpt(
                     text, query_tokens, remaining * 4
                 )
@@ -248,7 +302,7 @@ def build_chat_context(
     grounding_budget = max(1, max_context_tokens // 4)
     direct, direct_ids = retriever.direct_documents(grounding_budget)
     retrieved = retriever.search(
-        query,
+        focused_retrieval_query(query),
         limit=DEFAULT_RESULT_LIMIT,
         token_budget=grounding_budget,
         excluded_document_ids=direct_ids,

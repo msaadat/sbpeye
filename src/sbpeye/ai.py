@@ -142,7 +142,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_circular_details",
-            "description": "Fetch the full details of a specific circular by its reference number or title. Use this when the user refers to a specific circular by reference (e.g. 'BPRD Circular No. 12 of 2023') or when you need the complete content of a circular found in a search.",
+            "description": "Fetch a specific circular by reference number or title, including its circular text and question-relevant passages from extracted annexures and attachments. Use this when the user refers to a specific circular (e.g. 'BPRD Circular No. 12 of 2023') or needs its complete document set.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2246,6 +2246,7 @@ SOURCE BLOCK:
         arguments: dict,
         db: Session,
         selected_circular_ids: list[str] | None = None,
+        user_query: str = "",
     ) -> str:
         """Execute a tool by name and return the result as a JSON string.
         IDs are exposed only inside opaque citation tokens that the UI can resolve."""
@@ -2268,6 +2269,7 @@ SOURCE BLOCK:
                 return json.dumps({"results": results, "count": len(results)})
 
             if name == "search_circulars":
+                from .chat_retrieval import FRESHNESS_QUERY_PATTERN
                 from .search import search_engine
                 from .models import Circular
                 query = arguments.get("query", "")
@@ -2278,6 +2280,11 @@ SOURCE BLOCK:
                     query, db, limit=limit,
                     department=department if department else None,
                     tag=tag if tag else None,
+                    sort_by=(
+                        "date"
+                        if FRESHNESS_QUERY_PATTERN.search(str(query))
+                        else "relevance"
+                    ),
                 )
                 relaxed_department = False
                 if not results and department:
@@ -2288,6 +2295,15 @@ SOURCE BLOCK:
                 out = []
                 for r in results:
                     c = r["circular"]
+                    matching_passage = re.sub(
+                        r"</?mark>", "", r.get("snippet") or ""
+                    )
+                    attachment_citation = None
+                    if r.get("attachment_id") and r.get("attachment_filename"):
+                        attachment_citation = (
+                            f"[[attachment:{r['attachment_id']}|"
+                            f"{r['attachment_filename']}]]"
+                        )
                     out.append({
                         "title": c.title,
                         "reference": c.reference,
@@ -2297,6 +2313,9 @@ SOURCE BLOCK:
                         "status": c.status or "active",
                         "tags": json.loads(c.tags) if c.tags else [],
                         "url": c.url,
+                        "matching_passage": matching_passage or None,
+                        "match_source": r.get("match_source"),
+                        "attachment_citation": attachment_citation,
                         "citation": f"[[circular:{c.id}|{c.display_name}]]",
                     })
                 return json.dumps({
@@ -2375,6 +2394,14 @@ SOURCE BLOCK:
                     c = results[0]["circular"] if results else None
                 if not c:
                     return json.dumps({"error": f"Circular not found: {ref}"})
+                from .chat_retrieval import build_chat_context
+
+                document_context, _ = build_chat_context(
+                    db,
+                    [c.id],
+                    user_query or ref,
+                    self.config.max_context_tokens,
+                )
                 return json.dumps({
                     "title": c.title,
                     "reference": c.reference,
@@ -2386,6 +2413,7 @@ SOURCE BLOCK:
                     "compliance_checklist": compact_required_checklist(c.compliance_checklist),
                     "status": c.status or "active",
                     "content_preview": (c.content_text or "")[:2000],
+                    "document_context": document_context,
                     "citation": f"[[circular:{c.id}|{c.display_name}]]",
                     "attachment_citations": [
                         f"[[attachment:{item.id}|{item.filename}]]"
@@ -2547,13 +2575,25 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
             "content": assistant_content,
             "tool_calls": tool_call_dicts,
         })
+        user_query = next(
+            (
+                str(item.get("content") or "")
+                for item in reversed(full_messages)
+                if item.get("role") == "user"
+            ),
+            "",
+        )
         for tc in tool_call_dicts:
             try:
                 args = json.loads(tc["function"]["arguments"])
             except json.JSONDecodeError:
                 args = {}
             result = self._execute_tool(
-                tc["function"]["name"], args, db, selected_circular_ids
+                tc["function"]["name"],
+                args,
+                db,
+                selected_circular_ids,
+                user_query,
             )
             full_messages.append({
                 "role": "tool",

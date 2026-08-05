@@ -5,6 +5,7 @@ split and the Phase 1c chat-session dedup can be proven behavior-preserving.
 """
 
 import json
+from datetime import datetime
 from bs4 import BeautifulSoup
 import sbpeye.database as database_module
 import sbpeye.main as main_module
@@ -485,6 +486,48 @@ def test_chat_message_creates_session_and_persists(client):
         assert session.title == "Hello there"
         roles = [m.role for m in db.query(ChatMessage).filter(ChatMessage.session_id == session_id).all()]
         assert roles == ["user", "assistant"]
+    finally:
+        db.close()
+
+
+def test_default_chat_auto_scopes_unpinned_circular_for_one_turn(client, monkeypatch):
+    test_client, db_factory = client
+    _seed_circular(
+        db_factory,
+        circular_id="unselected",
+        reference="BPRD Circular Letter No. 09 of 2026",
+        title="Customer Onboarding Framework",
+        date=datetime(2026, 3, 24),
+    )
+    captured = {}
+
+    class CapturingAIClient:
+        class Config:
+            max_context_tokens = 4000
+
+        config = Config()
+
+        def chat(self, messages, db, **kwargs):
+            captured.update(kwargs)
+            return "scoped reply"
+
+    monkeypatch.setattr(main_module, "get_ai_client", lambda db=None: CapturingAIClient())
+
+    response = test_client.post("/api/chat", json={
+        "message": "Check BPRD Circular Letter No. 09 of 2026 for the limit",
+        "session_id": "workspace:default",
+    })
+
+    assert response.status_code == 200
+    assert captured["selected_circular_ids"] == ["unselected"]
+    assert test_client.get("/api/workspaces/default").json()["pinned_count"] == 0
+
+    db = db_factory()
+    try:
+        session = db.query(ChatSession).filter(
+            ChatSession.id == "workspace:default"
+        ).one()
+        assert json.loads(session.circular_ids) == []
     finally:
         db.close()
 

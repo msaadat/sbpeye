@@ -1959,6 +1959,21 @@ def _build_chat_circulars_context(
     return context
 
 
+def _chat_turn_circular_ids(
+    db: Session,
+    circular_ids: list[str],
+    message: str,
+) -> list[str]:
+    """Add referenced or freshness-matched circulars without pinning them."""
+    from .chat_retrieval import query_context_circular_ids
+
+    inferred_ids = query_context_circular_ids(db, message)
+    return list(dict.fromkeys([
+        *inferred_ids,
+        *circular_ids,
+    ]))
+
+
 def get_or_create_chat_session(db, session_id, message, circular_ids, workspace):
     """Resolve (and persist) the ChatSession for a chat turn.
 
@@ -2017,6 +2032,7 @@ async def chat_message(request: Request, db: Session = Depends(get_db)):
     session, session_id, circular_ids = get_or_create_chat_session(
         db, session_id, message, circular_ids, workspace
     )
+    turn_circular_ids = _chat_turn_circular_ids(db, circular_ids, message)
 
     user_msg = ChatMessage(
         id=str(uuid.uuid4()),
@@ -2034,13 +2050,13 @@ async def chat_message(request: Request, db: Session = Depends(get_db)):
     try:
         client = get_ai_client(db)
         circulars_context = _build_chat_circulars_context(
-            db, circular_ids, message, client.config.max_context_tokens
+            db, turn_circular_ids, message, client.config.max_context_tokens
         )
         response_text = client.chat(
             chat_messages,
             db,
             circulars_context=circulars_context,
-            selected_circular_ids=circular_ids,
+            selected_circular_ids=turn_circular_ids,
         )
     except Exception as e:
         response_text = friendly_chat_error(e)
@@ -2080,6 +2096,7 @@ async def chat_message_stream(request: Request, db: Session = Depends(get_db)):
     session, session_id, circular_ids = get_or_create_chat_session(
         db, session_id, message, circular_ids, workspace
     )
+    turn_circular_ids = _chat_turn_circular_ids(db, circular_ids, message)
 
     if replace_message_id:
         user_msg = _truncate_chat_messages(
@@ -2115,7 +2132,7 @@ async def chat_message_stream(request: Request, db: Session = Depends(get_db)):
             client = get_ai_client(stream_db)
             circulars_context = _build_chat_circulars_context(
                 stream_db,
-                circular_ids,
+                turn_circular_ids,
                 message,
                 client.config.max_context_tokens,
             )
@@ -2124,7 +2141,7 @@ async def chat_message_stream(request: Request, db: Session = Depends(get_db)):
                 chat_messages,
                 stream_db,
                 circulars_context=circulars_context,
-                selected_circular_ids=circular_ids,
+                selected_circular_ids=turn_circular_ids,
             ):
                 if isinstance(chunk, dict):
                     yield sse("status", chunk)

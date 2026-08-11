@@ -45,6 +45,11 @@ class Circular(Base):
     entities = relationship(
         "CircularEntity", back_populates="circular", cascade="all, delete-orphan"
     )
+    reg_links = relationship(
+        "RegDocumentLink",
+        back_populates="circular",
+        cascade="all, delete-orphan",
+    )
 
 class CircularRelationship(Base):
     __tablename__ = "circular_relationships"
@@ -110,6 +115,147 @@ class Attachment(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     circular = relationship("Circular", back_populates="attachments")
+
+
+class RegDocument(Base):
+    """A law, regulation, guideline or other item from SBP's /laws-regulations listing.
+
+    Unlike a circular — an immutable dated event — a regulation is a living document
+    with a stable identity and changing content: SBP replaces the PDF in place at the
+    same URL and only hints at the change in the title suffix. So identity here is the
+    *normalized title* (version suffixes stripped), and the actual content lives in
+    `RegDocumentVersion` rows keyed by content hash.
+
+    Multi-part documents (the Foreign Exchange Manual and its chapters/appendices) are
+    modelled as a container row with `parent_id` children; a child's own children are
+    allowed, since Appendix III is itself a subpage. Listing rows that turn out to be
+    circulars are not duplicated — they carry `circular_id` and no content of their own.
+    """
+
+    __tablename__ = "reg_documents"
+
+    id = Column(String, primary_key=True, index=True)
+    title = Column(String, nullable=False)
+    normalized_title = Column(String, index=True)
+    # law | regulation | guideline | gazette | licensing
+    doc_type = Column(String, index=True)
+    source_url = Column(String, nullable=True)
+    page_slug = Column(String, nullable=True)
+    # Hierarchy. NULL for flat single-file documents.
+    parent_id = Column(String, ForeignKey("reg_documents.id"), nullable=True, index=True)
+    part_label = Column(String, nullable=True)
+    part_order = Column(Integer, nullable=True)
+    # Dedupe path: set when the listing item is actually an already-indexed circular.
+    circular_id = Column(String, ForeignKey("circulars.id"), nullable=True, index=True)
+    is_external = Column(Integer, nullable=False, default=0)
+    # From the listing's data-date attribute; display metadata only, never a version
+    # signal (old laws carry fabricated placeholder dates).
+    listed_date = Column(DateTime, nullable=True)
+    first_seen_at = Column(DateTime, default=datetime.utcnow)
+    last_seen_at = Column(DateTime, default=datetime.utcnow)
+    # Set when the row vanishes from the listing. Rows are never deleted.
+    delisted_at = Column(DateTime, nullable=True)
+    summary = Column(Text, nullable=True)
+    tags = Column(Text, nullable=True)
+    summary_generated_at = Column(DateTime, nullable=True)
+    tags_generated_at = Column(DateTime, nullable=True)
+
+    versions = relationship(
+        "RegDocumentVersion",
+        back_populates="document",
+        cascade="all, delete-orphan",
+        order_by="RegDocumentVersion.first_seen_at",
+    )
+    children = relationship(
+        "RegDocument",
+        back_populates="parent",
+        order_by="RegDocument.part_order",
+    )
+    parent = relationship("RegDocument", back_populates="children", remote_side=[id])
+    circular = relationship("Circular", foreign_keys=[circular_id])
+    circular_links = relationship(
+        "RegDocumentLink",
+        back_populates="document",
+        cascade="all, delete-orphan",
+    )
+
+    @property
+    def current_version(self):
+        """The version in force today, or None (external/stub/circular-backed rows)."""
+        for version in self.versions:
+            if version.is_current:
+                return version
+        return None
+
+
+class RegDocumentVersion(Base):
+    """One captured state of a `RegDocument`, identified by content hash.
+
+    SBP keeps no history of its own — superseded PDFs simply vanish from the site — so
+    every fetched file is archived immutably under `attachments/laws/<document_id>/` and
+    never overwritten. Hashes are the only trustworthy change detector: URLs, titles and
+    listing dates all stay put across revisions.
+
+    Currency is *not* "the newest row": the listing can carry two live editions of the
+    same document at once (an in-force one and one applicable from a future date), so
+    `is_current` is decided per document per sync from `effective_from`, and versions
+    whose effective date has not arrived stay pending with `is_current = 0`.
+    """
+
+    __tablename__ = "reg_document_versions"
+
+    id = Column(String, primary_key=True, index=True)
+    document_id = Column(
+        String, ForeignKey("reg_documents.id"), nullable=False, index=True
+    )
+    # sha256 of the file bytes, or of the cleaned text for HTML-content pages (raw HTML
+    # churns on unrelated template tweaks).
+    content_hash = Column(String, index=True)
+    file_url = Column(String, nullable=True)
+    local_path = Column(String, nullable=True)
+    file_type = Column(String, nullable=True)
+    # Parsed from the title suffix, e.g. "Updated till June 2024".
+    version_label = Column(String, nullable=True)
+    content_text = Column(Text, nullable=True)
+    extraction_status = Column(String, nullable=False, default="pending")
+    extraction_error = Column(Text, nullable=True)
+    is_vectorized = Column(Integer, nullable=False, default=0)
+    is_current = Column(Integer, nullable=False, default=1, index=True)
+    # Parsed from suffixes like "(to be applicable from January 1, 2026)"; drives
+    # currency selection between parallel editions.
+    effective_from = Column(DateTime, nullable=True)
+    first_seen_at = Column(DateTime, default=datetime.utcnow)
+    last_seen_at = Column(DateTime, default=datetime.utcnow)
+    # live | wayback (backfilled history)
+    source = Column(String, nullable=False, default="live")
+
+    document = relationship("RegDocument", back_populates="versions")
+
+
+class RegDocumentLink(Base):
+    """An edge between a circular and a law/regulation.
+
+    Circulars are the change mechanism for regulations — a circular announcing an
+    amendment is the signal that a new version exists — so this table is both a
+    navigation aid and the trigger for re-fetching a document.
+    """
+
+    __tablename__ = "reg_document_links"
+
+    id = Column(Integer, primary_key=True, index=True)
+    circular_id = Column(String, ForeignKey("circulars.id"), nullable=False, index=True)
+    document_id = Column(
+        String, ForeignKey("reg_documents.id"), nullable=False, index=True
+    )
+    # amends | annexure_of | references | implements | listing
+    link_type = Column(String, nullable=True)
+    # url_scan | ai | listing
+    detected_via = Column(String, nullable=True)
+    confidence = Column(Float, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    circular = relationship("Circular", back_populates="reg_links")
+    document = relationship("RegDocument", back_populates="circular_links")
 
 
 class CircularConsolidation(Base):

@@ -39,8 +39,8 @@ def has_vector_store_data() -> bool:
     return collection.count() > 0
 
 
-def _ensure_columns():
-    with engine.begin() as conn:
+def _ensure_columns(bind=None):
+    with (bind or engine).begin() as conn:
         insp = inspect(conn)
         table_names = insp.get_table_names()
         if "circulars" in table_names:
@@ -168,6 +168,66 @@ def _ensure_columns():
                 conn.execute(text(
                     "ALTER TABLE research_workspaces ADD COLUMN is_default INTEGER DEFAULT 0"
                 ))
+
+        # Laws & regulations (see docs/LAWS_REGULATIONS_PLAN.md). The tables themselves
+        # come from create_all; these blocks add columns to databases created by an
+        # earlier build, the same self-healing pattern used for circulars above.
+        reg_columns = {
+            "reg_documents": [
+                ("title", "VARCHAR"),
+                ("normalized_title", "VARCHAR"),
+                ("doc_type", "VARCHAR"),
+                ("source_url", "VARCHAR"),
+                ("page_slug", "VARCHAR"),
+                ("parent_id", "VARCHAR"),
+                ("part_label", "VARCHAR"),
+                ("part_order", "INTEGER"),
+                ("circular_id", "VARCHAR"),
+                ("is_external", "INTEGER DEFAULT 0"),
+                ("listed_date", "DATETIME"),
+                ("first_seen_at", "DATETIME"),
+                ("last_seen_at", "DATETIME"),
+                ("delisted_at", "DATETIME"),
+                ("summary", "TEXT"),
+                ("tags", "TEXT"),
+                ("summary_generated_at", "DATETIME"),
+                ("tags_generated_at", "DATETIME"),
+            ],
+            "reg_document_versions": [
+                ("document_id", "VARCHAR"),
+                ("content_hash", "VARCHAR"),
+                ("file_url", "VARCHAR"),
+                ("local_path", "VARCHAR"),
+                ("file_type", "VARCHAR"),
+                ("version_label", "VARCHAR"),
+                ("content_text", "TEXT"),
+                ("extraction_status", "VARCHAR DEFAULT 'pending'"),
+                ("extraction_error", "TEXT"),
+                ("is_vectorized", "INTEGER DEFAULT 0"),
+                ("is_current", "INTEGER DEFAULT 1"),
+                ("effective_from", "DATETIME"),
+                ("first_seen_at", "DATETIME"),
+                ("last_seen_at", "DATETIME"),
+                ("source", "VARCHAR DEFAULT 'live'"),
+            ],
+            "reg_document_links": [
+                ("circular_id", "VARCHAR"),
+                ("document_id", "VARCHAR"),
+                ("link_type", "VARCHAR"),
+                ("detected_via", "VARCHAR"),
+                ("confidence", "FLOAT"),
+                ("created_at", "DATETIME"),
+            ],
+        }
+        for table_name, columns in reg_columns.items():
+            if table_name not in table_names:
+                continue
+            existing = {c["name"] for c in insp.get_columns(table_name)}
+            for col_name, col_type in columns:
+                if col_name not in existing:
+                    conn.execute(text(
+                        f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}"
+                    ))
 
         # Persistent FTS5 lexical index for keyword search (see search.py). Rows are
         # maintained application-side (cells hold tokenize() output); this just ensures

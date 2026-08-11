@@ -25,8 +25,9 @@ from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
 
 from ..database import PROJECT_ROOT
+from ..laws_links import link_document_to_circular
 from ..link_routing import DOCUMENT_EXTENSIONS, find_circular_by_url, is_allowed_sbp_url
-from ..models import RegDocument, RegDocumentLink, RegDocumentVersion
+from ..models import RegDocument, RegDocumentVersion
 from .circulars import (
     ATTACHMENTS_DIR,
     BASE_URL,
@@ -629,6 +630,8 @@ def upsert_document(db: Session, row: dict, now: datetime) -> RegDocument:
     document.last_seen_at = now
     # A row that reappears after being dropped from the listing is live again.
     document.delisted_at = None
+    # The refetch request is satisfied by this pass looking at the document.
+    document.refetch_requested = 0
     return document
 
 
@@ -697,37 +700,6 @@ def sync_document_version(
     return version, existing is None, None
 
 
-def link_document_to_circular(
-    db: Session,
-    document: RegDocument,
-    circular,
-    link_type: str = "listing",
-    detected_via: str = "listing",
-    confidence: float | None = None,
-) -> RegDocumentLink:
-    """Record a circular ↔ document edge exactly once."""
-    link = (
-        db.query(RegDocumentLink)
-        .filter(
-            RegDocumentLink.circular_id == circular.id,
-            RegDocumentLink.document_id == document.id,
-            RegDocumentLink.link_type == link_type,
-        )
-        .first()
-    )
-    if link is None:
-        link = RegDocumentLink(
-            circular_id=circular.id,
-            document_id=document.id,
-            link_type=link_type,
-            detected_via=detected_via,
-            confidence=confidence,
-        )
-        db.add(link)
-        db.flush()
-    return link
-
-
 def resolve_circular_row(
     db: Session, document: RegDocument, verbose: bool = False
 ) -> bool:
@@ -747,7 +719,7 @@ def resolve_circular_row(
         return False
 
     document.circular_id = circular.id
-    link_document_to_circular(db, document, circular)
+    link_document_to_circular(db, document, circular, link_type="listing", detected_via="listing")
     if verbose:
         print(f"    [LAW] Resolved to {circular.display_name}: {document.title[:45]}")
     return True
@@ -1266,7 +1238,8 @@ def sync_laws(
     import time
 
     now = datetime.utcnow()
-    rows = fetch_listing(force=force)
+    all_rows = fetch_listing(force=force)
+    rows = all_rows
     total_rows = len(rows)
     if doc_types:
         wanted = set(doc_types)
@@ -1274,6 +1247,24 @@ def sync_laws(
     full_pass = not doc_types and (limit <= 0 or limit >= len(rows))
     if limit > 0:
         rows = rows[:limit]
+
+    # A document a new circular just referenced is synced even by a narrow pass — that
+    # flag is the whole point of the change-detection trigger (§6 of the plan).
+    if not full_pass:
+        flagged = {
+            row[0] for row in db.query(RegDocument.id)
+            .filter(RegDocument.refetch_requested == 1)
+            .all()
+        }
+        if flagged:
+            selected = {row["id"] for row in rows}
+            extra = [
+                row for row in all_rows
+                if row["id"] in flagged and row["id"] not in selected
+            ]
+            if extra and verbose:
+                print(f"Adding {len(extra)} row(s) flagged for refetch")
+            rows = rows + extra
 
     if verbose:
         print(f"Listing has {total_rows} row(s); processing {len(rows)}")

@@ -189,6 +189,7 @@ def _ensure_columns(bind=None):
                 ("first_seen_at", "DATETIME"),
                 ("last_seen_at", "DATETIME"),
                 ("delisted_at", "DATETIME"),
+                ("refetch_requested", "INTEGER DEFAULT 0"),
                 ("summary", "TEXT"),
                 ("tags", "TEXT"),
                 ("summary_generated_at", "DATETIME"),

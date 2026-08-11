@@ -155,6 +155,10 @@ class RegDocument(Base):
     last_seen_at = Column(DateTime, default=datetime.utcnow)
     # Set when the row vanishes from the listing. Rows are never deleted.
     delisted_at = Column(DateTime, nullable=True)
+    # Raised when a newly scraped circular references this document — a circular is the
+    # change mechanism for a regulation, so it is the earliest signal a new edition may
+    # exist. A flagged document is synced even by a filtered pass, then cleared.
+    refetch_requested = Column(Integer, nullable=False, default=0, index=True)
     summary = Column(Text, nullable=True)
     tags = Column(Text, nullable=True)
     summary_generated_at = Column(DateTime, nullable=True)

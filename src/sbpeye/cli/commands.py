@@ -1740,6 +1740,30 @@ def laws_sync(doc_types, limit, force, delay, skip_subpages, skip_indexing, verb
     _show_laws_status()
 
 
+@laws.command("backlink")
+@click.option("--limit", "-l", type=int, default=0, help="Max circulars to scan (0=unlimited)")
+@click.option("--rescan", is_flag=True, help="Include circulars that already have scanned links")
+@click.option("--request-refetch", is_flag=True, help="Also flag every linked document for the next sync")
+@click.option("--verbose", "-v", is_flag=True, help="Print each link created")
+def laws_backlink(limit, rescan, request_refetch, verbose):
+    """Scan circulars for references to laws & regulations and record the links."""
+    from sbpeye.laws_links import backlink_circulars
+
+    db = SessionLocal()
+    try:
+        totals = backlink_circulars(
+            db, limit=limit, rescan=rescan,
+            request_refetch=request_refetch, verbose=verbose,
+        )
+        print(
+            f"\nScanned {totals['scanned']} circular(s); {totals['linked']} carry "
+            f"references. Links: {totals['url_scan']} by URL, "
+            f"{totals['name_match']} by name."
+        )
+    finally:
+        db.close()
+
+
 @laws.command("reindex")
 @click.option("--force", is_flag=True, help="Re-embed every document, not just stale ones")
 @click.option("--verbose", "-v", is_flag=True, help="Print per-document progress")

@@ -444,6 +444,47 @@ phases 5–8 are largely independent of each other and can be re-prioritized.
     and returns instead, which also removes the same latent crash from the attachment
     path.
 
+*Answers recorded during phase 6a (live backlink, 2026-08-11).*
+
+18. **Phase 6 splits cleanly: only the AI-relationships bullet needs an LLM.** The URL
+    pass, the forward hook and the change-detection trigger are deterministic, and
+    **deterministic name matching — not in the original bullet list — carries the phase**:
+    10 links by URL versus 794 by name, across 688 circulars and 58 documents.
+19. *(New)* The URL pass alone is thin because SBP circulars rarely link laws by URL, and
+    `/assets/document/` is a store circular annexures share: all 38 attachments with that
+    prefix are FE Circular annexures, correctly matching no law. Exact-URL matching
+    against known documents is what keeps that from producing false positives.
+20. *(New)* Name matching needs guards, and the guards are where the design lives: only
+    top-level documents (a part's title is a subject line — "EXPORTS", "Authorized
+    Dealers" — that would match half the corpus), a three-word minimum (which drops
+    "Reporting Guidelines" as a phrase rather than a name), and an initialism generated
+    only for exactly-three-word titles ("Foreign Exchange Manual" → "FE Manual"; longer
+    titles produce strings nobody writes, like "prfs financing"). Parts are reached only
+    through a part reference near a mention of their container, which resolves the link to
+    the chapter — the document that would actually change. Chapter 12 (Exports) leads with
+    22 links, Chapter 13 (Imports) 15.
+21. *(New)* **Externally hosted laws are name-matched too.** Excluding them was the first
+    instinct — we hold no text — but the Banking Companies Ordinance 1962 is the most-cited
+    statute in the corpus (314 circulars), and skipping it would leave a law that appears
+    in `/api/laws` and in no circular's link list. `is_external` already tells a consumer
+    the text lives off-site.
+22. *(New)* Every edge is `link_type="references"`. A spot-check of 8 random name matches
+    found 8 genuine citations, and one of them reads "amendment in regulation R-6 of
+    Prudential Regulations for Corporate/Commercial Banking" — a real *amends* relationship
+    that this pass deliberately does not claim. That gap is exactly phase 6b's value.
+23. *(New)* `refetch_requested` would be inert if it only meant "re-download", since every
+    sync already re-downloads (a hash needs the bytes). It means something narrower and
+    real: a flagged document is included **even by a filtered pass** (`--type`, `--limit`),
+    then cleared. Only the scrape-time hook raises it; the historical backfill does not,
+    because flagging 58 documents because 3,600 old circulars mention them is a full
+    re-sync with extra steps.
+24. *(New, not acted on)* 21 archived law files share a basename with a circular
+    attachment, including the plan's own example `CL33-Annex-B.pdf` (§1.5). Basenames
+    alone are too weak to link on (`c1.pdf`, `annexure-i.pdf`), but the content hashes
+    would be exact — attachments have local files, laws versions have sha256. That would
+    give `link_type="annexure_of"` a real population; it needs a one-time hash pass over
+    1,465 attachments.
+
 ## 6. Explicit non-goals (for now)
 
 - Frontend (views, routes, badges) — separate plan once phase 5's API is stable.

@@ -849,7 +849,31 @@ def process_circular(
 
     _index_circular(circular, verbose=verbose)
     index_circular_fts(db, circular)
+    _link_circular_to_laws(db, circular, verbose=verbose)
     return circular
+
+
+def _link_circular_to_laws(db: Session, circular: Circular, verbose: bool = False) -> None:
+    """Link a freshly scraped circular to any law/regulation it points at or names.
+
+    Done at scrape time rather than waiting for the next `laws backlink`, because a new
+    circular citing a regulation is the earliest signal that a new edition of that
+    regulation may exist — hence `request_refetch`. Imported lazily to keep the laws
+    corpus out of this module's import graph, and never allowed to fail a scrape.
+    """
+    try:
+        from ..laws_links import link_circular_to_laws
+
+        counts = link_circular_to_laws(db, circular, request_refetch=True, verbose=verbose)
+        db.commit()
+        if verbose and (counts["url_scan"] or counts["name_match"]):
+            print(
+                f"  [LINK] {counts['url_scan']} url, {counts['name_match']} name "
+                f"reference(s) to laws/regulations"
+            )
+    except Exception:
+        db.rollback()
+        logging.exception("Laws cross-linking failed for circular %s", circular.id)
 
 
 def _delete_document_chunks(

@@ -1660,7 +1660,7 @@ def laws():
     pass
 
 
-def _run_laws_sync(db, doc_types, limit, force, delay, verbose) -> dict:
+def _run_laws_sync(db, doc_types, limit, force, delay, verbose, skip_subpages=False) -> dict:
     """Run a laws sync, recording it in SyncStatus so runs are auditable.
 
     The row is tagged `kind="laws"` — the circular sync UI filters on that, so a laws
@@ -1679,6 +1679,7 @@ def _run_laws_sync(db, doc_types, limit, force, delay, verbose) -> dict:
             "doc_types": list(doc_types),
             "limit": limit,
             "force": force,
+            "skip_subpages": skip_subpages,
         }),
     )
     db.add(job)
@@ -1692,6 +1693,7 @@ def _run_laws_sync(db, doc_types, limit, force, delay, verbose) -> dict:
             force=force,
             delay=delay,
             verbose=verbose,
+            skip_subpages=skip_subpages,
         )
     except Exception as exc:
         job.status = "failed"
@@ -1719,12 +1721,13 @@ def _run_laws_sync(db, doc_types, limit, force, delay, verbose) -> dict:
 @click.option("--limit", "-l", type=int, default=0, help="Max listing rows to process (0=unlimited)")
 @click.option("--force", is_flag=True, help="Re-fetch the listing and re-download every file")
 @click.option("--delay", type=float, default=0.5, show_default=True, help="Delay between downloads in seconds")
+@click.option("--skip-subpages", is_flag=True, help="Don't follow container pages into their parts")
 @click.option("--verbose", "-v", is_flag=True, help="Print per-row progress")
-def laws_sync(doc_types, limit, force, delay, verbose):
+def laws_sync(doc_types, limit, force, delay, skip_subpages, verbose):
     """Scrape SBP's laws & regulations listing, versioning by content hash."""
     db = SessionLocal()
     try:
-        _run_laws_sync(db, doc_types, limit, force, delay, verbose)
+        _run_laws_sync(db, doc_types, limit, force, delay, verbose, skip_subpages)
     finally:
         db.close()
 
@@ -1745,6 +1748,10 @@ def _show_laws_status():
     db = SessionLocal()
     try:
         documents = db.query(RegDocument).count()
+        containers = db.query(RegDocument).filter(
+            RegDocument.children.any()
+        ).count()
+        parts = db.query(RegDocument).filter(RegDocument.parent_id.isnot(None)).count()
         versions = db.query(RegDocumentVersion).count()
         current = db.query(RegDocumentVersion).filter(RegDocumentVersion.is_current == 1).count()
         pending = db.query(RegDocumentVersion).filter(
@@ -1759,7 +1766,7 @@ def _show_laws_status():
         ).count()
 
         print(f"\n--- Laws & Regulations ---")
-        print(f"  Documents:         {documents}")
+        print(f"  Documents:         {documents} ({containers} container(s), {parts} part(s))")
         print(f"  Versions:          {versions} ({current} current)")
         if pending:
             print(f"  Not yet in force:  {pending}")

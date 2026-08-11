@@ -383,6 +383,29 @@ phases 5–8 are largely independent of each other and can be re-prioritized.
    `effective_from`. The collision rule is implemented and unit-tested against the
    historical two-row case, waiting for the next time SBP does it.
 
+*Answers recorded during phase 3 (live sync, 2026-08-11).*
+
+7. **The FE Manual has 22 chapters and 4 appendices (I–IV), with no front-matter row** —
+   §1.4's "front matter + appendices I–V" no longer matches the page. Appendix III is
+   confirmed to be a nested `/laws-regulations/` page of inline HTML (~34k chars, no
+   files), so hierarchy depth 3 and the HTML-part case are both real.
+8. *(New)* Subpages come in four unrelated shapes, so the parser cannot assume tables:
+   numbered tables (FE Manual, Reporting Guidelines), tables with no key column at all
+   (CPIS), card grids whose every link reads "Download Document" so the title must come
+   from the card heading (Reporting Guides), and prose with a single inline link (Draft
+   White Label ATM). All content sits in `div.border-box`; scoping to it is what keeps
+   site navigation out of the text and out of the hash.
+9. *(New)* Part keys are not always numbers. Rows keyed "-" (Table of Contents, Preface)
+   and whole pages with no key column fall back to the normalized title, which is then
+   the only stable thing about them. Where a key exists, the label's noun comes from the
+   table's own wording ("CHAPTERS" → Chapter, caption "Appendices" → Appendix), unless
+   the row names itself — SBP files annexures under a column headed "Chapter No.".
+10. *(New)* **11 of 58 captured parts have no content because SBP's own links are dead**,
+    served as HTTP 200 with an HTML page (the whole 9-part Reporting Guidelines set) or
+    HTTP 403 (both CPIS `.XLS` forms). The content-type sniff rejects them, nothing
+    partial is stored, and they retry every sync. This is why the manifest tolerates a
+    null child hash.
+
 ## 6. Explicit non-goals (for now)
 
 - Frontend (views, routes, badges) — separate plan once phase 5's API is stable.

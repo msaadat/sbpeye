@@ -217,10 +217,15 @@ def serve_all_pdfs(site, rows, body=PDF_HEADER + b"v1"):
 
 
 def test_sync_captures_documents_versions_and_stubs(fake_site):
+    """The flat path: directly-linked files become versions, everything else waits.
+
+    Container walking is off here so this stays a test of the listing pass — see
+    test_laws_hierarchy.py for what happens when subpages are followed.
+    """
     db = make_session()
     serve_all_pdfs(fake_site, listing_rows())
 
-    counts = laws.sync_laws(db, delay=0, verbose=False)
+    counts = laws.sync_laws(db, delay=0, verbose=False, skip_subpages=True)
 
     assert counts["documents"] == 10
     assert counts["new_versions"] == 6
@@ -245,7 +250,7 @@ def test_sync_archives_content_and_extracts_text(fake_site, tmp_path):
     db = make_session()
     serve_all_pdfs(fake_site, listing_rows())
 
-    laws.sync_laws(db, delay=0)
+    laws.sync_laws(db, delay=0, skip_subpages=True)
 
     version = (
         db.query(RegDocumentVersion)
@@ -268,9 +273,9 @@ def test_unchanged_content_is_touched_not_duplicated(fake_site):
     db = make_session()
     serve_all_pdfs(fake_site, listing_rows())
 
-    laws.sync_laws(db, delay=0)
+    laws.sync_laws(db, delay=0, skip_subpages=True)
     first = db.query(RegDocumentVersion).count()
-    counts = laws.sync_laws(db, delay=0)
+    counts = laws.sync_laws(db, delay=0, skip_subpages=True)
 
     assert counts["new_versions"] == 0
     assert counts["unchanged"] == 6
@@ -282,11 +287,11 @@ def test_replaced_content_becomes_a_new_version_and_history_is_kept(fake_site):
     db = make_session()
     rows = listing_rows()
     serve_all_pdfs(fake_site, rows)
-    laws.sync_laws(db, delay=0)
+    laws.sync_laws(db, delay=0, skip_subpages=True)
 
     act = next(r for r in rows if r["title"] == "State Bank of Pakistan Act, 1956")
     fake_site.serve(act["url"], PDF_HEADER + b"amended 2026 text")
-    laws.sync_laws(db, delay=0)
+    laws.sync_laws(db, delay=0, skip_subpages=True)
 
     document = db.query(RegDocument).filter(RegDocument.id == act["id"]).one()
     assert len(document.versions) == 2
@@ -305,7 +310,7 @@ def test_a_sync_error_does_not_abort_the_pass(fake_site):
     act = next(r for r in rows if r["title"] == "State Bank of Pakistan Act, 1956")
     del fake_site.files[act["url"]]
 
-    counts = laws.sync_laws(db, delay=0)
+    counts = laws.sync_laws(db, delay=0, skip_subpages=True)
 
     assert counts["errors"] == 1
     assert counts["new_versions"] == 5
@@ -316,12 +321,12 @@ def test_type_filter_and_limit_restrict_the_pass(fake_site):
     db = make_session()
     serve_all_pdfs(fake_site, listing_rows())
 
-    counts = laws.sync_laws(db, doc_types=["law"], delay=0)
+    counts = laws.sync_laws(db, doc_types=["law"], delay=0, skip_subpages=True)
     assert counts["rows"] == 4
     assert {d.doc_type for d in db.query(RegDocument).all()} == {"law"}
 
     db2 = make_session()
-    counts = laws.sync_laws(db2, limit=2, delay=0)
+    counts = laws.sync_laws(db2, limit=2, delay=0, skip_subpages=True)
     assert counts["rows"] == 2
     assert db2.query(RegDocument).count() == 2
 
@@ -329,13 +334,13 @@ def test_type_filter_and_limit_restrict_the_pass(fake_site):
 def test_delisting_only_happens_after_a_complete_pass(fake_site):
     db = make_session()
     serve_all_pdfs(fake_site, listing_rows())
-    laws.sync_laws(db, delay=0)
+    laws.sync_laws(db, delay=0, skip_subpages=True)
 
     # A filtered pass sees a fraction of the listing and must not delist the rest.
-    laws.sync_laws(db, doc_types=["law"], delay=0)
+    laws.sync_laws(db, doc_types=["law"], delay=0, skip_subpages=True)
     assert db.query(RegDocument).filter(RegDocument.delisted_at.isnot(None)).count() == 0
 
-    laws.sync_laws(db, limit=2, delay=0)
+    laws.sync_laws(db, limit=2, delay=0, skip_subpages=True)
     assert db.query(RegDocument).filter(RegDocument.delisted_at.isnot(None)).count() == 0
 
 
@@ -343,13 +348,13 @@ def test_a_row_that_vanishes_is_delisted_and_keeps_its_content(fake_site, monkey
     db = make_session()
     rows = listing_rows()
     serve_all_pdfs(fake_site, rows)
-    laws.sync_laws(db, delay=0)
+    laws.sync_laws(db, delay=0, skip_subpages=True)
 
     act = next(r for r in rows if r["title"] == "State Bank of Pakistan Act, 1956")
     monkeypatch.setattr(laws, "fetch_listing", lambda force=False: [
         r for r in listing_rows() if r["id"] != act["id"]
     ])
-    counts = laws.sync_laws(db, delay=0)
+    counts = laws.sync_laws(db, delay=0, skip_subpages=True)
 
     assert counts["delisted"] == 1
     document = db.query(RegDocument).filter(RegDocument.id == act["id"]).one()
@@ -358,7 +363,7 @@ def test_a_row_that_vanishes_is_delisted_and_keeps_its_content(fake_site, monkey
 
     # ... and comes back to life if SBP relists it.
     monkeypatch.setattr(laws, "fetch_listing", lambda force=False: listing_rows())
-    laws.sync_laws(db, delay=0)
+    laws.sync_laws(db, delay=0, skip_subpages=True)
     db.refresh(document)
     assert document.delisted_at is None
 

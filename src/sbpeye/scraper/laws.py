@@ -13,12 +13,13 @@ phases 3 and 4 give them content.
 """
 
 import hashlib
+import json
 import logging
 import re
 import uuid
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
@@ -35,6 +36,7 @@ from .circulars import (
     extract_document_text,
     fetch_page_cached,
 )
+from .clean_html import extract_sbp_text
 
 LAWS_LISTING_URL = f"{BASE_URL}/laws-regulations"
 LAWS_ARCHIVE_DIR = ATTACHMENTS_DIR / "laws"
@@ -288,11 +290,264 @@ def fetch_listing(force: bool = False) -> list[dict]:
     return parse_listing(BeautifulSoup(html, "html.parser"))
 
 
+# --------------------------------------------------------------------------- subpages
+
+# How deep container nesting may go. The FE Manual reaches depth 2 (manual → Appendix
+# III → its content); the cap is a guard against a link cycle the visited-set misses.
+MAX_SUBPAGE_DEPTH = 4
+
+# The subpage template wraps real content in this container; everything outside it is
+# site navigation, which would otherwise dominate a page's text and churn its hash on
+# unrelated site-wide edits.
+SUBPAGE_CONTENT_SELECTORS = ("div.border-box", "main")
+
+# Number-column headers that name nothing ("Sr. No." tells you the rows are numbered,
+# not what they are), so the part noun has to come from the table's caption instead.
+_GENERIC_KEY_HEADERS = {"sr no", "s no", "sr", "no", "number", "#", "serial no", "item", "items"}
+_PLURALS = {
+    "appendices": "Appendix", "annexures": "Annexure", "annexes": "Annex",
+    "chapters": "Chapter", "schedules": "Schedule", "parts": "Part",
+    "sections": "Section", "forms": "Form", "guides": "Guide", "documents": "Document",
+}
+# A part key: "12", "III", "A-I", "IV(a)". Deliberately narrow so a title never
+# masquerades as a key.
+_PART_KEY_RE = re.compile(r"^[0-9]{1,3}[a-z]?$|^[ivxlc]+$|^[a-z]{1,3}-[0-9ivxlc]{1,6}$", re.IGNORECASE)
+
+
+def _subpage_content_root(soup: BeautifulSoup):
+    for selector in SUBPAGE_CONTENT_SELECTORS:
+        node = soup.select_one(selector)
+        if node is not None:
+            return node
+    return soup.find("body") or soup
+
+
+def page_slug(url: str | None) -> str | None:
+    """The `<slug>` of a /laws-regulations/<slug> URL — a child's identity namespace."""
+    if not url:
+        return None
+    path = urlparse(url).path.rstrip("/")
+    return path.rsplit("/", 1)[-1] or None
+
+
+def child_identity(parent_slug: str, part_key: str) -> str:
+    """The stable id of one part of a container document.
+
+    Keyed on the part number rather than the title: "Chapter 13" stays Chapter 13 across
+    editions while its subject line gets re-worded. Parts that have no number fall back
+    to their title, which is then the only stable thing about them.
+    """
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"sbp-law:{parent_slug}:{part_key}"))
+
+
+def _part_links(node) -> list[str]:
+    """Document and subpage links inside a node, in order, deduplicated."""
+    urls: list[str] = []
+    for anchor in node.select("a[href]"):
+        href = (anchor.get("href") or "").strip()
+        if not href or href.startswith(("#", "javascript:", "mailto:")):
+            continue
+        if route_link(href) in (ROUTE_PDF, ROUTE_SUBPAGE) and href not in urls:
+            urls.append(href)
+    return urls
+
+
+def _singularize(word: str) -> str | None:
+    """"CHAPTERS" / "Chapter No." -> "Chapter"; "Appendices" -> "Appendix".
+
+    Returns None for headers that name nothing, so the caller can look elsewhere.
+    """
+    cleaned = _tidy(word).replace(".", " ").casefold()
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" :-")
+    cleaned = re.sub(r"\s*(?:no|number)$", "", cleaned).strip()
+    if not cleaned or cleaned in _GENERIC_KEY_HEADERS:
+        return None
+    if cleaned in _PLURALS:
+        return _PLURALS[cleaned]
+    if len(cleaned) > 3 and cleaned.endswith("s") and not cleaned.endswith("ss"):
+        cleaned = cleaned[:-1]
+    return cleaned.title()
+
+
+# A row whose subject line opens with one of these names itself, e.g. "Annexure - I
+# Central Bank Survey", overrides the column header — SBP files its annexures in a
+# column headed "Chapter No.".
+_TITLE_NOUN_RE = re.compile(
+    r"^(appendix|annexure|annex|chapter|schedule|part|section|form)\b", re.IGNORECASE
+)
+
+
+def _title_noun(title: str) -> str | None:
+    match = _TITLE_NOUN_RE.match(_tidy(title))
+    return match.group(1).title() if match else None
+
+
+def _table_caption(table) -> str | None:
+    """The nearest text above a table — "Appendices" for the FE Manual's second table."""
+    node = table
+    for _ in range(8):
+        node = node.find_previous(string=True)
+        if node is None:
+            return None
+        text = _tidy(str(node))
+        if len(text) > 2:
+            return text
+    return None
+
+
+def _header_cells(table) -> list[str]:
+    header = table.find("tr")
+    if header is None:
+        return []
+    return [_tidy(cell.get_text(" ")) for cell in header.find_all(["td", "th"])]
+
+
+def _parse_table_parts(table, base_url: str, start_order: int) -> list[dict]:
+    """Parse one subpage table into parts.
+
+    Layouts differ per page — the FE Manual numbers its chapters, CPIS has no number
+    column at all — so the key column is found from the shape of the body cells rather
+    than from header wording, and rows carrying no document link are skipped (headers,
+    and the prose tables inside an HTML-content page).
+    """
+    rows = table.find_all("tr")
+    if not rows:
+        return []
+
+    headers = _header_cells(table)
+    body: list[tuple[list[str], list[str]]] = []
+    for row in rows:
+        cells = [_tidy(cell.get_text(" ")) for cell in row.find_all(["td", "th"])]
+        links = _part_links(row)
+        if links:
+            body.append((cells, links))
+    if not body:
+        return []
+
+    # The key column is the one whose body cells are all short keys ("12", "III", "-").
+    key_index: int | None = None
+    for index in range(max(len(cells) for cells, _ in body)):
+        values = [cells[index] for cells, _ in body if index < len(cells)]
+        if not values:
+            continue
+        if all(_PART_KEY_RE.match(value) or value in {"-", ""} for value in values) and any(
+            _PART_KEY_RE.match(value) for value in values
+        ):
+            key_index = index
+            break
+
+    noun = None
+    if key_index is not None:
+        if key_index < len(headers):
+            noun = _singularize(headers[key_index])
+        noun = noun or _singularize(_table_caption(table) or "")
+
+    parts: list[dict] = []
+    for offset, (cells, links) in enumerate(body):
+        key_value = cells[key_index] if key_index is not None and key_index < len(cells) else ""
+        # Longest remaining cell is the subject line; on a one-column table that is the
+        # key column itself only when there is no key column at all.
+        candidates = [
+            (index, value) for index, value in enumerate(cells)
+            if index != key_index and value
+        ]
+        title = max(candidates, key=lambda item: len(item[1]))[1] if candidates else key_value
+        if not title:
+            continue
+
+        if key_value and key_value not in {"-", ""} and _PART_KEY_RE.match(key_value):
+            part_key = key_value.upper()
+            row_noun = _title_noun(title) or noun
+            label = f"{row_noun} {part_key}" if row_noun else part_key
+        else:
+            part_key = normalize_law_title(title)
+            label = title
+        parts.append({
+            "part_key": part_key,
+            "part_label": label,
+            "title": title,
+            "url": urljoin(base_url, links[0]),
+            "order": start_order + offset,
+        })
+    return parts
+
+
+def _parse_card_parts(root, base_url: str, start_order: int) -> list[dict]:
+    """Parse the card layout, where the real title is the card heading.
+
+    Every card's link says "Download Document", so anchor text is useless here.
+    """
+    parts: list[dict] = []
+    for offset, card in enumerate(root.select("div.category-box")):
+        links = _part_links(card)
+        heading = card.select_one("h5, h4, h3, .title")
+        title = _tidy(heading.get_text(" ")) if heading else ""
+        if not links or not title:
+            continue
+        parts.append({
+            "part_key": normalize_law_title(title),
+            "part_label": title,
+            "title": title,
+            "url": urljoin(base_url, links[0]),
+            "order": start_order + offset,
+        })
+    return parts
+
+
+def _parse_inline_parts(root, base_url: str, start_order: int) -> list[dict]:
+    """Parse document links sitting in prose, using the link text as the title."""
+    parts: list[dict] = []
+    for offset, anchor in enumerate(root.select("a[href]")):
+        href = (anchor.get("href") or "").strip()
+        if not href or route_link(href) not in (ROUTE_PDF, ROUTE_SUBPAGE):
+            continue
+        title = _tidy(anchor.get_text(" ")) or _tidy(unquote(Path(urlparse(href).path).stem))
+        parts.append({
+            "part_key": normalize_law_title(title),
+            "part_label": title,
+            "title": title,
+            "url": urljoin(base_url, href),
+            "order": start_order + offset,
+        })
+    return parts
+
+
+def parse_subpage(html: bytes, base_url: str) -> dict:
+    """Parse a /laws-regulations/<slug> page into {parts, content_text}.
+
+    A subpage is either a container (its parts are separate documents that revise
+    independently) or a document in its own right whose content is the page itself —
+    Appendix III of the FE Manual is ~36 notifications of inline HTML with no files.
+    No parts found means the latter.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    root = _subpage_content_root(soup)
+
+    parts: list[dict] = []
+    for table in root.find_all("table"):
+        parts.extend(_parse_table_parts(table, base_url, len(parts)))
+    parts.extend(_parse_card_parts(root, base_url, len(parts)))
+    if not parts:
+        parts = _parse_inline_parts(root, base_url, 0)
+
+    # One URL, one part: tables and prose links overlap on some pages.
+    unique: dict[str, dict] = {}
+    for part in parts:
+        unique.setdefault(part["url"], part)
+
+    return {
+        "parts": list(unique.values()),
+        "content_text": extract_sbp_text(str(root).encode()),
+    }
+
+
 # --------------------------------------------------------------------------- archive
 
 
 def _archive_name(content_hash: str, url: str) -> str:
-    filename = Path(urlparse(url).path).name or "document"
+    # Child files carry percent-encoded names ("CPIS-Forms-I_%281%29.XLS"); archive them
+    # under the name SBP shows, not the escaped one.
+    filename = unquote(Path(urlparse(url).path).name) or "document"
     return f"{content_hash[:8]}-{filename}"
 
 
@@ -310,6 +565,17 @@ def download_law_file(
     response = None
     temp_path = LAWS_ARCHIVE_DIR / document_id / f".part-{uuid.uuid4().hex}"
     temp_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def abandon(error: str) -> tuple[None, None, str]:
+        """Drop the partial download, leaving no archive directory for a document we
+        never captured. SBP serves plenty of dead links as 200-with-HTML."""
+        temp_path.unlink(missing_ok=True)
+        try:
+            temp_path.parent.rmdir()
+        except OSError:
+            pass
+        return None, None, error
+
     try:
         response = _get_sbp(url, headers=HEADERS, timeout=60, stream=True)
         response.raise_for_status()
@@ -319,8 +585,7 @@ def download_law_file(
                 if not chunk:
                     continue
                 if index == 0 and not _content_matches_file_type(chunk, file_type):
-                    temp_path.unlink(missing_ok=True)
-                    return None, None, f"{url} did not return a valid {file_type} file."
+                    return abandon(f"{url} did not return a valid {file_type} file.")
                 digest.update(chunk)
                 output.write(chunk)
 
@@ -332,14 +597,8 @@ def download_law_file(
             temp_path.replace(destination)
         return destination, content_hash, None
     except Exception as exc:
-        temp_path.unlink(missing_ok=True)
-        # Leave no empty archive directory behind for a document we never captured.
-        try:
-            temp_path.parent.rmdir()
-        except OSError:
-            pass
         logging.warning("Failed to download law document %s: %s", url, exc)
-        return None, None, str(exc)
+        return abandon(str(exc))
     finally:
         if response is not None:
             response.close()
@@ -436,6 +695,274 @@ def sync_document_version(
     return version, existing is None, None
 
 
+def upsert_child(
+    db: Session, parent: RegDocument, part: dict, now: datetime
+) -> RegDocument:
+    """Create or refresh one part of a container document."""
+    parent_slug = parent.page_slug or page_slug(parent.source_url) or parent.id
+    child_id = child_identity(parent_slug, part["part_key"])
+    child = db.query(RegDocument).filter(RegDocument.id == child_id).first()
+    if child is None:
+        child = RegDocument(id=child_id, first_seen_at=now)
+        db.add(child)
+
+    child.title = part["title"]
+    child.normalized_title = normalize_law_title(part["title"])
+    # A part is the same kind of thing as the document it belongs to.
+    child.doc_type = parent.doc_type
+    child.source_url = part["url"]
+    child.parent_id = parent.id
+    child.part_label = part["part_label"]
+    child.part_order = part["order"]
+    child.is_external = 1 if route_link(part["url"]) == ROUTE_EXTERNAL else 0
+    child.last_seen_at = now
+    child.delisted_at = None
+    return child
+
+
+def sync_html_version(
+    db: Session,
+    document: RegDocument,
+    content_text: str,
+    now: datetime,
+    verbose: bool = False,
+) -> tuple[RegDocumentVersion, bool]:
+    """Capture a page whose content *is* the page, with no file behind it.
+
+    The hash is taken over the cleaned text rather than the raw HTML, so a site-wide
+    template tweak does not read as a new edition of the law.
+    """
+    content_hash = hashlib.sha256(content_text.encode("utf-8")).hexdigest()
+    existing = (
+        db.query(RegDocumentVersion)
+        .filter(
+            RegDocumentVersion.document_id == document.id,
+            RegDocumentVersion.content_hash == content_hash,
+        )
+        .first()
+    )
+    if existing is not None:
+        existing.last_seen_at = now
+        return existing, False
+
+    version = RegDocumentVersion(
+        id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"sbp-law-version:{document.id}:{content_hash}")),
+        document_id=document.id,
+        content_hash=content_hash,
+        file_url=None,
+        local_path=None,
+        file_type="html",
+        content_text=content_text,
+        extraction_status="extracted",
+        first_seen_at=now,
+        last_seen_at=now,
+        source="live",
+        is_current=0,
+    )
+    db.add(version)
+    # Flush so the currency pass, which queries versions back, can see this one.
+    db.flush()
+    if verbose:
+        print(f"    [LAW] New HTML version: {document.title[:60]}")
+    return version, True
+
+
+def write_manifest_version(
+    db: Session,
+    container: RegDocument,
+    parts: list[dict],
+    child_hashes: dict[str, str | None],
+    now: datetime,
+    verbose: bool = False,
+) -> tuple[RegDocumentVersion | None, bool]:
+    """Record what a container held, as a version hashed over its children's hashes.
+
+    A container has no bytes of its own — the FE Manual *is* its 22 chapters, which
+    revise independently. Hashing the child hashes means a new manifest row appears
+    exactly when some part actually changed, which makes the manifest history double as
+    the change log: diff two manifests to see which chapters moved between two syncs.
+    """
+    manifest = {
+        "document_id": container.id,
+        "parts": [
+            {
+                "id": part["child_id"],
+                "part_key": part["part_key"],
+                "part_label": part["part_label"],
+                "title": part["title"],
+                "content_hash": child_hashes.get(part["child_id"]),
+            }
+            for part in sorted(parts, key=lambda item: item["order"])
+        ],
+    }
+    digest_basis = "\n".join(
+        f"{entry['id']}:{entry['content_hash'] or ''}" for entry in manifest["parts"]
+    )
+    content_hash = hashlib.sha256(digest_basis.encode("utf-8")).hexdigest()
+
+    existing = (
+        db.query(RegDocumentVersion)
+        .filter(
+            RegDocumentVersion.document_id == container.id,
+            RegDocumentVersion.content_hash == content_hash,
+        )
+        .first()
+    )
+    if existing is not None:
+        existing.last_seen_at = now
+        return existing, False
+
+    version = RegDocumentVersion(
+        id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"sbp-law-version:{container.id}:{content_hash}")),
+        document_id=container.id,
+        content_hash=content_hash,
+        file_url=None,
+        local_path=None,
+        # Not "html": a manifest is bookkeeping, not readable text, and phase 5 must keep
+        # it out of the search index.
+        file_type="manifest",
+        content_text=json.dumps(manifest, indent=2),
+        extraction_status="extracted",
+        first_seen_at=now,
+        last_seen_at=now,
+        source="live",
+        is_current=0,
+    )
+    db.add(version)
+    db.flush()
+    if verbose:
+        print(f"    [LAW] New manifest ({len(manifest['parts'])} parts): {container.title[:50]}")
+    return version, True
+
+
+def delist_missing_children(
+    db: Session, parent_id: str, seen_ids: set[str], now: datetime
+) -> int:
+    """Mark parts that disappeared from their container's page. Nothing is deleted."""
+    query = db.query(RegDocument).filter(
+        RegDocument.parent_id == parent_id,
+        RegDocument.delisted_at.is_(None),
+    )
+    if seen_ids:
+        query = query.filter(RegDocument.id.notin_(seen_ids))
+    missing = query.all()
+    for document in missing:
+        document.delisted_at = now
+    return len(missing)
+
+
+def _observe(observed: dict[str, list[dict]], document_id: str, version, order: int = 0) -> None:
+    """Note that this pass pointed at `version` — the currency tiebreak reads this.
+
+    Without it, two versions first seen in the same sync are indistinguishable and the
+    superseded one can keep the crown.
+    """
+    observed.setdefault(document_id, []).append(
+        {"version_id": version.id, "order": order, "listed_date": None}
+    )
+
+
+def sync_subpage(
+    db: Session,
+    document: RegDocument,
+    now: datetime,
+    counts: dict,
+    touched: set[str],
+    visited: set[str],
+    observed: dict[str, list[dict]] | None = None,
+    force: bool = False,
+    delay: float = 0.0,
+    verbose: bool = False,
+    depth: int = 0,
+) -> str | None:
+    """Sync a /laws-regulations/<slug> document, recursing into nested containers.
+
+    Returns the document's own content hash so a parent can fold it into its manifest.
+    """
+    import time
+
+    observed = {} if observed is None else observed
+    url = document.source_url
+    if not url or url in visited or depth > MAX_SUBPAGE_DEPTH:
+        current = document.current_version
+        return current.content_hash if current else None
+    visited.add(url)
+    document.page_slug = page_slug(url)
+
+    parsed = parse_subpage(fetch_page_cached(url, force=force), url)
+    parts = parsed["parts"]
+
+    if not parts:
+        version, created = sync_html_version(
+            db, document, parsed["content_text"], now, verbose=verbose
+        )
+        touched.add(document.id)
+        _observe(observed, document.id, version)
+        counts["new_versions" if created else "unchanged"] += 1
+        return version.content_hash
+
+    if verbose:
+        print(f"    [LAW] Container with {len(parts)} part(s): {document.title[:50]}")
+
+    child_hashes: dict[str, str | None] = {}
+    seen_children: set[str] = set()
+    for part in parts:
+        child = upsert_child(db, document, part, now)
+        db.flush()
+        part["child_id"] = child.id
+        touched.add(child.id)
+        seen_children.add(child.id)
+        counts["children"] += 1
+
+        route = route_link(part["url"])
+        if route == ROUTE_SUBPAGE:
+            child_hashes[child.id] = sync_subpage(
+                db, child, now, counts, touched, visited, observed,
+                force=force, delay=delay, verbose=verbose, depth=depth + 1,
+            )
+        elif route == ROUTE_PDF:
+            row = {
+                "title": part["title"],
+                "url": part["url"],
+                "version_label": parse_version_label(part["title"]),
+                "effective_from": parse_effective_from(part["title"]),
+            }
+            try:
+                version, created, error = sync_document_version(
+                    db, child, row, now, force=force, verbose=verbose
+                )
+            except Exception as exc:  # one bad part must not lose the whole container
+                version, created, error = None, False, str(exc)
+            if version is None:
+                counts["errors"] += 1
+                print(f"  [ERROR] {part['url']}: {error}")
+                current = child.current_version
+                child_hashes[child.id] = current.content_hash if current else None
+            else:
+                db.flush()
+                child_hashes[child.id] = version.content_hash
+                _observe(observed, child.id, version, part["order"])
+                counts["new_versions" if created else "unchanged"] += 1
+            if delay:
+                time.sleep(delay)
+        else:
+            counts["stubs"] += 1
+
+        db.commit()
+
+    counts["delisted"] += delist_missing_children(db, document.id, seen_children, now)
+    version, created = write_manifest_version(
+        db, document, parts, child_hashes, now, verbose=verbose
+    )
+    touched.add(document.id)
+    if version is not None:
+        _observe(observed, document.id, version)
+    if created:
+        counts["manifests"] += 1
+    db.commit()
+    return version.content_hash if version else None
+
+
 def select_current_versions(
     db: Session,
     document_ids: set[str],
@@ -530,12 +1057,14 @@ def sync_laws(
     force: bool = False,
     delay: float = 0.5,
     verbose: bool = False,
+    skip_subpages: bool = False,
 ) -> dict:
     """Sync the laws & regulations listing into `reg_documents`.
 
-    Phase 2 fetches content for directly-linked document files. Subpage and circular rows
-    are recorded as stubs — they are real documents with real identities, just without
-    content until phases 3 and 4 — and external rows are metadata-only by design.
+    Directly-linked files become versions; subpage rows are followed into their parts
+    (recursively, since a part can be a container itself) and summarised by a manifest
+    version. Circular-typed rows stay stubs until phase 4, and external rows are
+    metadata-only by design.
     """
     import time
 
@@ -553,14 +1082,19 @@ def sync_laws(
         print(f"Listing has {total_rows} row(s); processing {len(rows)}")
 
     seen_ids: set[str] = set()
+    touched: set[str] = set()
+    visited_subpages: set[str] = set()
     rows_by_document: dict[str, list[dict]] = {}
     counts = {
         "rows": len(rows),
         "documents": 0,
+        "children": 0,
+        "manifests": 0,
         "new_versions": 0,
         "unchanged": 0,
         "stubs": 0,
         "external": 0,
+        "delisted": 0,
         "errors": 0,
     }
 
@@ -568,10 +1102,20 @@ def sync_laws(
         document = upsert_document(db, row, now)
         if document.id not in seen_ids:
             seen_ids.add(document.id)
+            touched.add(document.id)
             counts["documents"] += 1
         rows_by_document.setdefault(document.id, []).append(row)
 
-        if row["route"] == ROUTE_PDF:
+        if row["route"] == ROUTE_SUBPAGE and not skip_subpages:
+            try:
+                sync_subpage(
+                    db, document, now, counts, touched, visited_subpages,
+                    rows_by_document, force=force, delay=delay, verbose=verbose,
+                )
+            except Exception as exc:  # a broken container must not end the pass
+                counts["errors"] += 1
+                print(f"  [ERROR] {row['url']}: {exc}")
+        elif row["route"] == ROUTE_PDF:
             try:
                 version, created, error = sync_document_version(
                     db, document, row, now, force=force, verbose=verbose
@@ -600,13 +1144,17 @@ def sync_laws(
         if verbose:
             print(f"[{index}/{len(rows)}] {row['title'][:70]}")
 
-    select_current_versions(db, seen_ids, rows_by_document, now=now)
-    counts["delisted"] = delist_missing(db, seen_ids, now) if full_pass else 0
+    # Children and containers are decided here too — their currency has no listing row
+    # behind it, so it falls through to "the version we most recently captured".
+    select_current_versions(db, touched, rows_by_document, now=now)
+    if full_pass:
+        counts["delisted"] += delist_missing(db, seen_ids, now)
     db.commit()
 
     print(
-        f"\nLaws sync complete. Documents: {counts['documents']}, "
-        f"new versions: {counts['new_versions']}, unchanged: {counts['unchanged']}, "
+        f"\nLaws sync complete. Documents: {counts['documents']} "
+        f"(+{counts['children']} part(s)), new versions: {counts['new_versions']}, "
+        f"manifests: {counts['manifests']}, unchanged: {counts['unchanged']}, "
         f"stubs: {counts['stubs']}, external: {counts['external']}, "
         f"delisted: {counts['delisted']}, errors: {counts['errors']}"
     )

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Float
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Float, or_
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from .database import Base
@@ -378,6 +378,9 @@ class SyncStatus(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     job_id = Column(String, nullable=True, index=True)
+    # Which corpus this run scraped: circulars | laws. NULL on rows written before
+    # laws sync existed, which are all circular runs — see CIRCULAR_SYNC_KINDS.
+    kind = Column(String, nullable=True, index=True)
     last_sync_date = Column(DateTime)
     status = Column(String)
     started_at = Column(DateTime, nullable=True)
@@ -388,6 +391,17 @@ class SyncStatus(Base):
     skipped_count = Column(Integer, nullable=True)
     error_count = Column(Integer, nullable=True)
     ecodata_index_time = Column(DateTime, nullable=True)
+
+def circular_sync_only():
+    """Filter selecting the SyncStatus rows the circular-sync UI owns.
+
+    Laws runs share the table (`kind="laws"`) but must stay out of the circular sync
+    banner. Rows written before `kind` existed are all circular runs, hence the NULL
+    arm — `kind.in_((None, "circulars"))` would silently drop them, since SQL's IN
+    never matches NULL.
+    """
+    return or_(SyncStatus.kind.is_(None), SyncStatus.kind == "circulars")
+
 
 class Settings(Base):
     __tablename__ = "settings"

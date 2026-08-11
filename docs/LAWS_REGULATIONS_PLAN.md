@@ -346,17 +346,42 @@ phases 5–8 are largely independent of each other and can be re-prioritized.
 
 ## 5. Open questions / verify during implementation
 
+*Answers recorded during phase 2 (live sync, 2026-08-11).*
+
 1. **Gazette Notifications & Licensing Guidelines** sections rendered 0 rows in the
    snapshot. Re-check on the live page; if they populate later, phase 2 handles them for
    free (they're just more `law-row`s). The separate `/notifications` site section is
    **out of scope** for this plan.
+   → **Still empty.** Both sections render their heading and an empty table. Their
+   `data-type` values are known from the filter panel (`gazette notifications`,
+   `licensing guidelines`) and are already mapped, so rows will be picked up whenever
+   they appear. Listing is now 75 rows: 19 laws, 22 regulations, 34 guidelines.
 2. Whether any listing PDFs are scanned images (no text layer) — if so, extraction falls
    back to the same handling attachments use today (status `failed`/empty text; OCR is out
    of scope).
+   → **Yes: 9 of 58 captured files** extract as `scanned`. Handled by the shared
+   `extract_document_text()` path, same as attachments. OCR remains out of scope.
 3. Rate limiting: the listing has ~80 items; FE Manual adds ~30 files. A full cold sync is
    ~110 downloads — keep the existing polite delay/throttle conventions from circular sync.
+   → 59 direct-PDF downloads at `--delay 0.5` (default) completed without throttling.
+   SBP does return sporadic `522`s and one truncated response under normal load; failures
+   store nothing and are retried on the next sync. `Ordinance_1.pdf` (Microfinance
+   Institutions Ordinance 2001) is **broken server-side** — it advertises 259,207 bytes
+   and delivers 419 — so that document has no version and stays a stub until SBP fixes it.
 4. Whether `data-date` on *new* Regulations rows is reliable enough to display (it looked
    correct for recent items, fabricated for old laws).
+   → Present on only 38 of 75 rows (all Guidelines lack it), and old laws carry a
+   placeholder "30 December &lt;year&gt;". Stored as display metadata; **not** used for
+   currency except as the documented tiebreak.
+5. *(New)* Titles carry years that are part of the document's name ("Credit Bureau Act
+   2015" vs "Credit Bureaus Amendment Act 2016"). Normalization therefore strips only the
+   version-suffix slot — parenthesized or comma/dash-led trailers matching
+   updated/as-of/as-modified/applicable-from/being-updated — never a trailing year, which
+   §3's "trailing dates" must be read as excluding.
+6. *(New)* The parallel-edition case §3 is built for is **not live today**: SME PRs now
+   show a single row, "(Updated till July 16, 2026)". No listing row currently parses an
+   `effective_from`. The collision rule is implemented and unit-tested against the
+   historical two-row case, waiting for the next time SBP does it.
 
 ## 6. Explicit non-goals (for now)
 

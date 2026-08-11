@@ -2,6 +2,7 @@ import click
 import sys
 import time
 import json
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -1649,6 +1650,143 @@ def cache_check_stale(prune, verbose):
     db = SessionLocal()
     try:
         _run_cache_check_stale(db, prune=prune, verbose=verbose)
+    finally:
+        db.close()
+
+
+@cli.group()
+def laws():
+    """Manage SBP laws & regulations — sync the /laws-regulations listing."""
+    pass
+
+
+def _run_laws_sync(db, doc_types, limit, force, delay, verbose) -> dict:
+    """Run a laws sync, recording it in SyncStatus so runs are auditable.
+
+    The row is tagged `kind="laws"` — the circular sync UI filters on that, so a laws
+    run never shows up as the circular sync's status (see models.circular_sync_only).
+    """
+    from sbpeye.models import SyncStatus
+    from sbpeye.scraper.laws import sync_laws
+
+    job = SyncStatus(
+        job_id=str(uuid.uuid4()),
+        kind="laws",
+        status="running",
+        started_at=datetime.utcnow(),
+        parameters=json.dumps({
+            "kind": "laws",
+            "doc_types": list(doc_types),
+            "limit": limit,
+            "force": force,
+        }),
+    )
+    db.add(job)
+    db.commit()
+
+    try:
+        counts = sync_laws(
+            db,
+            doc_types=list(doc_types) or None,
+            limit=limit,
+            force=force,
+            delay=delay,
+            verbose=verbose,
+        )
+    except Exception as exc:
+        job.status = "failed"
+        job.error = str(exc)
+        job.completed_at = datetime.utcnow()
+        db.commit()
+        raise
+
+    job.status = "success"
+    job.completed_at = datetime.utcnow()
+    job.last_sync_date = job.completed_at
+    job.processed_count = counts["new_versions"]
+    job.skipped_count = counts["unchanged"] + counts["stubs"] + counts["external"]
+    job.error_count = counts["errors"]
+    db.commit()
+    return counts
+
+
+@laws.command("sync")
+@click.option(
+    "--type", "doc_types", multiple=True,
+    type=click.Choice(["law", "regulation", "guideline", "gazette", "licensing"]),
+    help="Only sync these document types (repeatable)",
+)
+@click.option("--limit", "-l", type=int, default=0, help="Max listing rows to process (0=unlimited)")
+@click.option("--force", is_flag=True, help="Re-fetch the listing and re-download every file")
+@click.option("--delay", type=float, default=0.5, show_default=True, help="Delay between downloads in seconds")
+@click.option("--verbose", "-v", is_flag=True, help="Print per-row progress")
+def laws_sync(doc_types, limit, force, delay, verbose):
+    """Scrape SBP's laws & regulations listing, versioning by content hash."""
+    db = SessionLocal()
+    try:
+        _run_laws_sync(db, doc_types, limit, force, delay, verbose)
+    finally:
+        db.close()
+
+    _show_laws_status()
+
+
+@laws.command("status")
+def laws_status():
+    """Show laws & regulations counts by type, versions, and pending extractions."""
+    _show_laws_status()
+
+
+def _show_laws_status():
+    from sqlalchemy import func
+
+    from sbpeye.models import RegDocument, RegDocumentVersion
+
+    db = SessionLocal()
+    try:
+        documents = db.query(RegDocument).count()
+        versions = db.query(RegDocumentVersion).count()
+        current = db.query(RegDocumentVersion).filter(RegDocumentVersion.is_current == 1).count()
+        pending = db.query(RegDocumentVersion).filter(
+            RegDocumentVersion.effective_from.isnot(None),
+            RegDocumentVersion.is_current == 0,
+            RegDocumentVersion.effective_from > datetime.utcnow(),
+        ).count()
+        delisted = db.query(RegDocument).filter(RegDocument.delisted_at.isnot(None)).count()
+        external = db.query(RegDocument).filter(RegDocument.is_external == 1).count()
+        stubs = db.query(RegDocument).filter(
+            ~RegDocument.versions.any(), RegDocument.is_external == 0
+        ).count()
+
+        print(f"\n--- Laws & Regulations ---")
+        print(f"  Documents:         {documents}")
+        print(f"  Versions:          {versions} ({current} current)")
+        if pending:
+            print(f"  Not yet in force:  {pending}")
+        print(f"  Awaiting content:  {stubs} stub(s), {external} external")
+        if delisted:
+            print(f"  Delisted:          {delisted}")
+
+        type_counts = (
+            db.query(RegDocument.doc_type, func.count(RegDocument.id))
+            .group_by(RegDocument.doc_type)
+            .all()
+        )
+        if type_counts:
+            print(f"\n  By type:")
+            for doc_type, count in sorted(type_counts, key=lambda row: -row[1]):
+                print(f"    {doc_type or 'unknown':<20s} {count:>4}")
+
+        status_counts = (
+            db.query(RegDocumentVersion.extraction_status, func.count(RegDocumentVersion.id))
+            .group_by(RegDocumentVersion.extraction_status)
+            .all()
+        )
+        if status_counts:
+            print(f"\n  Extraction:")
+            for status, count in sorted(status_counts, key=lambda row: -row[1]):
+                print(f"    {status or 'unknown':<20s} {count:>4}")
+        print()
     finally:
         db.close()
 

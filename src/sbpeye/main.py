@@ -15,7 +15,7 @@ import uuid
 import threading
 
 from .database import PROJECT_ROOT, engine, Base, get_db, SessionLocal, has_vector_store_data
-from .models import AIGenerationJob, Attachment, CachedDocument, SyncStatus, Circular, CircularEntity, CircularRelationship, EcoDataSeries, EcoDataEntry, Settings, ChatSession, ChatMessage, ResearchWorkspace, WorkspaceCircular
+from .models import AIGenerationJob, Attachment, CachedDocument, SyncStatus, circular_sync_only, Circular, CircularEntity, CircularRelationship, EcoDataSeries, EcoDataEntry, Settings, ChatSession, ChatMessage, ResearchWorkspace, WorkspaceCircular
 from .search import backfill_fts, index_circular_fts, resolve_metric_terms, search_engine
 from .ai import AIClient, AIConfig, classify_provider_state, friendly_chat_error, get_ai_client, get_provider_api_key, get_provider_definition, normalize_provider
 from .circular_ai import GENERATION_ACTIONS, generation_job_payload, run_generation_job
@@ -125,7 +125,8 @@ def fail_interrupted_sync_jobs() -> None:
     db = SessionLocal()
     try:
         interrupted = db.query(SyncStatus).filter(
-            SyncStatus.status.in_(("queued", "running"))
+            SyncStatus.status.in_(("queued", "running")),
+            circular_sync_only(),
         ).all()
         for job in interrupted:
             job.status = "failed"
@@ -237,7 +238,12 @@ _REMOTE_CIRCULAR_CHECK_RUNNING = False
 
 
 def _latest_sync_status(db: Session) -> SyncStatus | None:
-    return db.query(SyncStatus).order_by(SyncStatus.id.desc()).first()
+    return (
+        db.query(SyncStatus)
+        .filter(circular_sync_only())
+        .order_by(SyncStatus.id.desc())
+        .first()
+    )
 
 
 def _remote_circular_availability_payload(db: Session) -> dict:
@@ -342,7 +348,11 @@ def _remote_circular_check_status() -> dict:
 def _latest_successful_sync(db: Session) -> SyncStatus | None:
     return (
         db.query(SyncStatus)
-        .filter(SyncStatus.status == "success", SyncStatus.last_sync_date.isnot(None))
+        .filter(
+            SyncStatus.status == "success",
+            SyncStatus.last_sync_date.isnot(None),
+            circular_sync_only(),
+        )
         .order_by(SyncStatus.last_sync_date.desc())
         .first()
     )
@@ -557,7 +567,12 @@ async def get_llm_status(db: Session = Depends(get_db)):
 
 
 def _get_ecodata_entries(db: Session, force_refresh: bool = False) -> list[dict]:
-    sync_status = db.query(SyncStatus).order_by(SyncStatus.id.desc()).first()
+    sync_status = (
+        db.query(SyncStatus)
+        .filter(circular_sync_only())
+        .order_by(SyncStatus.id.desc())
+        .first()
+    )
     ecodata_time = sync_status.ecodata_index_time if sync_status else None
 
     needs_refresh = force_refresh or ecodata_time is None

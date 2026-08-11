@@ -148,6 +148,7 @@ def _ensure_columns(bind=None):
             existing = {c["name"] for c in insp.get_columns("sync_status")}
             new_columns = [
                 ("job_id", "VARCHAR"),
+                ("kind", "VARCHAR"),
                 ("started_at", "DATETIME"),
                 ("completed_at", "DATETIME"),
                 ("error", "TEXT"),

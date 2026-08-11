@@ -51,6 +51,7 @@ SBPEye/
 │   ├── scraper/
 │   │   ├── __init__.py
 │   │   ├── circulars.py            # SBP circulars scraper
+│   │   ├── laws.py                 # SBP laws & regulations scraper (content-hash versioning)
 │   │   ├── ecodata.py              # Economic data scraper
 │   │   ├── ecodata_index.py       # EcoData index page scraper
 │   │   ├── news.py                 # SBP homepage news scraper
@@ -109,6 +110,10 @@ sbpeye circulars status             # Recompute status from relationships
 
 # Run full pipeline
 sbpeye circulars all --dept bprd --year 2025
+
+# Laws & regulations (sbp.org.pk/laws-regulations)
+sbpeye laws sync --type regulation -v   # Scrape the listing; new content hash = new version
+sbpeye laws status                      # Counts by type, versions, pending extractions
 
 # Other commands
 sbpeye stats                        # Show DB statistics
@@ -188,6 +193,8 @@ cd frontend && npm run typecheck  # TypeScript type checking
 - DB sessions are managed via FastAPI dependency injection (`get_db` generator)
 - Database migrations are handled automatically via `_ensure_columns()` in database.py (no Alembic); it also creates the `circulars_fts` virtual table
 - The FTS5 keyword index (`circulars_fts`) is maintained at the application layer, not via SQL triggers — any code path that changes a circular's or attachment's text must call `index_circular_fts(db, circular)` (search.py) alongside the existing ChromaDB write, or the circular won't surface in keyword search
+- Laws/regulations are versioned by content hash, never by URL, title or listing date — SBP replaces PDFs in place. Archived files under `attachments/laws/<document_id>/<hash8>-<name>` are immutable: never overwrite one, never delete a delisted document. Which version is in force is decided once per document per sync by `select_current_versions()`, never as a side effect of fetch order
+- `SyncStatus` rows are shared by both scrapers and discriminated by `kind`; every circular-facing query must filter through `models.circular_sync_only()` so laws runs stay out of the circular sync banner
 - `chroma_db/` is local runtime data and should not be committed to git.
 - Frontend is a Vue 3 SPA with Vue Router, Pinia stores, and PrimeVue components
 - Dark mode is implemented via PrimeVue's built-in dark mode class switching

@@ -399,6 +399,24 @@ def extract_xlsx_text(xlsx_path: Path) -> tuple[str, str | None]:
         return "", str(exc)
 
 
+def extract_document_text(
+    file_path: Path, file_type: str | None
+) -> tuple[str | None, str, str | None]:
+    """Extract text from a downloaded document as (text, status, error).
+
+    The single place that maps a file type to an extractor, shared by circular
+    attachments and by laws/regulations versions (scraper/laws.py) so both corpora
+    classify scanned and unsupported files identically.
+    """
+    if file_type == "pdf":
+        text, status, error = extract_pdf_text(file_path)
+        return text or None, status, error
+    if file_type == "xlsx":
+        text, error = extract_xlsx_text(file_path)
+        return text or None, ("error" if error else "extracted"), error
+    return None, "unsupported", None
+
+
 def process_attachment(
     db: Session,
     circular: Circular,
@@ -455,19 +473,10 @@ def process_attachment(
         state = "Downloaded" if downloaded else "Cached"
         print(f"    [ATT] {state}: {attachment.filename}")
 
-    if attachment.file_type == "pdf":
-        text, status, error = extract_pdf_text(local_path)
-        attachment.content_text = text or None
-        attachment.extraction_status = status
-        attachment.extraction_error = error
-    elif attachment.file_type == "xlsx":
-        text, error = extract_xlsx_text(local_path)
-        attachment.content_text = text or None
-        attachment.extraction_status = "error" if error else "extracted"
-        attachment.extraction_error = error
-    else:
-        attachment.content_text = None
-        attachment.extraction_status = "unsupported"
+    text, status, error = extract_document_text(local_path, attachment.file_type)
+    attachment.content_text = text
+    attachment.extraction_status = status
+    attachment.extraction_error = error
 
     attachment.is_vectorized = 0
     db.commit()

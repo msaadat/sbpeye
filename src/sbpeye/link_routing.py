@@ -340,6 +340,34 @@ def _link_plain_circular_references(soup: BeautifulSoup, circular: Circular, db:
         text_node.replace_with(*replacements)
 
 
+def find_circular_by_url(db: Session, url: str | None) -> Circular | None:
+    """The circular published at `url`, or None.
+
+    A circular is reachable at up to three URLs after the July-2026 redesign — its new
+    slug, its original path, and whatever `url` mirrors — so all three are candidates.
+    Comparison is case-insensitive because SBP's own pages link the same circular with
+    inconsistent casing.
+    """
+    if not url:
+        return None
+    try:
+        normalized = normalize_sbp_url(url)
+    except ValueError:
+        return None
+    lowered = normalized.lower()
+    return (
+        db.query(Circular)
+        .filter(
+            or_(
+                func.lower(Circular.url) == lowered,
+                func.lower(Circular.new_url) == lowered,
+                func.lower(Circular.old_url) == lowered,
+            )
+        )
+        .first()
+    )
+
+
 def harvest_reference_links(html: str | bytes, db: Session, current: Circular) -> list[Circular]:
     """Circulars that ``current``'s detail page hyperlinks to.
 
@@ -358,16 +386,7 @@ def harvest_reference_links(html: str | bytes, db: Session, current: Circular) -
         # Only individual circular detail slugs, not the paginated listing (…/circulars/P30).
         if "/circulars/" not in path or re.search(r"/circulars/P\d+$", path):
             continue
-        match = (
-            db.query(Circular)
-            .filter(
-                or_(
-                    func.lower(Circular.new_url) == url.lower(),
-                    func.lower(Circular.url) == url.lower(),
-                )
-            )
-            .first()
-        )
+        match = find_circular_by_url(db, url)
         if match is not None and match.id != current.id:
             targets[match.id] = match
     return list(targets.values())

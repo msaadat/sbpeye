@@ -406,6 +406,20 @@ phases 5–8 are largely independent of each other and can be re-prioritized.
     partial is stored, and they retry every sync. This is why the manifest tolerates a
     null child hash.
 
+*Answers recorded during phase 4 (live sync, 2026-08-11).*
+
+11. **5 of the 7 circular-typed rows resolve**; all five are Guidelines that are really
+    IBD/BPRD circulars already in the corpus, and none stores content of its own. The
+    remaining two (`ibd-circular-no-01-of-2017`, `ibd-circular-no-02-of-2020`) are real
+    circular pages on the live site that are simply **absent from the local circular
+    corpus**, so they stay stubs exactly as this phase intends. Running
+    `sbpeye circulars sync` (or `circulars process-url`) for them makes the next
+    `laws sync` resolve them with no further work.
+12. *(New)* There was no shared by-URL circular lookup to reuse — the matching was
+    inlined in two places, neither covering `old_url`. Phase 4 factors it into
+    `link_routing.find_circular_by_url()`, which normalizes the URL and matches
+    `url`/`new_url`/`old_url` case-insensitively.
+
 ## 6. Explicit non-goals (for now)
 
 - Frontend (views, routes, badges) — separate plan once phase 5's API is stable.

@@ -1761,8 +1761,13 @@ def _show_laws_status():
         ).count()
         delisted = db.query(RegDocument).filter(RegDocument.delisted_at.isnot(None)).count()
         external = db.query(RegDocument).filter(RegDocument.is_external == 1).count()
+        linked = db.query(RegDocument).filter(RegDocument.circular_id.isnot(None)).count()
+        # Documents still waiting for content: no versions, and not deliberately
+        # content-free (external links and rows that resolved to a circular).
         stubs = db.query(RegDocument).filter(
-            ~RegDocument.versions.any(), RegDocument.is_external == 0
+            ~RegDocument.versions.any(),
+            RegDocument.is_external == 0,
+            RegDocument.circular_id.is_(None),
         ).count()
 
         print(f"\n--- Laws & Regulations ---")
@@ -1770,6 +1775,7 @@ def _show_laws_status():
         print(f"  Versions:          {versions} ({current} current)")
         if pending:
             print(f"  Not yet in force:  {pending}")
+        print(f"  Are circulars:     {linked}")
         print(f"  Awaiting content:  {stubs} stub(s), {external} external")
         if delisted:
             print(f"  Delisted:          {delisted}")

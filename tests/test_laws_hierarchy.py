@@ -139,7 +139,8 @@ def sync_container(db, site, document=None, **kwargs):
         document = db.query(RegDocument).filter(RegDocument.id == document.id).one()
     now = kwargs.pop("now", datetime(2026, 8, 11))
     counts = {k: 0 for k in (
-        "children", "manifests", "new_versions", "unchanged", "stubs", "delisted", "errors"
+        "children", "manifests", "new_versions", "unchanged", "resolved", "stubs",
+        "delisted", "errors",
     )}
     touched: set[str] = set()
     observed: dict[str, list[dict]] = {}

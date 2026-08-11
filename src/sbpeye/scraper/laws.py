@@ -25,8 +25,8 @@ from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
 
 from ..database import PROJECT_ROOT
-from ..link_routing import DOCUMENT_EXTENSIONS, is_allowed_sbp_url
-from ..models import RegDocument, RegDocumentVersion
+from ..link_routing import DOCUMENT_EXTENSIONS, find_circular_by_url, is_allowed_sbp_url
+from ..models import RegDocument, RegDocumentLink, RegDocumentVersion
 from .circulars import (
     ATTACHMENTS_DIR,
     BASE_URL,
@@ -695,6 +695,62 @@ def sync_document_version(
     return version, existing is None, None
 
 
+def link_document_to_circular(
+    db: Session,
+    document: RegDocument,
+    circular,
+    link_type: str = "listing",
+    detected_via: str = "listing",
+    confidence: float | None = None,
+) -> RegDocumentLink:
+    """Record a circular ↔ document edge exactly once."""
+    link = (
+        db.query(RegDocumentLink)
+        .filter(
+            RegDocumentLink.circular_id == circular.id,
+            RegDocumentLink.document_id == document.id,
+            RegDocumentLink.link_type == link_type,
+        )
+        .first()
+    )
+    if link is None:
+        link = RegDocumentLink(
+            circular_id=circular.id,
+            document_id=document.id,
+            link_type=link_type,
+            detected_via=detected_via,
+            confidence=confidence,
+        )
+        db.add(link)
+        db.flush()
+    return link
+
+
+def resolve_circular_row(
+    db: Session, document: RegDocument, verbose: bool = False
+) -> bool:
+    """Point a listing row at the circular it actually is, instead of copying it.
+
+    Several Guidelines in the listing are circulars SBPEye already holds in full. Storing
+    their text again would fork one document into two records that drift apart, so the
+    RegDocument keeps no content and carries `circular_id` plus a link edge.
+
+    Returns False when the circular is not in the database yet — the row stays a stub and
+    the next sync retries it, since circular sync may simply not have reached it.
+    """
+    circular = find_circular_by_url(db, document.source_url)
+    if circular is None:
+        if verbose:
+            print(f"    [LAW] Circular not indexed yet: {document.title[:55]}")
+        return False
+
+    document.circular_id = circular.id
+    link_document_to_circular(db, document, circular)
+    if verbose:
+        print(f"    [LAW] Resolved to {circular.display_name}: {document.title[:45]}")
+    return True
+
+
 def upsert_child(
     db: Session, parent: RegDocument, part: dict, now: datetime
 ) -> RegDocument:
@@ -945,6 +1001,12 @@ def sync_subpage(
                 counts["new_versions" if created else "unchanged"] += 1
             if delay:
                 time.sleep(delay)
+        elif route == ROUTE_CIRCULAR:
+            # A part can be a circular too, and gets the same treatment as a listing row.
+            if resolve_circular_row(db, child, verbose=verbose):
+                counts["resolved"] += 1
+            else:
+                counts["stubs"] += 1
         else:
             counts["stubs"] += 1
 
@@ -1092,6 +1154,7 @@ def sync_laws(
         "manifests": 0,
         "new_versions": 0,
         "unchanged": 0,
+        "resolved": 0,
         "stubs": 0,
         "external": 0,
         "delisted": 0,
@@ -1131,6 +1194,11 @@ def sync_laws(
                 counts["new_versions" if created else "unchanged"] += 1
             if delay:
                 time.sleep(delay)
+        elif row["route"] == ROUTE_CIRCULAR:
+            if resolve_circular_row(db, document, verbose=verbose):
+                counts["resolved"] += 1
+            else:
+                counts["stubs"] += 1
         elif row["route"] == ROUTE_EXTERNAL:
             counts["external"] += 1
             if verbose:
@@ -1155,7 +1223,8 @@ def sync_laws(
         f"\nLaws sync complete. Documents: {counts['documents']} "
         f"(+{counts['children']} part(s)), new versions: {counts['new_versions']}, "
         f"manifests: {counts['manifests']}, unchanged: {counts['unchanged']}, "
-        f"stubs: {counts['stubs']}, external: {counts['external']}, "
+        f"circulars: {counts['resolved']}, stubs: {counts['stubs']}, "
+        f"external: {counts['external']}, "
         f"delisted: {counts['delisted']}, errors: {counts['errors']}"
     )
     return counts

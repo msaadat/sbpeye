@@ -420,6 +420,30 @@ phases 5–8 are largely independent of each other and can be re-prioritized.
     `link_routing.find_circular_by_url()`, which normalizes the URL and matches
     `url`/`new_url`/`old_url` case-insensitively.
 
+*Answers recorded during phase 5 (live indexing, 2026-08-11).*
+
+13. **Sharing the Chroma collection is only safe with a filter on both sides.** Law
+    chunks carry `kind="law"`; the circular vector arm now filters
+    `doc_type in (circular, attachment)`, which every pre-existing chunk already has, so
+    no backfill was needed. Measured on "foreign exchange manual export proceeds": 31 of
+    the top 50 chunks were law chunks, which would have entered the circular candidate
+    set as ids resolving to no circular. §5's phrasing (metadata "so the vector side can
+    filter") understated this — the filter is mandatory, not optional.
+14. *(New)* `doc_type` in Chroma metadata already means "which kind of thing the chunk
+    came from", so a law's law/regulation/guideline classification rides along as
+    `law_type` instead of overloading it.
+15. *(New)* The `source` filter defaults to **`circulars`**, not `all`: law results have
+    a different payload shape and the SPA cannot badge them yet (frontend is a §6
+    non-goal). Flipping the default is one line once it can.
+16. *(New)* Live corpus indexes to **3,377 law chunks + 100 `laws_fts` rows** against
+    12,303 untouched circular chunks. The gap from 133 documents is structural: 7
+    manifests, 5 unsupported file types (`.xls`/`.doc`), and the stubs/external rows that
+    have no text by design.
+17. *(New)* A scanned PDF can extract to nothing but page markers, which chunk to zero
+    chunks — and Chroma rejects an empty `add()`. `_replace_document_chunks` now clears
+    and returns instead, which also removes the same latent crash from the attachment
+    path.
+
 ## 6. Explicit non-goals (for now)
 
 - Frontend (views, routes, badges) — separate plan once phase 5's API is stable.

@@ -853,9 +853,19 @@ def process_circular(
 
 
 def _delete_document_chunks(
-    *, circular_id: str | None = None, attachment_id_value: str | None = None
+    *,
+    circular_id: str | None = None,
+    attachment_id_value: str | None = None,
+    law_document_id: str | None = None,
 ) -> None:
-    if attachment_id_value:
+    if law_document_id:
+        # A law's chunks are replaced per document, not per version: only the version in
+        # force is searchable, so re-indexing drops whatever the previous one left.
+        result = collection.get(
+            where={"document_id": law_document_id}, include=["metadatas"]
+        )
+        ids = result.get("ids", [])
+    elif attachment_id_value:
         result = collection.get(
             where={"attachment_id": attachment_id_value}, include=["metadatas"]
         )
@@ -956,6 +966,13 @@ def _replace_document_chunks(document: dict, *, metadata_for, delete_kwargs: dic
     doc_id = document["doc_id"]
     chunk_ids = [f"{doc_id}__chunk_{i}" for i in range(len(chunks))]
     metadatas = [metadata_for(item, i) for i, item in enumerate(reference_chunks)]
+    if not chunks:
+        # A scanned document can extract to nothing but page markers, which chunk to
+        # zero chunks; Chroma rejects an empty add, so just clear what was there.
+        with _CHROMA_WRITE_LOCK:
+            _delete_document_chunks(**delete_kwargs)
+        return 0
+
     embeddings = embedding_backend.embed_documents(chunks)
     with _CHROMA_WRITE_LOCK:
         _delete_document_chunks(**delete_kwargs)

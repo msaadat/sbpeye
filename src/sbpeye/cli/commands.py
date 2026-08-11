@@ -1660,7 +1660,9 @@ def laws():
     pass
 
 
-def _run_laws_sync(db, doc_types, limit, force, delay, verbose, skip_subpages=False) -> dict:
+def _run_laws_sync(
+    db, doc_types, limit, force, delay, verbose, skip_subpages=False, skip_indexing=False
+) -> dict:
     """Run a laws sync, recording it in SyncStatus so runs are auditable.
 
     The row is tagged `kind="laws"` — the circular sync UI filters on that, so a laws
@@ -1694,6 +1696,7 @@ def _run_laws_sync(db, doc_types, limit, force, delay, verbose, skip_subpages=Fa
             delay=delay,
             verbose=verbose,
             skip_subpages=skip_subpages,
+            skip_indexing=skip_indexing,
         )
     except Exception as exc:
         job.status = "failed"
@@ -1722,12 +1725,38 @@ def _run_laws_sync(db, doc_types, limit, force, delay, verbose, skip_subpages=Fa
 @click.option("--force", is_flag=True, help="Re-fetch the listing and re-download every file")
 @click.option("--delay", type=float, default=0.5, show_default=True, help="Delay between downloads in seconds")
 @click.option("--skip-subpages", is_flag=True, help="Don't follow container pages into their parts")
+@click.option("--skip-indexing", is_flag=True, help="Don't update the search indexes (run 'laws reindex' later)")
 @click.option("--verbose", "-v", is_flag=True, help="Print per-row progress")
-def laws_sync(doc_types, limit, force, delay, skip_subpages, verbose):
+def laws_sync(doc_types, limit, force, delay, skip_subpages, skip_indexing, verbose):
     """Scrape SBP's laws & regulations listing, versioning by content hash."""
     db = SessionLocal()
     try:
-        _run_laws_sync(db, doc_types, limit, force, delay, verbose, skip_subpages)
+        _run_laws_sync(
+            db, doc_types, limit, force, delay, verbose, skip_subpages, skip_indexing
+        )
+    finally:
+        db.close()
+
+    _show_laws_status()
+
+
+@laws.command("reindex")
+@click.option("--force", is_flag=True, help="Re-embed every document, not just stale ones")
+@click.option("--verbose", "-v", is_flag=True, help="Print per-document progress")
+def laws_reindex(force, verbose):
+    """Rebuild the laws search indexes (FTS5 + ChromaDB) from stored text."""
+    from sbpeye.scraper.laws import index_pending_laws
+    from sbpeye.search import backfill_laws_fts
+
+    db = SessionLocal()
+    try:
+        if force:
+            # Drop the lexical index first so documents that lost their text (delisted,
+            # or whose current version became a manifest) don't linger as stale rows.
+            rows = backfill_laws_fts(db, force=True)
+            print(f"Rebuilt laws_fts: {rows} row(s)")
+        indexed = index_pending_laws(db, force=force, verbose=verbose)
+        print(f"Indexed {indexed} document(s) into ChromaDB + FTS")
     finally:
         db.close()
 

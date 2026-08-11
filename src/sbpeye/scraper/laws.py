@@ -33,10 +33,12 @@ from .circulars import (
     HEADERS,
     _content_matches_file_type,
     _get_sbp,
+    _replace_document_chunks,
     extract_document_text,
     fetch_page_cached,
 )
 from .clean_html import extract_sbp_text
+from ..search import NON_TEXT_LAW_FILE_TYPES, index_law_fts
 
 LAWS_LISTING_URL = f"{BASE_URL}/laws-regulations"
 LAWS_ARCHIVE_DIR = ATTACHMENTS_DIR / "laws"
@@ -1025,6 +1027,138 @@ def sync_subpage(
     return version.content_hash if version else None
 
 
+# ------------------------------------------------------------------------- indexing
+
+
+def law_document(document: RegDocument, version: RegDocumentVersion) -> dict:
+    """The text document fed to the chunker for one law/regulation version."""
+    label = document.title or ""
+    if document.part_label and document.parent is not None:
+        label = f"{document.parent.title} - {document.part_label}: {label}"
+    return {
+        "doc_id": version.id,
+        "doc_type": "law",
+        "doc_label": label,
+        "text": version.content_text or "",
+        "file_type": version.file_type or "",
+    }
+
+
+def law_chunk_metadata(
+    document: RegDocument, version: RegDocumentVersion, chunk: dict, index: int
+) -> dict:
+    """Chroma metadata for one chunk of a law/regulation.
+
+    `kind` is the corpus discriminator the law vector arm filters on. `doc_type` keeps
+    its existing collection-wide meaning — which kind of thing the chunk came from — so
+    the law's own law/regulation/guideline classification rides along as `law_type`.
+    """
+    return {
+        "kind": "law",
+        "doc_type": "law",
+        "law_type": document.doc_type or "",
+        "document_id": document.id,
+        "version_id": version.id,
+        "title": document.title or "",
+        "part_label": document.part_label or "",
+        "url": version.file_url or document.source_url or "",
+        "chunk_index": index,
+        "ref": chunk["ref"],
+        "unit_id": chunk["unit_id"],
+        "source_start": chunk["source_start"],
+        "source_end": chunk["source_end"],
+        **({"page_start": chunk["page_start"]} if chunk.get("page_start") else {}),
+        **({"page_end": chunk["page_end"]} if chunk.get("page_end") else {}),
+    }
+
+
+def vectorize_law_document(
+    db: Session, document: RegDocument, verbose: bool = False
+) -> int:
+    """Replace a document's Chroma chunks with its in-force text. Returns chunk count.
+
+    Superseded versions are dropped from the vector store — their text is still in
+    SQLite and archived on disk, but a semantic hit on wording SBP no longer publishes
+    would be worse than no hit at all.
+    """
+    version = document.current_version
+    searchable = (
+        version is not None
+        and version.file_type not in NON_TEXT_LAW_FILE_TYPES
+        and (version.content_text or "").strip()
+    )
+    if not searchable:
+        _replace_document_chunks(
+            {"doc_id": document.id, "doc_type": "law", "doc_label": "", "text": "",
+             "file_type": ""},
+            metadata_for=lambda chunk, i: {},
+            delete_kwargs={"law_document_id": document.id},
+        )
+        for stale in document.versions:
+            stale.is_vectorized = 0
+        return 0
+
+    count = _replace_document_chunks(
+        law_document(document, version),
+        metadata_for=lambda chunk, i: law_chunk_metadata(document, version, chunk, i),
+        delete_kwargs={"law_document_id": document.id},
+    )
+    # Marked done even at zero chunks: a scanned PDF that extracts to nothing has been
+    # processed, and leaving it unmarked would re-chunk it on every sync forever.
+    for other in document.versions:
+        other.is_vectorized = 1 if other.id == version.id else 0
+    if verbose:
+        print(f"  [CHROMA] Indexed law: {document.title[:50]} ({count} chunks)")
+    return count
+
+
+def index_law_document(db: Session, document: RegDocument, verbose: bool = False) -> None:
+    """Refresh both search indexes for one document.
+
+    Paired deliberately: FTS and Chroma writes travel together, the same rule circulars
+    follow, so a document can never be lexically findable but semantically invisible.
+    """
+    try:
+        vectorize_law_document(db, document, verbose=verbose)
+    except Exception:
+        logging.exception("ChromaDB indexing failed for law document %s", document.id)
+    index_law_fts(db, document)
+
+
+def index_pending_laws(
+    db: Session,
+    document_ids: set[str] | None = None,
+    force: bool = False,
+    verbose: bool = False,
+) -> int:
+    """Index documents whose in-force text is not in the search indexes yet.
+
+    `is_vectorized` on the current version is the ledger: a new capture or a currency
+    flip leaves it 0, so only documents that actually changed pay the embedding cost.
+    Documents with nothing readable in force (containers, failed downloads) are skipped —
+    a manifest is bookkeeping, not text.
+    """
+    query = db.query(RegDocument)
+    if document_ids is not None:
+        if not document_ids:
+            return 0
+        query = query.filter(RegDocument.id.in_(document_ids))
+
+    indexed = 0
+    for document in query.all():
+        version = document.current_version
+        if version is None or version.file_type in NON_TEXT_LAW_FILE_TYPES:
+            continue
+        if not (version.content_text or "").strip():
+            continue
+        if not force and version.is_vectorized == 1:
+            continue
+        index_law_document(db, document, verbose=verbose)
+        indexed += 1
+    db.commit()
+    return indexed
+
+
 def select_current_versions(
     db: Session,
     document_ids: set[str],
@@ -1120,6 +1254,7 @@ def sync_laws(
     delay: float = 0.5,
     verbose: bool = False,
     skip_subpages: bool = False,
+    skip_indexing: bool = False,
 ) -> dict:
     """Sync the laws & regulations listing into `reg_documents`.
 
@@ -1158,6 +1293,7 @@ def sync_laws(
         "stubs": 0,
         "external": 0,
         "delisted": 0,
+        "indexed": 0,
         "errors": 0,
     }
 
@@ -1219,12 +1355,17 @@ def sync_laws(
         counts["delisted"] += delist_missing(db, seen_ids, now)
     db.commit()
 
+    # Indexing runs after currency is settled: what gets indexed is the text in force,
+    # which is not knowable until every row of the pass has been seen.
+    if not skip_indexing:
+        counts["indexed"] = index_pending_laws(db, touched, force=force, verbose=verbose)
+
     print(
         f"\nLaws sync complete. Documents: {counts['documents']} "
         f"(+{counts['children']} part(s)), new versions: {counts['new_versions']}, "
         f"manifests: {counts['manifests']}, unchanged: {counts['unchanged']}, "
         f"circulars: {counts['resolved']}, stubs: {counts['stubs']}, "
-        f"external: {counts['external']}, "
+        f"external: {counts['external']}, indexed: {counts['indexed']}, "
         f"delisted: {counts['delisted']}, errors: {counts['errors']}"
     )
     return counts

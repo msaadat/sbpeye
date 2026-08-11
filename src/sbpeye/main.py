@@ -15,8 +15,8 @@ import uuid
 import threading
 
 from .database import PROJECT_ROOT, engine, Base, get_db, SessionLocal, has_vector_store_data
-from .models import AIGenerationJob, Attachment, CachedDocument, SyncStatus, circular_sync_only, Circular, CircularEntity, CircularRelationship, EcoDataSeries, EcoDataEntry, Settings, ChatSession, ChatMessage, ResearchWorkspace, WorkspaceCircular
-from .search import backfill_fts, index_circular_fts, resolve_metric_terms, search_engine
+from .models import AIGenerationJob, Attachment, CachedDocument, SyncStatus, circular_sync_only, Circular, CircularEntity, CircularRelationship, EcoDataSeries, EcoDataEntry, RegDocument, RegDocumentVersion, Settings, ChatSession, ChatMessage, ResearchWorkspace, WorkspaceCircular
+from .search import backfill_fts, backfill_laws_fts, index_circular_fts, resolve_metric_terms, search_engine
 from .ai import AIClient, AIConfig, classify_provider_state, friendly_chat_error, get_ai_client, get_provider_api_key, get_provider_definition, normalize_provider
 from .circular_ai import GENERATION_ACTIONS, generation_job_payload, run_generation_job
 from .checklist_export import build_checklist_workbook
@@ -61,6 +61,9 @@ from .api.serializers import (
     _format_timestamp,
     _get_workspace_for_chat_session,
     _isoformat,
+    _law_detail,
+    _law_summary,
+    _law_version_payload,
     _normalize_circular_ids,
     _parse_year,
     _safe_json_list,
@@ -141,8 +144,9 @@ def fail_interrupted_sync_jobs() -> None:
 def _warm_up_search_index() -> None:
     db = SessionLocal()
     try:
-        # Build the persistent FTS5 index once if empty; a no-op thereafter.
+        # Build the persistent FTS5 indexes once if empty; a no-op thereafter.
         backfill_fts(db)
+        backfill_laws_fts(db)
     finally:
         db.close()
 
@@ -711,27 +715,42 @@ def search_circulars(
     department: str | None = None,
     sort_by: str = "relevance",
     tag: str | None = None,
+    source: str = "circulars",
+    doc_type: str | None = None,
     page: int = 1,
     per_page: int = 20,
     db: Session = Depends(get_db)
 ):
+    """Hybrid search. `source` is circulars (default) | laws | all.
+
+    The default keeps this endpoint circular-only, because law results carry a different
+    shape and the SPA has no way to render them yet; a caller that opts in gets mixed
+    items discriminated by `result_kind`.
+    """
     page = max(page, 1)
     per_page = min(max(per_page, 1), 100)
     offset = (page - 1) * per_page
-    results, total = search_engine.search(
-        q, db,
-        offset=offset,
-        limit=per_page,
-        start_year=_parse_year(start_year),
-        end_year=_parse_year(end_year),
-        department=department,
-        sort_by=sort_by,
-        tag=tag,
-    )
+    try:
+        results, total = search_engine.search(
+            q, db,
+            offset=offset,
+            limit=per_page,
+            start_year=_parse_year(start_year),
+            end_year=_parse_year(end_year),
+            department=department,
+            sort_by=sort_by,
+            tag=tag,
+            source=source,
+            doc_type=doc_type,
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
     total_pages = max(1, (total + per_page - 1) // per_page)
     return {
         "items": [
-            _circular_summary(
+            _law_summary(r["law"], r.get("snippet"))
+            if r.get("result_kind") == "law"
+            else _circular_summary(
                 r["circular"],
                 r.get("snippet"),
                 r.get("match_source", "circular"),
@@ -1400,6 +1419,140 @@ async def document_content(attachment_id: str, db: Session = Depends(get_db)):
         content_disposition_type=disposition,
         headers={"Cache-Control": "private, max-age=3600"},
     )
+
+
+@app.get("/api/laws")
+def list_laws(
+    q: str = "",
+    doc_type: str | None = None,
+    parent_id: str | None = None,
+    top_level: bool = False,
+    include_delisted: bool = False,
+    page: int = 1,
+    per_page: int = 20,
+    db: Session = Depends(get_db),
+):
+    """List laws & regulations, or search them.
+
+    With `q` this runs the hybrid engine against the law corpus; without it, a plain
+    listing ordered by capture time. `top_level` hides the parts of container documents
+    (FE Manual chapters and the like), which are documents in their own right but noise
+    in a flat list.
+    """
+    page = max(page, 1)
+    per_page = min(max(per_page, 1), 100)
+    offset = (page - 1) * per_page
+
+    if q.strip():
+        results, total = search_engine.search(
+            q, db, offset=offset, limit=per_page, source="laws", doc_type=doc_type,
+        )
+        items = [_law_summary(item["law"], item.get("snippet")) for item in results]
+        return {"items": items, "total": total, "page": page, "per_page": per_page}
+
+    query = db.query(RegDocument)
+    if doc_type and doc_type.strip():
+        query = query.filter(RegDocument.doc_type == doc_type.strip())
+    if parent_id:
+        query = query.filter(RegDocument.parent_id == parent_id)
+    elif top_level:
+        query = query.filter(RegDocument.parent_id.is_(None))
+    if not include_delisted:
+        query = query.filter(RegDocument.delisted_at.is_(None))
+
+    total = query.count()
+    documents = (
+        query.order_by(RegDocument.doc_type, RegDocument.title)
+        .offset(offset)
+        .limit(per_page)
+        .all()
+    )
+    return {
+        "items": [_law_summary(document) for document in documents],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+    }
+
+
+@app.get("/api/laws/types")
+def list_law_types(db: Session = Depends(get_db)):
+    """Document-type facets with counts, for filter UI."""
+    rows = (
+        db.query(RegDocument.doc_type, func.count(RegDocument.id))
+        .filter(RegDocument.delisted_at.is_(None))
+        .group_by(RegDocument.doc_type)
+        .all()
+    )
+    return [
+        {"doc_type": doc_type, "count": count}
+        for doc_type, count in sorted(rows, key=lambda row: -row[1])
+        if doc_type
+    ]
+
+
+@app.get("/api/laws/{document_id}")
+def get_law(document_id: str, db: Session = Depends(get_db)):
+    """One document: what is in force, its version timeline, parts, linked circulars."""
+    document = db.query(RegDocument).filter(RegDocument.id == document_id).first()
+    if document is None:
+        return JSONResponse({"error": "Document not found"}, status_code=404)
+    return _law_detail(document)
+
+
+@app.get("/api/laws/{document_id}/versions/{version_id}")
+def get_law_version(document_id: str, version_id: str, db: Session = Depends(get_db)):
+    """One captured version, including its extracted text and archived-file reference.
+
+    The archive copy is exposed as a `/api/documents/open`-style local path rather than
+    the SBP URL: the point of the archive is that SBP's copy may already be gone.
+    """
+    version = (
+        db.query(RegDocumentVersion)
+        .filter(
+            RegDocumentVersion.id == version_id,
+            RegDocumentVersion.document_id == document_id,
+        )
+        .first()
+    )
+    if version is None:
+        return JSONResponse({"error": "Version not found"}, status_code=404)
+
+    payload = _law_version_payload(version, include_text=True)
+    payload["document"] = {
+        "id": version.document.id,
+        "title": version.document.title,
+        "doc_type": version.document.doc_type,
+        "part_label": version.document.part_label,
+    }
+    payload["archive_path"] = None
+    if version.local_path:
+        candidate = (PROJECT_ROOT / version.local_path).resolve()
+        archive_root = (PROJECT_ROOT / "attachments").resolve()
+        if archive_root in candidate.parents and candidate.is_file():
+            payload["archive_path"] = version.local_path
+            payload["archive_size"] = candidate.stat().st_size
+    return payload
+
+
+@app.get("/api/laws/{document_id}/file")
+def get_law_file(document_id: str, version_id: str | None = None, db: Session = Depends(get_db)):
+    """Serve a version's archived file from disk (defaults to the version in force)."""
+    query = db.query(RegDocumentVersion).filter(
+        RegDocumentVersion.document_id == document_id
+    )
+    if version_id:
+        version = query.filter(RegDocumentVersion.id == version_id).first()
+    else:
+        version = query.filter(RegDocumentVersion.is_current == 1).first()
+    if version is None or not version.local_path:
+        return JSONResponse({"error": "No archived file for this version"}, status_code=404)
+
+    candidate = (PROJECT_ROOT / version.local_path).resolve()
+    archive_root = (PROJECT_ROOT / "attachments").resolve()
+    if archive_root not in candidate.parents or not candidate.is_file():
+        return JSONResponse({"error": "Archived file is missing"}, status_code=404)
+    return FileResponse(candidate, filename=candidate.name)
 
 
 @app.get("/api/pdf_preview")

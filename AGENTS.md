@@ -113,6 +113,7 @@ sbpeye circulars all --dept bprd --year 2025
 
 # Laws & regulations (sbp.org.pk/laws-regulations)
 sbpeye laws sync --type regulation -v   # Scrape the listing; new content hash = new version
+sbpeye laws reindex [--force]           # Rebuild the laws FTS5 + ChromaDB indexes
 sbpeye laws status                      # Counts by type, versions, pending extractions
 
 # Other commands
@@ -136,7 +137,12 @@ sbpeye dry-run --dept bprd --year 2025  # Preview what would be scraped
 ### API Routes
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/circulars/search` | Hybrid search. Query: `q`, `tag`, `department`, `start_year`, `end_year`, `sort_by` |
+| GET | `/api/circulars/search` | Hybrid search. Query: `q`, `tag`, `department`, `start_year`, `end_year`, `sort_by`, `source` (circulars/laws/all, default circulars), `doc_type` |
+| GET | `/api/laws` | List or search laws & regulations. Query: `q`, `doc_type`, `parent_id`, `top_level`, `include_delisted` |
+| GET | `/api/laws/types` | Document-type facets with counts |
+| GET | `/api/laws/{id}` | Detail: current version, version timeline, parts, linked circulars |
+| GET | `/api/laws/{id}/versions/{vid}` | Version detail incl. extracted text and archive reference |
+| GET | `/api/laws/{id}/file` | Serve a version's archived file from disk |
 | GET | `/api/circulars/departments` | List departments with circular counts |
 | GET | `/api/circulars/years` | List years for a department |
 | GET | `/api/circulars/browse` | List circulars for dept+year |
@@ -195,6 +201,8 @@ cd frontend && npm run typecheck  # TypeScript type checking
 - The FTS5 keyword index (`circulars_fts`) is maintained at the application layer, not via SQL triggers — any code path that changes a circular's or attachment's text must call `index_circular_fts(db, circular)` (search.py) alongside the existing ChromaDB write, or the circular won't surface in keyword search
 - Laws/regulations are versioned by content hash, never by URL, title or listing date — SBP replaces PDFs in place. Archived files under `attachments/laws/<document_id>/<hash8>-<name>` are immutable: never overwrite one, never delete a delisted document. Which version is in force is decided once per document per sync by `select_current_versions()`, never as a side effect of fetch order — any new code path that captures a version must record it via `_observe()` so the currency tiebreak can see it
 - A container document (the FE Manual and its chapters) has no bytes of its own: its version is a **manifest** (`file_type="manifest"`) hashed over its children's hashes, so a new row appears only when a part actually changed, and diffing two manifests says which part moved. Manifests are bookkeeping, not readable text — keep them out of the search index
+- Laws and circulars **share the ChromaDB collection** and are kept apart by metadata: law chunks carry `kind="law"`, and the circular vector arm filters `doc_type in (circular, attachment)`. Without that filter law chunks flood the circular candidate set as ids that resolve to no circular (measured: 31 of the top 50 chunks on an FX query) — never query the collection unfiltered
+- Only the version **in force** is searchable; superseded versions stay in SQLite and on disk but are dropped from both indexes. Manifests are never indexed. `RegDocumentVersion.is_vectorized` is the ledger that keeps `laws sync` from re-embedding unchanged documents
 - Some listing rows *are* circulars SBPEye already holds. Those resolve via `find_circular_by_url()` (link_routing.py) to `RegDocument.circular_id` + a `RegDocumentLink`, and store **no content of their own** — never scrape a circular twice into two records that can drift apart. An unresolvable row stays a stub and retries every sync
 - `SyncStatus` rows are shared by both scrapers and discriminated by `kind`; every circular-facing query must filter through `models.circular_sync_only()` so laws runs stay out of the circular sync banner
 - `chroma_db/` is local runtime data and should not be committed to git.

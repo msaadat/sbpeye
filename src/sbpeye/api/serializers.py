@@ -19,6 +19,8 @@ from ..models import (
     CachedDocument,
     ChatSession,
     Circular,
+    RegDocument,
+    RegDocumentVersion,
     ResearchWorkspace,
     WorkspaceCircular,
 )
@@ -91,6 +93,8 @@ def _circular_summary(
     source_page: int | None = None,
 ) -> dict:
     return {
+        # Lets a caller tell circular results from law results in a mixed list.
+        "result_kind": "circular",
         "id": circular.id,
         "title": circular.title,
         "department": circular.department,
@@ -109,6 +113,107 @@ def _circular_summary(
         "source_ref": source_ref,
         "source_page": source_page,
     }
+
+
+# --- Laws & regulations serialization ---
+
+def _law_version_payload(version: RegDocumentVersion | None, include_text: bool = False) -> dict | None:
+    """One captured version. `in_force` is state, not a stored flag: a version whose
+    effective date has not arrived is captured but pending (see the plan's §3)."""
+    if version is None:
+        return None
+    effective_from = version.effective_from
+    payload = {
+        "id": version.id,
+        "content_hash": version.content_hash,
+        "file_url": version.file_url,
+        "file_type": version.file_type,
+        "version_label": version.version_label,
+        "effective_from": _isoformat(effective_from),
+        "pending": bool(effective_from and effective_from > datetime.utcnow()),
+        "is_current": bool(version.is_current),
+        "extraction_status": version.extraction_status,
+        "source": version.source,
+        "first_seen_at": _isoformat(version.first_seen_at),
+        "last_seen_at": _isoformat(version.last_seen_at),
+        "has_file": bool(version.local_path),
+    }
+    if include_text:
+        payload["content_text"] = version.content_text
+    return payload
+
+
+def _law_summary(document: RegDocument, snippet: str | None = None) -> dict:
+    """List-shaped payload. `result_kind` lets a caller badge mixed search results."""
+    current = document.current_version
+    return {
+        "result_kind": "law",
+        "id": document.id,
+        "title": document.title,
+        "doc_type": document.doc_type,
+        "part_label": document.part_label,
+        "parent_id": document.parent_id,
+        "source_url": document.source_url,
+        "is_external": bool(document.is_external),
+        "circular_id": document.circular_id,
+        "listed_date": _isoformat(document.listed_date),
+        "delisted_at": _isoformat(document.delisted_at),
+        "version_count": len(document.versions),
+        "current_version": _law_version_payload(current),
+        "summary": _summary_preview(document.summary),
+        "tags": _safe_json_list(document.tags),
+        "snippet": snippet or "",
+    }
+
+
+def _law_detail(document: RegDocument) -> dict:
+    """Detail payload: what is in force, the whole timeline, parts, and linked circulars."""
+    payload = _law_summary(document)
+    payload.update({
+        "normalized_title": document.normalized_title,
+        "page_slug": document.page_slug,
+        "first_seen_at": _isoformat(document.first_seen_at),
+        "last_seen_at": _isoformat(document.last_seen_at),
+        "versions": [
+            _law_version_payload(version)
+            for version in sorted(
+                document.versions,
+                key=lambda v: v.first_seen_at or datetime.min,
+                reverse=True,
+            )
+        ],
+        "parent": (
+            {"id": document.parent.id, "title": document.parent.title}
+            if document.parent else None
+        ),
+        "children": [
+            {
+                "id": child.id,
+                "title": child.title,
+                "part_label": child.part_label,
+                "part_order": child.part_order,
+                "has_content": child.current_version is not None,
+                "delisted_at": _isoformat(child.delisted_at),
+            }
+            for child in sorted(
+                document.children, key=lambda c: (c.part_order is None, c.part_order or 0)
+            )
+        ],
+        "circular": (
+            _circular_summary(document.circular) if document.circular else None
+        ),
+        "linked_circulars": [
+            {
+                "circular": _circular_summary(link.circular),
+                "link_type": link.link_type,
+                "detected_via": link.detected_via,
+                "confidence": link.confidence,
+            }
+            for link in document.circular_links
+            if link.circular is not None
+        ],
+    })
+    return payload
 
 
 def _document_payload(attachment: Attachment | CachedDocument) -> dict:

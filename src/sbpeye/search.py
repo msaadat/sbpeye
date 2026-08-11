@@ -5,7 +5,7 @@ from datetime import datetime
 from sqlalchemy import text
 from sqlalchemy.orm import Session, joinedload
 
-from .models import Circular
+from .models import Circular, RegDocument, RegDocumentVersion
 from .database import collection, embedding_backend
 
 logger = logging.getLogger(__name__)
@@ -550,6 +550,122 @@ def backfill_fts(db: Session, force: bool = False) -> None:
 
 
 # ---------------------------------------------------------------------------
+# FTS5 lexical index for laws & regulations
+# ---------------------------------------------------------------------------
+
+# A separate table rather than a doc_kind column on circulars_fts: the two corpora have
+# different column shapes (a law has no reference; it has a part label), and keeping them
+# apart means nothing about circular search can regress.
+LAW_FTS_WEIGHTS: tuple[float, float, float] = (3.0, 4.0, 1.0)  # title, part_label, body
+
+_LAW_FTS_CREATE_SQL = (
+    "CREATE VIRTUAL TABLE IF NOT EXISTS laws_fts USING fts5("
+    "document_id UNINDEXED, title, part_label, body, tokenize='unicode61')"
+)
+
+# Manifest versions hold JSON bookkeeping, not readable text (see scraper/laws.py).
+NON_TEXT_LAW_FILE_TYPES = {"manifest"}
+
+
+def _law_fts_ensure_table(conn) -> None:
+    conn.execute(text(_LAW_FTS_CREATE_SQL))
+
+
+def _searchable_law_version(document: RegDocument) -> RegDocumentVersion | None:
+    """The version of a document that search should see: the one in force, if it's text.
+
+    Superseded versions stay in SQLite and in the archive but are not searchable — a
+    search hit on text SBP no longer publishes would be actively misleading.
+    """
+    version = document.current_version
+    if version is None or version.file_type in NON_TEXT_LAW_FILE_TYPES:
+        return None
+    return version
+
+
+def _law_fts_row(document: RegDocument) -> tuple[str, str, str]:
+    """The (title, part_label, body) token strings for one document's FTS row."""
+    version = _searchable_law_version(document)
+    title = " ".join(tokenize(document.title or ""))
+    part_label = " ".join(tokenize(document.part_label or ""))
+    body = " ".join(tokenize(version.content_text or "" if version else ""))
+    return title, part_label, body
+
+
+def index_law_fts(db: Session, document: RegDocument) -> None:
+    """Upsert one law/regulation's FTS row (delete-then-insert). Idempotent.
+
+    Call from every path that changes which text is in force for a document — paired
+    with the Chroma write, the same rule circulars follow.
+    """
+    conn = db.connection()
+    _law_fts_ensure_table(conn)
+    title, part_label, body = _law_fts_row(document)
+    conn.execute(
+        text("DELETE FROM laws_fts WHERE document_id = :did"), {"did": document.id}
+    )
+    if title or body:
+        conn.execute(
+            text(
+                "INSERT INTO laws_fts (document_id, title, part_label, body) "
+                "VALUES (:did, :title, :part_label, :body)"
+            ),
+            {"did": document.id, "title": title, "part_label": part_label, "body": body},
+        )
+    db.commit()
+
+
+def delete_law_fts(db: Session, document_id: str) -> None:
+    conn = db.connection()
+    _law_fts_ensure_table(conn)
+    conn.execute(
+        text("DELETE FROM laws_fts WHERE document_id = :did"), {"did": document_id}
+    )
+    db.commit()
+
+
+def backfill_laws_fts(db: Session, force: bool = False) -> int:
+    """Build the laws FTS index if it is empty (or ``force``). Returns rows written."""
+    conn = db.connection()
+    _law_fts_ensure_table(conn)
+    if force:
+        conn.execute(text("DELETE FROM laws_fts"))
+    elif conn.execute(text("SELECT count(*) FROM laws_fts")).scalar():
+        return 0
+
+    written = 0
+    for document in db.query(RegDocument).all():
+        title, part_label, body = _law_fts_row(document)
+        if not (title or body):
+            continue
+        conn.execute(
+            text(
+                "INSERT INTO laws_fts (document_id, title, part_label, body) "
+                "VALUES (:did, :title, :part_label, :body)"
+            ),
+            {"did": document.id, "title": title, "part_label": part_label, "body": body},
+        )
+        written += 1
+    db.commit()
+    return written
+
+
+def _result_sort_date(item) -> float:
+    """Sort key for date-ordering a mixed result list.
+
+    A circular has a publication date; a law has only the moment we first captured its
+    current text, since SBP's listing dates are unreliable placeholders.
+    """
+    if isinstance(item, Circular):
+        return item.date.timestamp() if item.date else 0.0
+    if isinstance(item, RegDocument):
+        version = _searchable_law_version(item)
+        stamp = (version.first_seen_at if version else None) or item.first_seen_at
+        return stamp.timestamp() if stamp else 0.0
+    return 0.0
+
+
+# ---------------------------------------------------------------------------
 # Search Engine
 # ---------------------------------------------------------------------------
 
@@ -601,6 +717,148 @@ class SearchEngine:
         for rank, row in enumerate(rows):
             ranks[row[0]] = rank + 1
         return ranks
+
+    def _law_fts_ranks(self, db: Session, expanded_tokens: list[str]) -> dict[str, int]:
+        """Rank laws/regulations via the `laws_fts` index. ``{document_id: rank}``."""
+        ranks: dict[str, int] = {}
+        terms = [t for t in expanded_tokens if t]
+        if not terms:
+            return ranks
+
+        _law_fts_ensure_table(db.connection())
+        match_query = " OR ".join('"%s"' % t.replace('"', '""') for t in terms)
+        order_by = "bm25(laws_fts, %g, %g, %g)" % LAW_FTS_WEIGHTS
+        try:
+            rows = db.execute(
+                text(
+                    "SELECT document_id FROM laws_fts "
+                    "WHERE laws_fts MATCH :mq "
+                    f"ORDER BY {order_by} "
+                    "LIMIT :lim"
+                ),
+                {"mq": match_query, "lim": self.CANDIDATE_COUNT},
+            ).fetchall()
+        except Exception:
+            logger.exception("laws_fts lexical search failed — vector arm only")
+            return ranks
+
+        for rank, row in enumerate(rows):
+            ranks[row[0]] = rank + 1
+        return ranks
+
+    def _law_vector_ranks(self, query: str) -> dict[str, int]:
+        """Rank laws via Chroma, restricted to law chunks. ``{document_id: rank}``."""
+        ranks: dict[str, int] = {}
+        try:
+            results = collection.query(
+                query_embeddings=embedding_backend.embed_queries([query]),
+                n_results=self.CANDIDATE_COUNT,
+                where={"kind": "law"},
+            )
+        except Exception:
+            logger.exception("ChromaDB law vector search failed — lexical arm only")
+            return ranks
+
+        raw_ids = results["ids"][0] if results["ids"] else []
+        raw_metas = results["metadatas"][0] if results.get("metadatas") else []
+        rank_counter = 1
+        for index, chunk_id in enumerate(raw_ids):
+            meta = raw_metas[index] if index < len(raw_metas) else {}
+            document_id = meta.get("document_id", chunk_id)
+            if document_id not in ranks:
+                ranks[document_id] = rank_counter
+                rank_counter += 1
+        return ranks
+
+    def _law_scores(
+        self, query: str, db: Session, query_tokens: list[str], expanded_tokens: list[str],
+        doc_type: str | None = None,
+    ) -> tuple[dict[str, float], dict[str, RegDocument]]:
+        """RRF scores for the law corpus, fused exactly like the circular arms.
+
+        Laws get no recency bonus: their listing dates are display metadata SBP fills with
+        placeholders (see the plan's §1.1), so ranking on them would be noise.
+        """
+        fts_ranks = self._law_fts_ranks(db, expanded_tokens)
+        vector_ranks = self._law_vector_ranks(query)
+        candidate_ids = set(fts_ranks) | set(vector_ranks)
+        if not candidate_ids:
+            return {}, {}
+
+        documents_query = db.query(RegDocument).filter(RegDocument.id.in_(candidate_ids))
+        if doc_type and doc_type.strip():
+            documents_query = documents_query.filter(RegDocument.doc_type == doc_type.strip())
+        documents = {document.id: document for document in documents_query.all()}
+
+        query_words = set(query_tokens)
+        scores: dict[str, float] = {}
+        for document_id, document in documents.items():
+            score = 0.0
+            if document_id in fts_ranks:
+                score += 1.0 / (self.RRF_K + fts_ranks[document_id])
+            if document_id in vector_ranks:
+                score += 1.0 / (self.RRF_K + vector_ranks[document_id])
+            title_words = set(tokenize(document.title or ""))
+            score += len(query_words & title_words) * self.TITLE_MATCH_BONUS
+            scores[document_id] = score
+        return scores, documents
+
+    def _circular_result(
+        self,
+        circular: Circular,
+        snippet_tokens: set[str],
+        vector_sources: dict[str, str],
+        vector_references: dict[str, dict],
+    ) -> dict:
+        """Build one circular search result (snippet + provenance of the match)."""
+        snippet, source, attachment_id, filename = self._best_snippet_source(
+            circular,
+            snippet_tokens,
+            preferred_attachment_id=vector_sources.get(circular.id),
+        )
+        reference = vector_references.get(circular.id, {})
+        reference_matches_source = reference.get("doc_type") == source and (
+            source != "attachment" or reference.get("attachment_id") == attachment_id
+        )
+        return {
+            "result_kind": "circular",
+            "circular": circular,
+            "snippet": snippet,
+            "match_source": source,
+            "attachment_id": attachment_id,
+            "attachment_filename": filename,
+            **({
+                "source_ref": reference.get("source_ref"),
+                "source_page": reference.get("source_page"),
+            } if reference_matches_source else {}),
+        }
+
+    def _latest_laws(
+        self, db: Session, limit: int, offset: int, doc_type: str | None = None
+    ) -> tuple[list[dict], int]:
+        """Empty-query browse for the law corpus: most recently captured first."""
+        q_obj = db.query(RegDocument).filter(RegDocument.delisted_at.is_(None))
+        if doc_type and doc_type.strip():
+            q_obj = q_obj.filter(RegDocument.doc_type == doc_type.strip())
+        total = q_obj.count()
+        documents = (
+            q_obj.order_by(RegDocument.first_seen_at.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+        return [self._law_result(document, set()) for document in documents], total
+
+    def _law_result(self, document: RegDocument, snippet_tokens: set[str]) -> dict:
+        version = _searchable_law_version(document)
+        return {
+            "result_kind": "law",
+            "law": document,
+            "version": version,
+            "snippet": self._generate_snippet(
+                (version.content_text if version else "") or "", snippet_tokens
+            ),
+        }
 
     # ------------------------------------------------------------------
     # Reference-pattern search
@@ -801,9 +1059,27 @@ class SearchEngine:
         department: str | None = None,
         sort_by: str = "relevance",
         tag: str | None = None,
+        source: str = "circulars",
+        doc_type: str | None = None,
     ) -> tuple[list[dict], int]:
-        """Hybrid search returning ``([{dict}, …], total_count)``."""
+        """Hybrid search returning ``([{dict}, …], total_count)``.
+
+        `source` selects the corpus: ``circulars`` (default — unchanged behavior),
+        ``laws``, or ``all``. Every result carries `result_kind` so a caller can tell
+        which shape it got: circular results keep their `circular` key, law results carry
+        `law` plus the `version` whose text matched.
+
+        The default stays `circulars` because rendering law results is frontend work this
+        phase deliberately leaves out; flipping it is a one-line change once the SPA can
+        badge them. `department`, `tag` and the year bounds are circular-only concepts and
+        are simply not applied to the law arm; `doc_type` is the law-side filter.
+        """
         from sqlalchemy import extract, or_
+
+        include_circulars = source in ("circulars", "all")
+        include_laws = source in ("laws", "all")
+        if not include_circulars and not include_laws:
+            raise ValueError(f"Unknown search source: {source!r}")
 
         def apply_filters(q_obj):
             if start_year:
@@ -829,13 +1105,34 @@ class SearchEngine:
 
         query_tokens = tokenize(query)
 
-        # Empty query → return latest circulars with filters
+        # Empty query → return the latest of whichever corpus was asked for
         if not query.strip() or not query_tokens:
+            if not include_circulars:
+                return self._latest_laws(db, limit, offset, doc_type)
             q_obj = db.query(Circular)
             q_obj = apply_filters(q_obj)
             total = q_obj.count()
             circulars = q_obj.order_by(Circular.date.desc()).offset(offset).limit(limit).all()
-            return [{"circular": c, "snippet": ""} for c in circulars], total
+            return (
+                [{"result_kind": "circular", "circular": c, "snippet": ""} for c in circulars],
+                total,
+            )
+
+        if not include_circulars:
+            expanded_tokens = expand_query_tokens(query_tokens)
+            scores, documents = self._law_scores(
+                query, db, query_tokens, expanded_tokens, doc_type
+            )
+            ordered_ids = sorted(scores, key=scores.__getitem__, reverse=True)
+            total = len(ordered_ids)
+            snippet_tokens = set(query_tokens) | set(expanded_tokens)
+            return (
+                [
+                    self._law_result(documents[document_id], snippet_tokens)
+                    for document_id in ordered_ids[offset:offset + limit]
+                ],
+                total,
+            )
 
         # 1. Reference-pattern search (exact match)
         ref_results = self._search_by_reference(query, db, limit * 2)
@@ -854,6 +1151,10 @@ class SearchEngine:
             results = collection.query(
                 query_embeddings=query_embeddings,
                 n_results=self.CANDIDATE_COUNT,
+                # Laws share the collection; without this their chunks would enter the
+                # circular candidate set as ids that resolve to no circular, silently
+                # displacing real hits. Every circular/attachment chunk carries doc_type.
+                where={"doc_type": {"$in": ["circular", "attachment"]}},
             )
             raw_ids = results["ids"][0] if results["ids"] else []
             raw_metas = (
@@ -937,7 +1238,37 @@ class SearchEngine:
 
             rrf_scores[cid] = score
 
-        # 5. Sort
+        # 5. Sort — with laws merged in when asked for. Both corpora produce RRF scores
+        # on the same scale and constant, so one sorted list is meaningful.
+        if include_laws:
+            law_scores, law_documents = self._law_scores(
+                query, db, query_tokens, expanded_tokens, doc_type
+            )
+            merged = [("circular", cid, score) for cid, score in rrf_scores.items()]
+            merged += [("law", did, score) for did, score in law_scores.items()]
+            if sort_by == "date":
+                merged.sort(
+                    key=lambda item: _result_sort_date(
+                        id_to_circular.get(item[1]) if item[0] == "circular"
+                        else law_documents.get(item[1])
+                    ),
+                    reverse=True,
+                )
+            else:
+                merged.sort(key=lambda item: item[2], reverse=True)
+            total = len(merged)
+            snippet_tokens = set(query_tokens) | set(expanded_tokens)
+            ordered = []
+            for kind, item_id, _score in merged[offset:offset + limit]:
+                if kind == "law":
+                    ordered.append(self._law_result(law_documents[item_id], snippet_tokens))
+                    continue
+                circular = id_to_circular.get(item_id)
+                if circular is not None:
+                    ordered.append(
+                        self._circular_result(circular, snippet_tokens, vector_sources, vector_references)
+                    )
+            return ordered, total
 
         if sort_by == "date":
             # Sort valid candidates by date
@@ -964,27 +1295,9 @@ class SearchEngine:
         for cid in sorted_ids:
             c = id_to_circular.get(cid)
             if c:
-                snippet, source, attachment_id, filename = self._best_snippet_source(
-                    c,
-                    snippet_tokens,
-                    preferred_attachment_id=vector_sources.get(cid),
+                ordered.append(
+                    self._circular_result(c, snippet_tokens, vector_sources, vector_references)
                 )
-                reference = vector_references.get(cid, {})
-                reference_matches_source = reference.get("doc_type") == source and (
-                    source != "attachment"
-                    or reference.get("attachment_id") == attachment_id
-                )
-                ordered.append({
-                    "circular": c,
-                    "snippet": snippet,
-                    "match_source": source,
-                    "attachment_id": attachment_id,
-                    "attachment_filename": filename,
-                    **({
-                        "source_ref": reference.get("source_ref"),
-                        "source_page": reference.get("source_page"),
-                    } if reference_matches_source else {}),
-                })
 
         return ordered, total
 

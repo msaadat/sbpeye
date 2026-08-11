@@ -237,6 +237,12 @@ def _ensure_columns(bind=None):
             "CREATE VIRTUAL TABLE IF NOT EXISTS circulars_fts USING fts5("
             "circular_id UNINDEXED, title, reference, body, tokenize='unicode61')"
         ))
+        # Laws & regulations keep their own FTS table: different columns (a law has a
+        # part label, not a reference), and nothing about circular search can regress.
+        conn.execute(text(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS laws_fts USING fts5("
+            "document_id UNINDEXED, title, part_label, body, tokenize='unicode61')"
+        ))
 
 Base.metadata.create_all(bind=engine)
 _ensure_columns()

@@ -632,7 +632,7 @@ onMounted(() => {
 .facet.is-active {
   border-color: color-mix(in srgb, var(--sbp-green) 40%, transparent);
   background: color-mix(in srgb, var(--sbp-green) 11%, var(--sbp-surface));
-  color: var(--sbp-green);
+  color: var(--sbp-green-text);
   font-weight: 600;
 }
 
@@ -693,7 +693,7 @@ onMounted(() => {
 }
 
 .node.is-selected .node-title {
-  color: var(--sbp-green);
+  color: var(--sbp-green-text);
   font-weight: 600;
 }
 
@@ -727,7 +727,7 @@ onMounted(() => {
 .node-crumb {
   display: block;
   font-size: 0.66rem;
-  color: var(--sbp-green);
+  color: var(--sbp-green-text);
   margin-bottom: 0.1rem;
 }
 
@@ -785,7 +785,7 @@ onMounted(() => {
 .reader-crumb {
   margin: 0 0 0.2rem;
   font-size: 0.72rem;
-  color: var(--sbp-green);
+  color: var(--sbp-green-text);
   font-weight: 600;
 }
 
@@ -823,7 +823,7 @@ onMounted(() => {
 }
 
 .reader-force {
-  color: var(--sbp-green);
+  color: var(--sbp-green-text);
   font-weight: 600;
 }
 
@@ -840,7 +840,7 @@ onMounted(() => {
 
 .reader-action:hover {
   border-color: color-mix(in srgb, var(--sbp-green) 40%, var(--sbp-border));
-  color: var(--sbp-green);
+  color: var(--sbp-green-text);
 }
 
 .reader-frame {
@@ -942,6 +942,6 @@ onMounted(() => {
 }
 
 .provenance-open a {
-  color: var(--sbp-green);
+  color: var(--sbp-green-text);
 }
 </style>

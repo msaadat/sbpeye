@@ -201,9 +201,11 @@ scanning stays easy.
 
 ### 4.5 Circulars gain a "Regulations cited" section
 
-Once gap 2.1.1 is closed, `CircularDetailPane`'s rail gets a section listing the
-regulations a circular references, each linking to `/laws/:id`. This is what makes the 809
-links useful in the direction users actually read: circular first, regulation second.
+**Shipped.** `CircularDetailPane`'s rail carries a "Regulations cited" section, each entry
+linking to `/laws/:id`, with parts grouped under their container in chapter order. This is
+what makes the 809 links useful in the direction users actually read: circular first,
+regulation second. See `LAWS_FRONTEND_MVP.md` §5 — including the gating bug it exposed,
+which was hiding the section on the 94 circulars with no AI analysis.
 
 ---
 
@@ -219,7 +221,7 @@ Each ends with something usable; F1–F3 are the spine.
 | **F3** | Document detail pane: in-force viewer, versions rail, cited-by | new `LawDetailPane.vue` |
 | **F4** | Container/parts presentation + breadcrumbs | `LawDetailPane.vue` |
 | **F5** | Source toggle + badged mixed results | `CircularsView.vue`, `lib/api.ts` |
-| **F6** | "Regulations cited" in circular detail | `CircularDetailPane.vue` |
+| ~~**F6**~~ ✅ | "Regulations cited" in circular detail | `CircularDetailPane.vue` |
 | **F7** | "Recently changed" view (needs F0 gap 2) | `LawsView.vue` |
 
 ---

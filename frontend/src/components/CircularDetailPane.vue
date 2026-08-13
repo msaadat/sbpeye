@@ -27,6 +27,7 @@ import {
   type CircularRelationship,
   type CircularRelationshipTarget,
   type CircularSourceContent,
+  type LawSummary,
 } from '@/lib/api'
 import { useResizablePane } from '@/lib/useResizablePane'
 
@@ -259,6 +260,17 @@ function openRelationship(id?: string | null) {
   void router.push({ path: `/circulars/${id}`, query: router.currentRoute.value.query })
 }
 
+/** Into the laws corpus, not the circulars list — a different destination entirely. */
+function openRegulation(id: string) {
+  void router.push(`/laws/${encodeURIComponent(id)}`)
+}
+
+/** Some parts are titled with their own label ("NBFCs"); prefixing it reads as a stutter. */
+function regulationPartLabel(document: LawSummary): string {
+  const label = document.part_label
+  return !label || label === document.display_title ? '' : label
+}
+
 function openAttachment(attachment: PreviewAttachment) {
   if (attachment.file_type?.toLowerCase() === 'pdf') {
     selectedAttachment.value = attachment
@@ -319,6 +331,10 @@ const hasIntelligence = computed(() =>
     circular.value?.summary ||
       hasRelationships.value ||
       entityGroups.value.length ||
+      // Regulations cited are deterministic — URL scans and SBP's own listing, no model
+      // involved — so a circular with no AI pass must still show them rather than fall
+      // through to "No AI analysis yet". Attachments are in here for the same reason.
+      circular.value?.regulations.length ||
       circular.value?.attachments.length,
   ),
 )
@@ -715,6 +731,33 @@ onBeforeUnmount(stopPolling)
             </div>
           </section>
 
+          <!-- The reverse of a law's "cited by": circular first, regulation second, which
+               is the direction people actually read. -->
+          <section v-if="circular.regulations.length" class="detail-section regulations-section">
+            <h2><i class="pi pi-book section-icon" />Regulations cited</h2>
+            <ul class="regulation-list">
+              <li v-for="link in circular.regulations" :key="link.document.id">
+                <button
+                  type="button"
+                  class="regulation-item"
+                  @click="openRegulation(link.document.id)"
+                >
+                  <!-- A part never appears without its container. -->
+                  <span v-if="link.document.parent_title" class="regulation-crumb">
+                    {{ link.document.parent_title }}
+                  </span>
+                  <span class="regulation-title">
+                    <span v-if="regulationPartLabel(link.document)" class="regulation-part">
+                      {{ regulationPartLabel(link.document) }}
+                    </span>
+                    {{ link.document.display_title }}
+                  </span>
+                  <span class="regulation-type">{{ link.document.doc_type || 'document' }}</span>
+                </button>
+              </li>
+            </ul>
+          </section>
+
           <section v-if="entityGroups.length" class="detail-section entities-section">
             <h2><i class="pi pi-percentage section-icon" />Regulatory Values</h2>
             <div class="entity-groups">
@@ -821,6 +864,67 @@ onBeforeUnmount(stopPolling)
   display: flex;
   flex-direction: column;
   gap: 0.85rem;
+}
+
+.regulation-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.regulation-list li + li {
+  border-top: 1px solid var(--p-content-border-color, #e5e7eb);
+}
+
+.regulation-item {
+  display: block;
+  width: 100%;
+  padding: 0.35rem 0.3rem;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.regulation-item:hover {
+  background: color-mix(in srgb, var(--sbp-green) 8%, transparent);
+}
+
+.regulation-item:hover .regulation-title {
+  color: var(--sbp-green-text);
+}
+
+.regulation-crumb {
+  display: block;
+  font-size: 0.64rem;
+  line-height: 1.3;
+  color: var(--sbp-green-text);
+}
+
+.regulation-title {
+  display: block;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.regulation-part {
+  font-weight: 500;
+  color: var(--p-text-muted-color, #6b7280);
+  font-variant-numeric: tabular-nums;
+}
+
+.regulation-type {
+  display: block;
+  margin-top: 0.1rem;
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--p-text-muted-color, #6b7280);
 }
 
 .entity-group-label {

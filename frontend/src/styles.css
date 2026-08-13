@@ -5,6 +5,10 @@
     sans-serif;
   --sbp-green: #156f52;
   --sbp-green-strong: #0d4f3a;
+  /* The same accent, but safe as *text*. --sbp-green is tuned for fills, borders and
+     tints, and it is not lightened for the dark theme — so using it for small text on a
+     dark surface lands around 2.7:1, under WCAG AA. Use this for anything the user reads.  */
+  --sbp-green-text: #156f52;
   --sbp-gold: #b88918;
   --sbp-bg: #f7f8f6;
   --sbp-surface: #ffffff;
@@ -41,6 +45,7 @@
   --sbp-text: #edf5f0;
   --sbp-muted: #a8b7af;
   --sbp-subtle: #202b26;
+  --sbp-green-text: #4fae87;
   --sbp-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
   --sbp-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 30px -16px rgba(0, 0, 0, 0.6);
   --sbp-shadow-md: 0 10px 26px -12px rgba(0, 0, 0, 0.65);
@@ -2161,11 +2166,14 @@ a {
 }
 
 .intelligence-section,
+.regulations-section,
 .documents-section {
   background: color-mix(in srgb, var(--sbp-green) 2.5%, var(--sbp-surface));
   box-shadow: inset 3px 0 0 color-mix(in srgb, var(--sbp-green) 18%, transparent);
 }
 
+/* Both of these can follow another tinted section, which would otherwise merge into it. */
+.regulations-section,
 .documents-section {
   border-top: 1px solid color-mix(in srgb, var(--sbp-green) 8%, var(--sbp-border));
 }

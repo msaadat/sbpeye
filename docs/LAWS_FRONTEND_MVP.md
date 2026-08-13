@@ -3,9 +3,9 @@
 Companion to `docs/LAWS_FRONTEND_PLAN.md`. Records what the MVP actually does, what it
 deliberately leaves out, and the order to build the rest in.
 
-**Status:** MVP (§1) shipped, plus Step 0 (archive), Step 1 (row legibility) and Step 2
-(the two API gaps) — §2–§4. Next up is Step 3, "Recently changed", in §6 — though see the
-caveat in §4 about how flat that view reads today.
+**Status:** MVP (§1) shipped, plus Step 0 (archive), Step 1 (row legibility), Step 2 (the
+two API gaps) and Step 5 (the reverse link) — §2–§5. Next up is Step 4, hierarchical
+search, in §7; Step 3 is split, and half of it is on hold for data rather than code.
 
 ---
 
@@ -171,7 +171,49 @@ resolve `parent_id` itself; a circular's rail cannot. It costs one lazy load per
 
 ---
 
-## 5. Deliberately left out
+## 5. Step 5 — "Regulations cited" on circulars ✅
+
+Taken ahead of Step 3, which the data cannot support yet (see the caveat in §4).
+
+| File | Change |
+|---|---|
+| `frontend/src/components/CircularDetailPane.vue` | `Regulations cited` rail section, `openRegulation`, gating fix |
+| `frontend/src/styles.css` | `--sbp-green-text`; `.regulations-section` joins the tinted-section rules |
+| `frontend/src/views/LawsView.vue` | Green text colours switched to the new variable |
+
+The rail lists each cited document — container crumb, part label, title, type — routing to
+`/laws/:id`. Verified end to end: FE Circular 03 of 2019 → Chapter 9 of the Foreign
+Exchange Manual, which opens in the reader showing *"Cited by 1 circular"* — the same edge
+read back the other way. Sorted by the API, so parts sit under their container in chapter
+order. No section renders when a circular cites nothing.
+
+**The gating bug this exposed.** The whole rail sits behind `hasIntelligence`, which
+falls through to a *"No AI analysis yet"* empty state. Regulations cited is deterministic —
+URL scans and SBP's own listing, no model involved — so it had to join that condition, as
+attachments already had. **94 circulars** would otherwise have hidden a section that was
+sitting right there in the payload, and they are exactly the ones nobody has run AI over.
+
+**A contrast bug, app-wide, found while checking dark mode.** `--sbp-green` (`#156f52`) is
+never lightened for the dark theme, so every use of it as *text* on a dark surface lands
+at **2.67:1** — well under WCAG AA, and these are 10px labels. Added `--sbp-green-text`,
+which is the same colour in light and `#4fae87` in dark, and switched the text uses in the
+two files this work touched. Measured after: crumb 5.91 light / 5.96 dark, title 16.05 /
+14.58, type label 4.59 / 6.31 — all passing.
+
+**This is not fully fixed.** `--sbp-green` is still used as text elsewhere in the app, and
+every one of those is still at ~2.7:1 in dark mode. Worth a sweep:
+
+```bash
+grep -rn "color: var(--sbp-green)" frontend/src
+```
+
+Per-item provenance was considered and dropped: `detected_via` is `name_match` for 794 of
+809 links, so a qualifier would mark 98% of rows and discriminate nothing. It is on the
+payload if a better use appears.
+
+---
+
+## 6. Deliberately left out
 
 Not bugs — scope. Roughly in the order they hurt:
 
@@ -188,25 +230,27 @@ Not bugs — scope. Roughly in the order they hurt:
 
 ---
 
-## 6. Order to build the rest
+## 7. Order to build the rest
 
 ### ~~Step 0 — populate the archive~~ ✅ §2
 ### ~~Step 1 — make the rows read correctly~~ ✅ §3
 ### ~~Step 2 — close the two API gaps~~ ✅ §4
+### ~~Step 5 — the reverse link on circulars~~ ✅ §5 *(taken out of order)*
 
-### Step 3 — "Recently changed" and the arrival panel
-A tab above the library plus an overview in the reader when nothing is selected: what
-changed in the last 30 days, and the most-cited documents. Turns the empty state into the
+### Step 3 — split it: take the arrival panel, defer "recently changed"
+The reader's empty state should carry the **most-cited documents**, which is meaningful
+today — 314 / 71 / 52 / 46 / 40 is a real ranking, and it turns a blank pane into the
 product's argument for itself.
+
+**"Recently changed" is not worth building yet.** `sort_by=captured` works, but every
+current version was captured in the same sync, so the view would render as an
+alphabetical list under a heading promising the opposite. It needs SBP to swap a PDF
+while we are watching. Revisit once §1's "documents with >1 version" is more than 2.
 
 ### Step 4 — search that respects the hierarchy
 Nest hits under their container in the tree; show a per-document hit count. Needs
 `parent_id` on every search hit — check whether the search path already returns it, since
 `_law_summary` includes it and the search results reuse that serializer.
-
-### Step 5 — the reverse link on circulars
-"Regulations cited" in `CircularDetailPane`'s rail, each entry opening `/laws/:id`. This is
-what makes 809 links useful in the direction people actually read.
 
 ### Step 6 — decide on Text view
 Only worth it once someone has used the PDF viewer in anger. The native iframe cannot

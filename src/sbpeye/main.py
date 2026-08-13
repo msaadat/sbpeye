@@ -1562,7 +1562,12 @@ def get_law_file(document_id: str, version_id: str | None = None, db: Session = 
     archive_root = (PROJECT_ROOT / "attachments").resolve()
     if archive_root not in candidate.parents or not candidate.is_file():
         return JSONResponse({"error": "Archived file is missing"}, status_code=404)
-    return FileResponse(candidate, filename=candidate.name)
+    # `inline`, not the default `attachment`: the reader renders this in an iframe, and an
+    # attachment disposition makes the browser download it instead of showing it. The
+    # filename is kept so saving it from the viewer still gets a meaningful name.
+    return FileResponse(
+        candidate, filename=candidate.name, content_disposition_type="inline"
+    )
 
 
 @app.get("/api/pdf_preview")

@@ -6,8 +6,10 @@ import {
   buildLawFileUrl,
   getLawDetail,
   getLaws,
+  getLawTypes,
   type LawDetail,
   type LawSummary,
+  type LawTypeCount,
 } from '@/lib/api'
 
 const route = useRoute()
@@ -27,6 +29,9 @@ const matches = ref<LawSummary[] | null>(null)
 const searching = ref(false)
 const expanded = ref<Set<string>>(new Set())
 const provenanceOpen = ref(false)
+
+const corpusTypes = ref<LawTypeCount[]>([])
+const typeFilter = ref('')
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 let searchController: AbortController | null = null
@@ -50,7 +55,14 @@ const childrenByParent = computed(() => {
 
 const TYPE_ORDER = ['law', 'regulation', 'guideline']
 
-const groups = computed(() => {
+function byAuthority(a: string, b: string): number {
+  const ai = TYPE_ORDER.indexOf(a)
+  const bi = TYPE_ORDER.indexOf(b)
+  return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi)
+}
+
+/** Every group the tree can show, before the type filter narrows it. */
+const allGroups = computed(() => {
   const buckets = new Map<string, LawSummary[]>()
   for (const doc of documents.value) {
     if (doc.parent_id) continue
@@ -60,18 +72,60 @@ const groups = computed(() => {
     buckets.set(key, bucket)
   }
   return [...buckets.entries()]
-    .sort((a, b) => {
-      const ai = TYPE_ORDER.indexOf(a[0])
-      const bi = TYPE_ORDER.indexOf(b[0])
-      return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi)
-    })
+    .sort((a, b) => byAuthority(a[0], b[0]))
     .map(([doc_type, items]) => ({
       doc_type,
-      items: items.sort((a, b) => a.title.localeCompare(b.title)),
+      items: items.sort((a, b) => a.display_title.localeCompare(b.display_title)),
     }))
 })
 
+const groups = computed(() =>
+  typeFilter.value ? allGroups.value.filter((g) => g.doc_type === typeFilter.value) : allGroups.value,
+)
+
+/**
+ * Filter chips. `/api/laws/types` decides which types exist — so a type we have not
+ * hardcoded still gets a chip — but the count shown is the number of *rows the tree
+ * will render*, i.e. top-level only. The API's own count spans the whole corpus and
+ * would contradict what the user is looking at; it goes in the tooltip instead.
+ */
+const facets = computed(() => {
+  const topLevel = new Map(allGroups.value.map((g) => [g.doc_type, g.items.length]))
+  const known = corpusTypes.value.map((t) => t.doc_type)
+  const names = [...new Set([...known, ...topLevel.keys()])].sort(byAuthority)
+  return names
+    .filter((name) => topLevel.get(name))
+    .map((name) => ({
+      doc_type: name,
+      count: topLevel.get(name) || 0,
+      corpusCount: corpusTypes.value.find((t) => t.doc_type === name)?.count ?? 0,
+    }))
+})
+
+const topLevelTotal = computed(() => facets.value.reduce((sum, f) => sum + f.count, 0))
+const visibleTotal = computed(() => groups.value.reduce((sum, g) => sum + g.items.length, 0))
+
+/**
+ * How much of each collection we actually hold. "26 parts" is SBP's claim; `held` is
+ * ours, and the two differ — the Reporting Guidelines list 9 parts and every one of
+ * them is a dead link, which a bare part count would hide.
+ */
+const holdingsById = computed(() => {
+  const map = new Map<string, { parts: number; held: number }>()
+  for (const [parentId, children] of childrenByParent.value) {
+    map.set(parentId, {
+      parts: children.length,
+      held: children.filter((child) => child.current_version?.has_file).length,
+    })
+  }
+  return map
+})
+
 const currentVersion = computed(() => detail.value?.current_version || null)
+
+const partsHeld = computed(
+  () => detail.value?.children.filter((child) => child.has_content).length || 0,
+)
 
 const fileUrl = computed(() => {
   const doc = detail.value
@@ -83,7 +137,9 @@ const statusLine = computed(() => {
   const doc = detail.value
   if (!doc) return ''
   const parts: string[] = []
-  if (currentVersion.value?.version_label) parts.push(currentVersion.value.version_label)
+  // The suffix we stripped off the title belongs here — it was always state, never name.
+  const edition = currentVersion.value?.version_label || doc.version_suffix
+  if (edition) parts.push(capitalize(edition))
   if (doc.version_count > 1) parts.push(`${doc.version_count} editions held`)
   const captured = currentVersion.value?.first_seen_at
   if (captured) parts.push(`captured ${formatDate(captured)}`)
@@ -107,13 +163,44 @@ function formatDate(value?: string | null): string {
     .format(new Date(value))
 }
 
-function typeLabel(value?: string | null): string {
-  if (!value) return 'Document'
+function capitalize(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1)
 }
 
+function typeLabel(value?: string | null): string {
+  if (!value) return 'Document'
+  return capitalize(value)
+}
+
 function isContainer(doc: LawSummary): boolean {
-  return (childrenByParent.value.get(doc.id)?.length || 0) > 0
+  return holdingsById.value.has(doc.id)
+}
+
+/** Some parts are titled with their own label ("NBFCs"); prefixing it reads as a stutter. */
+function partPrefix(doc: LawSummary): string {
+  const label = doc.part_label
+  if (!label || label === doc.display_title) return ''
+  return `${label} — `
+}
+
+/** The one muted line under a row: what we hold, and which edition of it. */
+function subLine(doc: LawSummary): string {
+  const held = holdingsById.value.get(doc.id)
+  if (held) {
+    const count = `${held.parts} part${held.parts === 1 ? '' : 's'}`
+    if (!held.held) return `${count} · none held`
+    if (held.held === held.parts) return `${count} · all held`
+    return `${count} · ${held.held} held`
+  }
+  const edition = doc.current_version?.version_label || doc.version_suffix || ''
+  const state = doc.is_external
+    ? 'hosted externally'
+    : doc.circular_id
+      ? 'is a circular'
+      : !doc.current_version
+        ? 'no file held'
+        : ''
+  return [state, edition].filter(Boolean).join(' · ') || 'in force'
 }
 
 function toggle(doc: LawSummary) {
@@ -185,7 +272,7 @@ function runSearch() {
 
   searching.value = true
   searchController = new AbortController()
-  getLaws({ q: value, per_page: 50 }, searchController.signal)
+  getLaws({ q: value, doc_type: typeFilter.value || undefined, per_page: 50 }, searchController.signal)
     .then((response) => {
       matches.value = response.items
     })
@@ -202,10 +289,24 @@ watch(query, () => {
   searchTimer = setTimeout(runSearch, 250)
 })
 
+// The filter narrows the tree client-side, but a search runs server-side and has to be
+// re-asked with the new type.
+watch(typeFilter, () => {
+  if (query.value.trim()) runSearch()
+})
+
 watch(selectedId, (id) => void loadDetail(id), { immediate: true })
 
 onMounted(() => {
   void loadCorpus()
+  // Facet source of truth; failing to load it just costs us the chips.
+  getLawTypes()
+    .then((types) => {
+      corpusTypes.value = types
+    })
+    .catch(() => {
+      corpusTypes.value = []
+    })
 })
 </script>
 
@@ -214,12 +315,31 @@ onMounted(() => {
     <aside class="laws-library">
       <header class="library-head">
         <span class="library-title">Laws &amp; Regulations</span>
-        <span class="library-count">{{ documents.length || '—' }}</span>
+        <span class="library-count">{{ visibleTotal || '—' }}</span>
       </header>
 
       <div class="library-field">
         <i class="pi pi-search" />
         <input v-model="query" type="search" placeholder="Filter or search full text" />
+      </div>
+
+      <div v-if="facets.length > 1" class="library-facets">
+        <button
+          type="button"
+          class="facet"
+          :class="{ 'is-active': !typeFilter }"
+          @click="typeFilter = ''"
+        >All <span class="facet-count">{{ topLevelTotal }}</span></button>
+        <button
+          v-for="facet in facets"
+          :key="facet.doc_type"
+          type="button"
+          class="facet"
+          :class="{ 'is-active': typeFilter === facet.doc_type }"
+          :title="`${facet.corpusCount} in the corpus, including parts`"
+          :aria-label="`${typeLabel(facet.doc_type)}, ${facet.count} documents`"
+          @click="typeFilter = typeFilter === facet.doc_type ? '' : facet.doc_type"
+        >{{ typeLabel(facet.doc_type) }} <span class="facet-count">{{ facet.count }}</span></button>
       </div>
 
       <p v-if="listLoading" class="library-note">Loading the corpus…</p>
@@ -234,15 +354,15 @@ onMounted(() => {
           v-for="item in matches"
           :key="item.id"
           type="button"
-          class="node"
+          class="node is-flat"
           :class="{ 'is-selected': item.id === selectedId }"
           @click="select(item)"
         >
           <span class="node-body">
             <span v-if="item.parent_id" class="node-crumb">
-              {{ documents.find((d) => d.id === item.parent_id)?.title || 'Part of a collection' }}
+              {{ documents.find((d) => d.id === item.parent_id)?.display_title || 'Part of a collection' }}
             </span>
-            <span class="node-title">{{ item.part_label ? `${item.part_label} — ` : '' }}{{ item.title }}</span>
+            <span class="node-title">{{ partPrefix(item) }}{{ item.display_title }}</span>
           </span>
         </button>
       </div>
@@ -261,14 +381,18 @@ onMounted(() => {
                 <i v-if="isContainer(doc)" class="pi" :class="expanded.has(doc.id) ? 'pi-chevron-down' : 'pi-chevron-right'" />
               </span>
               <span class="node-body">
-                <span class="node-title">{{ doc.title }}</span>
-                <span class="node-sub">
-                  <template v-if="isContainer(doc)">{{ childrenByParent.get(doc.id)?.length }} parts</template>
-                  <template v-else-if="doc.is_external">hosted externally</template>
-                  <template v-else-if="doc.circular_id">is a circular</template>
-                  <template v-else-if="!doc.current_version">no file held</template>
-                  <template v-else-if="doc.current_version.version_label">{{ doc.current_version.version_label }}</template>
-                  <template v-else>in force</template>
+                <span class="node-title">{{ doc.display_title }}</span>
+                <span class="node-sub">{{ subLine(doc) }}</span>
+                <!-- Only where the collection is incomplete: a full bar says nothing. -->
+                <span
+                  v-if="holdingsById.get(doc.id) && holdingsById.get(doc.id)!.held < holdingsById.get(doc.id)!.parts"
+                  class="node-meter"
+                  aria-hidden="true"
+                >
+                  <span
+                    class="node-meter-fill"
+                    :style="{ width: `${(holdingsById.get(doc.id)!.held / holdingsById.get(doc.id)!.parts) * 100}%` }"
+                  />
                 </span>
               </span>
             </button>
@@ -284,9 +408,11 @@ onMounted(() => {
               >
                 <span class="node-body">
                   <span class="node-title">
-                    <span v-if="child.part_label" class="node-part">{{ child.part_label }}</span>
-                    {{ child.title }}
+                    <span v-if="child.part_label !== child.display_title" class="node-part">{{ child.part_label }}</span>
+                    {{ child.display_title }}
                   </span>
+                  <!-- The container's meter says how many are missing; this says which. -->
+                  <span v-if="!child.current_version?.has_file" class="node-sub">not held</span>
                 </span>
               </button>
             </div>
@@ -311,10 +437,12 @@ onMounted(() => {
       <template v-else-if="detail">
         <header class="reader-head">
           <div class="reader-identity">
-            <p v-if="detail.parent" class="reader-crumb">{{ detail.parent.title }}</p>
+            <p v-if="detail.parent" class="reader-crumb">{{ detail.parent.display_title }}</p>
             <h1 class="reader-title">
-              <span v-if="detail.part_label" class="reader-part">{{ detail.part_label }}</span>
-              {{ detail.title }}
+              <span v-if="detail.part_label && detail.part_label !== detail.display_title" class="reader-part">
+                {{ detail.part_label }}
+              </span>
+              {{ detail.display_title }}
             </h1>
             <p class="reader-status">
               <span class="reader-tag">{{ typeLabel(detail.doc_type) }}</span>
@@ -355,7 +483,15 @@ onMounted(() => {
           </template>
           <template v-else-if="detail.children.length">
             <h2>{{ detail.children.length }} parts.</h2>
-            <p>This is a collection. Pick a part on the left to read it.</p>
+            <p v-if="!partsHeld">
+              This is a collection, but SBP's link is broken for every one of its parts, so we
+              hold none of them. We retry on every sync.
+            </p>
+            <p v-else-if="partsHeld < detail.children.length">
+              This is a collection. We hold {{ partsHeld }} of its {{ detail.children.length }} parts —
+              SBP's link is broken for the rest. Pick a part on the left to read it.
+            </p>
+            <p v-else>This is a collection. Pick a part on the left to read it.</p>
           </template>
           <template v-else>
             <h2>SBP's link to this file is broken.</h2>
@@ -468,6 +604,44 @@ onMounted(() => {
   font-size: 0.8rem;
 }
 
+.library-facets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.facet {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3rem;
+  padding: 0.2rem 0.45rem;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: var(--sbp-subtle);
+  color: var(--sbp-muted);
+  font: inherit;
+  font-size: 0.68rem;
+  cursor: pointer;
+  transition: color 0.16s var(--sbp-ease), border-color 0.16s var(--sbp-ease);
+}
+
+.facet:hover {
+  color: var(--sbp-text);
+}
+
+.facet.is-active {
+  border-color: color-mix(in srgb, var(--sbp-green) 40%, transparent);
+  background: color-mix(in srgb, var(--sbp-green) 11%, var(--sbp-surface));
+  color: var(--sbp-green);
+  font-weight: 600;
+}
+
+.facet-count {
+  font-size: 0.62rem;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+}
+
 .library-note {
   margin: 0.3rem 0.35rem;
   font-size: 0.72rem;
@@ -523,7 +697,9 @@ onMounted(() => {
   font-weight: 600;
 }
 
-.node.is-child {
+/* Rows with no caret slot: without this they land in the 0.85rem caret column. */
+.node.is-child,
+.node.is-flat {
   grid-template-columns: 1fr;
 }
 
@@ -560,6 +736,23 @@ onMounted(() => {
   margin-top: 0.1rem;
   font-size: 0.66rem;
   color: var(--sbp-muted);
+}
+
+/* Sits under an incomplete container's count: the gap between SBP's claim and our archive. */
+.node-meter {
+  display: block;
+  height: 2px;
+  margin-top: 0.28rem;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--sbp-muted) 22%, transparent);
+  overflow: hidden;
+}
+
+.node-meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--sbp-green) 55%, transparent);
 }
 
 .node-children {

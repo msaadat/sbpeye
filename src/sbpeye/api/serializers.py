@@ -24,6 +24,7 @@ from ..models import (
     ResearchWorkspace,
     WorkspaceCircular,
 )
+from ..scraper.laws import split_law_title
 
 DEFAULT_WORKSPACE_ID = "default"
 DEFAULT_WORKSPACE_NAME = "Default"
@@ -146,10 +147,16 @@ def _law_version_payload(version: RegDocumentVersion | None, include_text: bool 
 def _law_summary(document: RegDocument, snippet: str | None = None) -> dict:
     """List-shaped payload. `result_kind` lets a caller badge mixed search results."""
     current = document.current_version
+    # "(Updated till July 16, 2026)" is state, not name. Raw `title` stays as SBP wrote
+    # it; `display_title`/`version_suffix` are the split, done here because the phrase
+    # set that recognises a suffix lives (and is tested) in the scraper.
+    display_title, version_suffix = split_law_title(document.title)
     return {
         "result_kind": "law",
         "id": document.id,
         "title": document.title,
+        "display_title": display_title,
+        "version_suffix": version_suffix,
         "doc_type": document.doc_type,
         "part_label": document.part_label,
         "part_order": document.part_order,
@@ -184,13 +191,18 @@ def _law_detail(document: RegDocument) -> dict:
             )
         ],
         "parent": (
-            {"id": document.parent.id, "title": document.parent.title}
+            {
+                "id": document.parent.id,
+                "title": document.parent.title,
+                "display_title": split_law_title(document.parent.title)[0],
+            }
             if document.parent else None
         ),
         "children": [
             {
                 "id": child.id,
                 "title": child.title,
+                "display_title": split_law_title(child.title)[0],
                 "part_label": child.part_label,
                 "part_order": child.part_order,
                 "has_content": child.current_version is not None,

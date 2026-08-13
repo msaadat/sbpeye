@@ -1109,7 +1109,12 @@ export interface LawVersion {
 export interface LawSummary {
   result_kind: 'law'
   id: string
+  /** As SBP wrote it, version suffix and all. Prefer `display_title` for rendering. */
   title: string
+  /** The title with its version suffix removed — the document's name, not its state. */
+  display_title: string
+  /** The stripped suffix, e.g. "Updated till July 16, 2026" or "being updated". */
+  version_suffix?: string | null
   doc_type?: string | null
   part_label?: string | null
   part_order?: number | null
@@ -1129,6 +1134,7 @@ export interface LawSummary {
 export interface LawChild {
   id: string
   title: string
+  display_title: string
   part_label?: string | null
   part_order?: number | null
   has_content: boolean
@@ -1148,7 +1154,7 @@ export interface LawDetail extends LawSummary {
   first_seen_at?: string | null
   last_seen_at?: string | null
   versions: LawVersion[]
-  parent?: { id: string; title: string } | null
+  parent?: { id: string; title: string; display_title: string } | null
   children: LawChild[]
   circular?: CircularSummary | null
   linked_circulars: LawLinkedCircular[]

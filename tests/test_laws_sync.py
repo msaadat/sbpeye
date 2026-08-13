@@ -146,6 +146,23 @@ def test_parse_version_label(title, label):
     assert laws.parse_version_label(title) == label
 
 
+@pytest.mark.parametrize("title,name,suffix", [
+    ("Prudential Regulations for SME Financing (Updated till July 16, 2026)",
+     "Prudential Regulations for SME Financing", "Updated till July 16, 2026"),
+    ("Banking Companies Ordinance 1962 (being updated)",
+     "Banking Companies Ordinance 1962", "being updated"),
+    # A trailing parenthetical that is an acronym, not a state, stays in the name.
+    ("Guidelines for Foreign Investment Survey (FIS)",
+     "Guidelines for Foreign Investment Survey (FIS)", None),
+    ("PSD Guidelines for Account Holders using Credit/Debit/Smart Cards (URDU)",
+     "PSD Guidelines for Account Holders using Credit/Debit/Smart Cards (URDU)", None),
+    ("Questionnaire (Apr-Jun)", "Questionnaire (Apr-Jun)", None),
+])
+def test_split_law_title_keeps_case_and_separates_state_from_name(title, name, suffix):
+    """What the API hands the UI: a name to render, and the state to render beside it."""
+    assert laws.split_law_title(title) == (name, suffix)
+
+
 @pytest.mark.parametrize("title,expected", [
     ("PRs for SME Financing (to be applicable from January 1, 2026)", datetime(2026, 1, 1)),
     ("PRs for SME Financing (applicable from 15 March 2027)", datetime(2027, 3, 15)),

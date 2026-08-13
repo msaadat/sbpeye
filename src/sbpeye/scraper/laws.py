@@ -141,6 +141,16 @@ def parse_version_label(title: str) -> str | None:
     return suffix
 
 
+def split_law_title(title: str) -> tuple[str, str | None]:
+    """A title as (name, version suffix), for display.
+
+    The same split as `normalize_law_title`, but keeping the stem's original case so the
+    API can hand a UI a name to render and the state to render beside it. Public because
+    a client cannot redo this safely: the phrase set is broad and SBP keeps extending it.
+    """
+    return _split_version_suffix(title)
+
+
 _MONTHS = {
     month.lower(): index
     for index, month in enumerate(

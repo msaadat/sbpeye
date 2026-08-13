@@ -810,6 +810,32 @@ def build_extraction_batches(
     return batches
 
 
+# Chunk geometry for the semantic index. Measured on the live corpus (section 12.1 of
+# docs/INVENTORY_SEARCH_PLAN.md): at 350 words a mean-pooled vector encodes the passage's
+# dominant topic, so a circular that carries one AML paragraph inside a document about
+# something else scores as if it never mentioned AML. Mention-sized chunks lift deep
+# recall — "call centre" R@50 went 73% -> 90% — at ~4x the chunk count.
+#
+# 130 rather than the 100 that was measured: layer 3 of the inventory search quotes from
+# the matched chunk, and it needs enough surrounding text to pick a sensible span.
+INDEX_CHUNK_MAX_WORDS = 130
+INDEX_CHUNK_OVERLAP_WORDS = 30
+
+
+def prepare_index_chunks(document: dict[str, Any]) -> list[dict[str, Any]]:
+    """Chunks as written to the vector store. The one canonical geometry.
+
+    Every path that writes embeddings and every path that predicts how many chunks a
+    source *should* have must go through here, or the ledger's `expected_chunks` will
+    disagree with reality for reasons no one can reconstruct.
+    """
+    return prepare_reference_chunks(
+        document,
+        max_words=INDEX_CHUNK_MAX_WORDS,
+        overlap_words=INDEX_CHUNK_OVERLAP_WORDS,
+    )
+
+
 def prepare_reference_chunks(
     document: dict[str, Any], max_words: int = 350, overlap_words: int = 75
 ) -> list[dict[str, Any]]:
@@ -840,6 +866,12 @@ def prepare_reference_chunks(
             unit_id = _unit_id(document["doc_id"], f"{page_number}:{page_chunk_index}", body)
             chunks.append({
                 "text": f"{document['doc_label']}. {ref}. {body}",
+                # Same span without the label/ref prefix. The prefix is useful context
+                # for a reader or an LLM, but embedding it puts a constant, correlated
+                # component in every chunk of a document — see section 12.2 of
+                # docs/INVENTORY_SEARCH_PLAN.md. Vector writes use this; chat and
+                # checklist keep `text`.
+                "embed_text": body,
                 "ref": ref,
                 "unit_id": unit_id,
                 "page_start": page_number,

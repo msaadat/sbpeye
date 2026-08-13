@@ -1,4 +1,6 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Float, or_
+from sqlalchemy import (
+    Column, Integer, String, Text, DateTime, ForeignKey, Float, UniqueConstraint, or_,
+)
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from .database import Base
@@ -450,3 +452,41 @@ class ChatMessage(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     session = relationship("ChatSession", back_populates="messages")
+
+
+class SemanticIndexSource(Base):
+    """One row per physical searchable source, recording what is actually in the index.
+
+    `Attachment.is_vectorized` and `RegDocumentVersion.is_vectorized` cannot support an
+    inventory-completeness claim: circular bodies have no flag at all, a boolean names no
+    embedding model or chunker, it cannot prove the expected chunk count is present, and
+    it collapses "indexed" with "processed but produced zero chunks" — which is how the
+    live index came to hold 88 law documents while SQLite claimed 100.
+
+    See docs/INVENTORY_SEARCH_PLAN.md section 10.
+    """
+
+    __tablename__ = "semantic_index_sources"
+
+    id = Column(String, primary_key=True)
+    # circular | attachment | law_version
+    source_kind = Column(String, nullable=False, index=True)
+    source_id = Column(String, nullable=False, index=True)
+    # The logical document a hit rolls up to: circular | law
+    logical_kind = Column(String, nullable=False, index=True)
+    logical_document_id = Column(String, nullable=False, index=True)
+    # Current law version where applicable; NULL for circulars and attachments.
+    version_id = Column(String, nullable=True)
+    content_hash = Column(String, nullable=True)
+    chunker_version = Column(String, nullable=True)
+    embedding_fingerprint = Column(String, nullable=True)
+    expected_chunks = Column(Integer, nullable=False, default=0)
+    indexed_chunks = Column(Integer, nullable=False, default=0)
+    # indexed | empty | unsupported | extraction_error | index_error | stale
+    status = Column(String, nullable=False, default="stale", index=True)
+    error = Column(Text, nullable=True)
+    indexed_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("source_kind", "source_id", name="uq_semantic_index_source"),
+    )

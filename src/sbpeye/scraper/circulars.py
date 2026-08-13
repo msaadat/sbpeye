@@ -11,7 +11,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 from ..models import Attachment, Circular, CircularRelationship
 from ..database import PROJECT_ROOT, collection, embedding_backend
-from ..checklist import PAGE_MARKER_RE, prepare_reference_chunks
+from ..checklist import PAGE_MARKER_RE, prepare_index_chunks, prepare_reference_chunks
 from ..search import index_circular_fts
 from .clean_html import extract_sbp_text
 from ..link_routing import normalize_reference, normalize_sbp_url
@@ -985,8 +985,12 @@ def _replace_document_chunks(document: dict, *, metadata_for, delete_kwargs: dic
     `metadata_for(chunk, index)` builds the per-chunk Chroma metadata. Returns the
     number of chunks written.
     """
-    reference_chunks = prepare_reference_chunks(document)
-    chunks = [item["text"] for item in reference_chunks]
+    reference_chunks = prepare_index_chunks(document)
+    # `embed_text` drops the "{doc_label}. {ref}. " prefix; the label and ref still ride
+    # along in metadata. Stored documents keep the readable form so evidence passages and
+    # snippets are unchanged.
+    chunks = [item["embed_text"] for item in reference_chunks]
+    stored = [item["text"] for item in reference_chunks]
     doc_id = document["doc_id"]
     chunk_ids = [f"{doc_id}__chunk_{i}" for i in range(len(chunks))]
     metadatas = [metadata_for(item, i) for i, item in enumerate(reference_chunks)]
@@ -1001,7 +1005,7 @@ def _replace_document_chunks(document: dict, *, metadata_for, delete_kwargs: dic
     with _CHROMA_WRITE_LOCK:
         _delete_document_chunks(**delete_kwargs)
         collection.add(
-            documents=chunks,
+            documents=stored,
             embeddings=embeddings,
             metadatas=metadatas,
             ids=chunk_ids,

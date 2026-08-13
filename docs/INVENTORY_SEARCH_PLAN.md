@@ -19,6 +19,99 @@ the existing chat agent, or a future MCP server without changing the search sema
 
 ---
 
+## 0. Implementation status (2026-08-14)
+
+Phases 1-4 are code-complete in `src/sbpeye/inventory/`, with 34 tests in
+`tests/test_inventory.py` and `tests/test_cli_reindex.py`. Six gaps against this document
+remain open; they are listed in 0.2 and are the resumption point.
+
+### 0.1 Landed
+
+| Area | Where |
+|---|---|
+| Ledger table, self-healing DDL | `models.SemanticIndexSource`, `database._ensure_columns` |
+| Source enumeration, logical-document mapping, by-design exclusions | `inventory/corpus.py` |
+| Reconciliation, orphan detection, `snapshot_id` | `inventory/ledger.py` |
+| Fingerprints, `CHUNKER_VERSION` | `inventory/fingerprint.py` |
+| Chunk geometry (130w/30, prefix-free `embed_text`) | `checklist.prepare_index_chunks` |
+| Paged snapshot loader + cache | `inventory/index.py` |
+| Term generation (strictly additive) | `inventory/terms.py` |
+| Lexical arm, dense band, HyDE, union/truncation | `inventory/retrieval.py` |
+| Adjudication, extraction, locators | `inventory/adjudicate.py`, `inventory/extract.py` |
+| Request/response contract | `inventory/schemas.py` |
+| Orchestration | `inventory/service.py` |
+| CLI adapter | `cli/inventory_cmd.py` |
+
+Source enumeration was validated against the live database and reproduced the section 3.1
+baseline exactly: 3,649 circulars, 1,324 attachments with text, 100 current law versions,
+98 extraction errors, 43 unsupported, 5 circular-backed and 7 manifest rows excluded.
+
+### 0.2 Open gaps
+
+Ordered by how much they affect whether a result can be trusted.
+
+1. **Orphan chunks are still scored.** Section 10.2 requires that extra or stale vector
+   chunks are not scored. `index.load_snapshot` loads every chunk in the collection;
+   `ledger.reconcile` reports orphans but nothing filters them out of the matrix. A
+   deleted circular's leftover chunks can still produce a semantic hit.
+2. **Fingerprint mismatch never aborts.** Section 10.2 requires an embedding dimension or
+   fingerprint mismatch to abort. `EmbeddingFingerprintMismatch` is defined in
+   `schemas.py` and never raised, so changing the embedding model without re-indexing
+   scores a query against an incompatible space.
+3. **The ledger is reconcile-only.** Section 10 requires every indexing path to write its
+   ledger row in the same operation boundary as its Chroma/FTS write. Only the batch
+   reconciler exists, so after a normal sync the ledger is stale until
+   `inventory index --audit` runs, and `coverage.is_complete` can assert a completeness it
+   has not re-checked.
+4. **Coverage does not separate the lexical and vector arms.** A source missing from the
+   vector index may still be findable through FTS; section 10 requires reporting the two
+   separately. Only vector staleness is tracked.
+5. **Filters run after retrieval.** Section 9.1 specifies filtering before retrieval so the
+   counts describe what was actually searched. `service._passes_filters` runs on the
+   candidate list, so `candidates_lexical` and `candidates_semantic` overstate by the
+   number of documents the filters later removed.
+6. **No `max_results` cap.** Section 9.3 specifies result-level truncation with an explicit
+   flag; `truncated` currently reflects only candidate truncation.
+
+### 0.3 Missing tests
+
+From section 15, not yet written: a relevant chunk beyond the first `collection.get()`
+page; an assertion that no `collection.query()` path exists; vectorized-batch versus
+literal-loop equivalence; wrong-dimension and duplicated vector detection; that changing
+the judge model does *not* change `snapshot_id`; that vector-store failure never falls
+back to hybrid search.
+
+Separately, **attachment-to-circular rollup has code but no test** — the `indexed` fixture
+covers circular bodies and laws only, so acceptance criterion 5 is unverified.
+
+`sbpeye inventory index --repair` is written but has never run against real data.
+
+### 0.4 Operational constraint learned the hard way
+
+**Chroma's `PersistentClient` is single-process.** A running dev server holds the HNSW
+segment files (`data_level0.bin`, `link_lists.bin`, `header.bin`) open while holding no
+SQLite handle, so a concurrent `sbpeye reindex` desynchronises the segment from the
+metadata. The store then segfaults the interpreter on any read — `collection.count()` is
+enough — and is recoverable only by deleting the store and rebuilding. This happened on
+2026-08-13.
+
+Two consequences are now in the code and must not be regressed:
+
+- `database.reset_collection()` drops and recreates the collection **and rebinds the
+  module-level handle** in `search`, `chat_retrieval`, and `scraper.circulars`. Do not
+  replace it with record-by-record deletion: clearing a 100 MB+ HNSW segment in place is
+  what makes corruption likely. Do not drop the collection without the rebinding either —
+  that is what silently emptied the law arm.
+- `cli.commands._require_exclusive_vector_store()` refuses to rebuild while any other
+  process holds a file anywhere under `chroma_db/`. It must check the whole directory,
+  not `chroma.sqlite3`, which a running server does not keep open.
+
+Several existing tests (`test_laws_sync`, `test_laws_hierarchy`, `test_laws_circular_rows`,
+`test_laws_backlink`) reach the real vector store through `sync_laws`, so they cannot run
+while it is missing or damaged.
+
+---
+
 ## 1. Goal
 
 Support broad research questions such as:
@@ -754,12 +847,12 @@ failure — degrade explicitly and record it in `coverage.warnings`.
 
 ## 14. Implementation phases
 
-### Phase 1 — Canonical corpus and ledger
+### Phase 1 — Canonical corpus and ledger  ·  **mostly done** (gap 0.2.3)
 
 1. Add the `semantic_index_sources` model and automatic migration/table creation.
 2. Centralize source enumeration for circular bodies, attachments, and current law versions.
 3. Define the embedding fingerprint and chunker version.
-4. Update circular, attachment, and law vectorization paths to write ledger records.
+4. Update circular, attachment, and law vectorization paths to write ledger records. **(outstanding — see 0.2.3)**
 5. Add a backfill/audit command that reconciles SQLite, Chroma, and the ledger.
 6. Repair the attachment vectorization gap, or explain every failure in the ledger.
 
@@ -775,16 +868,16 @@ archived source files.
 **Deliverable:** the application can prove which source units are searchable and why the
 remainder are not.
 
-### Phase 2 — Re-chunk and re-index
+### Phase 2 — Re-chunk and re-index  ·  **code done, re-index pending**
 
 1. Implement the section 12.2 chunking changes behind the bumped `chunker_version`.
-2. Re-index the full corpus; verify ledger counts.
+2. Re-index the full corpus; verify ledger counts. **(in progress 2026-08-14)**
 3. Re-run the section 4.1 and 12.1 measurements against the new index and record them here
-   so the effect of the change is on file.
+   so the effect of the change is on file. **(outstanding — blocked on step 2)**
 
 **Deliverable:** the dense arm operates on mention-sized chunks with clean text.
 
-### Phase 3 — Retrieval service (layers 0-1)
+### Phase 3 — Retrieval service (layers 0-1)  ·  **done** (gaps 0.2.1, 0.2.2, 0.2.5)
 
 1. Implement typed schemas and request validation.
 2. Implement the paged Chroma snapshot loader and matrix cache.
@@ -797,7 +890,7 @@ remainder are not.
 **Deliverable:** a pure Python call returns the complete candidate union with provenance,
 runnable with the LLM layers disabled.
 
-### Phase 4 — Adjudication, extraction, and CLI (layers 2-3)
+### Phase 4 — Adjudication, extraction, and CLI (layers 2-3)  ·  **done** (gap 0.2.6)
 
 1. Implement batched relevance judgment with persisted verdicts and reasons.
 2. Implement span extraction with mandatory substring verification.
@@ -816,7 +909,7 @@ JSON output follows the future MCP schema so it doubles as contract testing.
 **Deliverable:** the feature produces the intended output shape, exercisable independently
 of chat.
 
-### Phase 5 — Calibration and optional consumers
+### Phase 5 — Calibration and optional consumers  ·  **not started**
 
 Calibration:
 

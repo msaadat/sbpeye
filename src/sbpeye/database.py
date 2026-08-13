@@ -39,6 +39,42 @@ def has_vector_store_data() -> bool:
     return collection.count() > 0
 
 
+def reset_collection():
+    """Drop and recreate the shared collection, rebinding every module-level handle.
+
+    Dropping the collection is the only cheap way to reset it: deleting its records
+    one batch at a time makes Chroma tombstone and recompact a 100 MB+ HNSW segment,
+    which is both slow and the operation most likely to leave the segment out of sync
+    with the SQLite metadata.
+
+    The catch is that ``search``, ``chat_retrieval``, and ``scraper.circulars`` bind
+    ``collection`` at import, so a naive drop leaves them writing through a dead handle —
+    which is how a rebuild silently lost the law arm. Rebinding them here keeps the drop
+    safe. Callers must hold the only open handle on the store: Chroma's PersistentClient
+    is single-process, and a second process (a running dev server) writing at the same
+    time is what corrupts it.
+    """
+    global collection
+    import sys
+
+    try:
+        chroma_client.delete_collection("circulars")
+    except Exception:
+        pass
+    collection = chroma_client.get_or_create_collection(
+        name="circulars", embedding_function=None
+    )
+    for module_name in (
+        "sbpeye.search",
+        "sbpeye.chat_retrieval",
+        "sbpeye.scraper.circulars",
+    ):
+        module = sys.modules.get(module_name)
+        if module is not None and hasattr(module, "collection"):
+            module.collection = collection
+    return collection
+
+
 def _ensure_columns(bind=None):
     with (bind or engine).begin() as conn:
         insp = inspect(conn)
@@ -244,6 +280,36 @@ def _ensure_columns(bind=None):
             "CREATE VIRTUAL TABLE IF NOT EXISTS laws_fts USING fts5("
             "document_id UNINDEXED, title, part_label, body, tokenize='unicode61')"
         ))
+
+        # Semantic index ledger (see docs/INVENTORY_SEARCH_PLAN.md section 10). Created
+        # here rather than left to create_all: this module runs create_all before
+        # models.py has registered anything, so a CLI-only process would never get it.
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS semantic_index_sources ("
+            "id VARCHAR PRIMARY KEY, "
+            "source_kind VARCHAR NOT NULL, "
+            "source_id VARCHAR NOT NULL, "
+            "logical_kind VARCHAR NOT NULL, "
+            "logical_document_id VARCHAR NOT NULL, "
+            "version_id VARCHAR, "
+            "content_hash VARCHAR, "
+            "chunker_version VARCHAR, "
+            "embedding_fingerprint VARCHAR, "
+            "expected_chunks INTEGER NOT NULL DEFAULT 0, "
+            "indexed_chunks INTEGER NOT NULL DEFAULT 0, "
+            "status VARCHAR NOT NULL DEFAULT 'stale', "
+            "error TEXT, "
+            "indexed_at DATETIME, "
+            "CONSTRAINT uq_semantic_index_source UNIQUE (source_kind, source_id))"
+        ))
+        for statement in (
+            "CREATE INDEX IF NOT EXISTS ix_sis_logical ON semantic_index_sources "
+            "(logical_kind, logical_document_id)",
+            "CREATE INDEX IF NOT EXISTS ix_sis_status ON semantic_index_sources (status)",
+            "CREATE INDEX IF NOT EXISTS ix_sis_source ON semantic_index_sources "
+            "(source_kind, source_id)",
+        ):
+            conn.execute(text(statement))
 
 Base.metadata.create_all(bind=engine)
 _ensure_columns()

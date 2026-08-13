@@ -1,4 +1,5 @@
 import click
+import os
 import sys
 import time
 import json
@@ -873,29 +874,58 @@ def stats_cmd():
     _show_stats()
 
 
-def _clear_collection(col, batch_size: int = 5000) -> int:
-    """Empty the shared collection in place. Returns the number of chunks removed.
+def _require_exclusive_vector_store() -> None:
+    """Refuse to rebuild while another process has the vector store open.
 
-    Deliberately not ``delete_collection`` + ``create_collection``: ``search``,
-    ``chat_retrieval``, and ``scraper.circulars`` bind ``collection`` at import, so
-    dropping it leaves those modules holding a dead handle. Paging ids and deleting
-    keeps every existing reference valid.
+    Chroma's PersistentClient assumes one process. Two writers leave the HNSW segment
+    and the SQLite metadata disagreeing, and the store then segfaults the interpreter on
+    the next read — recoverable only by rebuilding from scratch.
+
+    The whole store directory has to be checked, not just ``chroma.sqlite3``: a running
+    server keeps the HNSW segment files (``data_level0.bin``, ``link_lists.bin``) open
+    while holding no SQLite handle at all, and those segment files are exactly what a
+    concurrent rebuild destroys.
     """
-    removed = 0
-    while True:
-        ids = col.get(limit=batch_size, include=[]).get("ids", [])
-        if not ids:
-            return removed
-        col.delete(ids=ids)
-        removed += len(ids)
+    from sbpeye.database import CHROMA_DB_DIR
+
+    if not CHROMA_DB_DIR.exists():
+        return
+    try:
+        import psutil
+    except ImportError:
+        return  # Cannot check; the caller is on their own.
+
+    store_root = str(CHROMA_DB_DIR.resolve())
+    self_pid = os.getpid()
+    holders: dict[int, str] = {}
+    for process in psutil.process_iter(["pid", "name", "cmdline"]):
+        if process.info["pid"] == self_pid:
+            continue
+        try:
+            for handle in process.open_files():
+                if handle.path.startswith(store_root):
+                    holders[process.info["pid"]] = " ".join(
+                        process.info["cmdline"] or [process.info["name"] or "?"]
+                    )[:80]
+                    break
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            continue
+
+    if holders:
+        listed = "; ".join(f"pid {pid}: {cmd}" for pid, cmd in sorted(holders.items()))
+        raise click.ClickException(
+            "another process has the vector store open — concurrent access corrupts "
+            f"the Chroma index and segfaults later reads.\n  {listed}\n"
+            "Stop it and retry."
+        )
 
 
 @cli.command("reindex")
 @click.option("--dry-run", is_flag=True, help="Show what would be indexed without writing")
 def reindex_cmd(dry_run):
     """Re-index all circulars, attachments, and laws/regulations into ChromaDB."""
-    from sbpeye.database import collection, embedding_backend, embedding_config
-    from sbpeye.checklist import prepare_reference_chunks
+    from sbpeye.database import embedding_backend, embedding_config, reset_collection
+    from sbpeye.checklist import prepare_index_chunks
     from sbpeye.models import RegDocument
     from sbpeye.scraper.circulars import (
         attachment_chunk_metadata,
@@ -930,11 +960,11 @@ def reindex_cmd(dry_run):
         if dry_run:
             total_chunks = 0
             for c in circulars:
-                total_chunks += len(prepare_reference_chunks(circular_document(c)))
+                total_chunks += len(prepare_index_chunks(circular_document(c)))
                 for attachment in c.attachments:
                     if attachment.content_text and attachment.content_text.strip():
                         total_chunks += len(
-                            prepare_reference_chunks(attachment_document(attachment))
+                            prepare_index_chunks(attachment_document(attachment))
                         )
             print(
                 f"Would create {total_chunks} circular/attachment chunks "
@@ -947,9 +977,12 @@ def reindex_cmd(dry_run):
         probe = embedding_backend.embed_queries(["SBP circular search"])
         print(f"Embedding dimensions: {len(probe[0])}")
 
-        col = collection
-        cleared = _clear_collection(col)
-        print(f"Cleared {cleared} existing chunk(s)")
+        # Chroma's PersistentClient is single-process. A dev server holding the same
+        # store while this runs is what corrupts the HNSW segment, so fail loudly
+        # rather than produce an index that segfaults on the next read.
+        _require_exclusive_vector_store()
+        col = reset_collection()
+        print("Reset the shared collection")
 
         indexed = 0
         total_chunks = 0
@@ -957,6 +990,7 @@ def reindex_cmd(dry_run):
         indexed_attachments = 0
 
         batch_docs: list[str] = []
+        batch_stored: list[str] = []
         batch_ids: list[str] = []
         batch_metas: list[dict] = []
 
@@ -966,21 +1000,23 @@ def reindex_cmd(dry_run):
                 return
             embeddings = embedding_backend.embed_documents(list(batch_docs))
             col.add(
-                documents=list(batch_docs),
+                documents=list(batch_stored),
                 embeddings=embeddings,
                 ids=list(batch_ids),
                 metadatas=list(batch_metas),
             )
             total_chunks += len(batch_docs)
             batch_docs.clear()
+            batch_stored.clear()
             batch_ids.clear()
             batch_metas.clear()
 
         for i, c in enumerate(circulars):
             try:
-                chunks = prepare_reference_chunks(circular_document(c))
+                chunks = prepare_index_chunks(circular_document(c))
                 for ci, chunk in enumerate(chunks):
-                    batch_docs.append(chunk["text"])
+                    batch_docs.append(chunk["embed_text"])
+                    batch_stored.append(chunk["text"])
                     batch_ids.append(f"{c.id}__chunk_{ci}")
                     batch_metas.append(circular_chunk_metadata(c, chunk, ci))
 
@@ -988,9 +1024,10 @@ def reindex_cmd(dry_run):
                     if not attachment.content_text or not attachment.content_text.strip():
                         attachment.is_vectorized = 0
                         continue
-                    attachment_chunks = prepare_reference_chunks(attachment_document(attachment))
+                    attachment_chunks = prepare_index_chunks(attachment_document(attachment))
                     for ci, chunk in enumerate(attachment_chunks):
-                        batch_docs.append(chunk["text"])
+                        batch_docs.append(chunk["embed_text"])
+                        batch_stored.append(chunk["text"])
                         batch_ids.append(f"{attachment.id}__chunk_{ci}")
                         batch_metas.append(attachment_chunk_metadata(attachment, chunk, ci))
                     attachment.is_vectorized = 1
@@ -1893,6 +1930,11 @@ def _show_laws_status():
         print()
     finally:
         db.close()
+
+
+from sbpeye.cli.inventory_cmd import inventory  # noqa: E402  (command registration)
+
+cli.add_command(inventory)
 
 
 def main():

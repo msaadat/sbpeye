@@ -69,6 +69,21 @@ class FakeCollection:
         }
 
 
+class FakeChromaClient:
+    """Stands in for the PersistentClient so reset_collection runs for real."""
+
+    def __init__(self, collection):
+        self._collection = collection
+        self.resets = 0
+
+    def delete_collection(self, name):
+        self.resets += 1
+        self._collection.records.clear()
+
+    def get_or_create_collection(self, name, embedding_function=None):
+        return self._collection
+
+
 class FakeEmbeddingBackend:
     def embed_documents(self, documents):
         return [[float(len(d) % 7), 1.0, 0.0] for d in documents]
@@ -161,9 +176,12 @@ def reindex_env(monkeypatch):
     # `sbpeye.database` at call time. Patching both is what a live process needs too.
     monkeypatch.setattr(database, "collection", fake, raising=False)
     monkeypatch.setattr(database, "embedding_backend", backend, raising=False)
+    monkeypatch.setattr(database, "chroma_client", FakeChromaClient(fake), raising=False)
     monkeypatch.setattr(circulars_mod, "collection", fake, raising=False)
     monkeypatch.setattr(circulars_mod, "embedding_backend", backend, raising=False)
     monkeypatch.setattr(commands, "SessionLocal", lambda: db)
+    # The real guard shells out to `fuser` against the live store.
+    monkeypatch.setattr(commands, "_require_exclusive_vector_store", lambda: None)
 
     return db, fake
 
@@ -220,8 +238,13 @@ def test_reindex_rebuilds_both_fts_indexes(reindex_env):
     ).scalar() == 1
 
 
-def test_reindex_clears_stale_chunks_without_dropping_the_handle(reindex_env):
-    """Clearing must empty the collection in place, keeping imported handles valid."""
+def test_reindex_drops_stale_chunks_and_rebinds_imported_handles(reindex_env):
+    """Resetting must clear the store *and* leave importers pointing at the new handle.
+
+    `scraper.circulars` binds `collection` at import, so a reset that does not rebind it
+    leaves law indexing writing into a dropped collection — silently, which is how the
+    law arm went missing before.
+    """
     db, fake = reindex_env
     fake.add(
         documents=["stale"],
@@ -230,12 +253,14 @@ def test_reindex_clears_stale_chunks_without_dropping_the_handle(reindex_env):
         metadatas=[{"circular_id": "circ-gone", "doc_type": "circular"}],
     )
 
+    import sbpeye.database as database
     import sbpeye.scraper.circulars as circulars_mod
 
     run_reindex()
 
     assert "circ-gone__chunk_0" not in fake.records
-    assert circulars_mod.collection is fake, "collection handle was replaced, not cleared"
+    assert database.chroma_client.resets == 1, "collection was not reset"
+    assert circulars_mod.collection is fake, "importer left holding a dropped handle"
 
 
 def test_dry_run_writes_nothing(reindex_env):

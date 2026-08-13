@@ -1087,3 +1087,109 @@ export async function downloadBatchZip(circularIds: string[]): Promise<void> {
   anchor.remove()
   URL.revokeObjectURL(downloadUrl)
 }
+
+// --- Laws & regulations ---
+
+export interface LawVersion {
+  id: string
+  content_hash?: string | null
+  file_url?: string | null
+  file_type?: string | null
+  version_label?: string | null
+  effective_from?: string | null
+  pending: boolean
+  is_current: boolean
+  extraction_status?: string | null
+  source?: string | null
+  first_seen_at?: string | null
+  last_seen_at?: string | null
+  has_file: boolean
+}
+
+export interface LawSummary {
+  result_kind: 'law'
+  id: string
+  title: string
+  doc_type?: string | null
+  part_label?: string | null
+  part_order?: number | null
+  parent_id?: string | null
+  source_url?: string | null
+  is_external: boolean
+  circular_id?: string | null
+  listed_date?: string | null
+  delisted_at?: string | null
+  version_count: number
+  current_version?: LawVersion | null
+  summary?: string | null
+  tags: string[]
+  snippet: string
+}
+
+export interface LawChild {
+  id: string
+  title: string
+  part_label?: string | null
+  part_order?: number | null
+  has_content: boolean
+  delisted_at?: string | null
+}
+
+export interface LawLinkedCircular {
+  circular: CircularSummary
+  link_type?: string | null
+  detected_via?: string | null
+  confidence?: number | null
+}
+
+export interface LawDetail extends LawSummary {
+  normalized_title?: string | null
+  page_slug?: string | null
+  first_seen_at?: string | null
+  last_seen_at?: string | null
+  versions: LawVersion[]
+  parent?: { id: string; title: string } | null
+  children: LawChild[]
+  circular?: CircularSummary | null
+  linked_circulars: LawLinkedCircular[]
+}
+
+export interface LawTypeCount {
+  doc_type: string
+  count: number
+}
+
+export interface LawListFilters {
+  q?: string
+  doc_type?: string
+  parent_id?: string
+  top_level?: boolean
+  include_delisted?: boolean
+  page?: number
+  per_page?: number
+}
+
+export async function getLaws(
+  filters: LawListFilters = {},
+  signal?: AbortSignal,
+): Promise<PaginatedResponse<LawSummary>> {
+  const { q = '', doc_type, parent_id, top_level, include_delisted, page = 1, per_page = 100 } = filters
+
+  return requestJson<PaginatedResponse<LawSummary>>(
+    `/laws${toQueryString({ q, doc_type, parent_id, top_level, include_delisted, page, per_page })}`,
+    { signal },
+  )
+}
+
+export async function getLawTypes(): Promise<LawTypeCount[]> {
+  return requestJson<LawTypeCount[]>('/laws/types')
+}
+
+export async function getLawDetail(id: string, signal?: AbortSignal): Promise<LawDetail> {
+  return requestJson<LawDetail>(`/laws/${encodeURIComponent(id)}`, { signal })
+}
+
+/** The archived file, served from our disk — never re-fetched from sbp.org.pk. */
+export function buildLawFileUrl(id: string, versionId?: string | null): string {
+  return `${API_BASE}/laws/${encodeURIComponent(id)}/file${toQueryString({ version_id: versionId })}`
+}

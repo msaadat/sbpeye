@@ -152,6 +152,7 @@ def _law_summary(document: RegDocument, snippet: str | None = None) -> dict:
         "title": document.title,
         "doc_type": document.doc_type,
         "part_label": document.part_label,
+        "part_order": document.part_order,
         "parent_id": document.parent_id,
         "source_url": document.source_url,
         "is_external": bool(document.is_external),

@@ -504,6 +504,16 @@ async def documents_spa_fallback(path: str):
     return spa_index_response()
 
 
+@app.get("/laws")
+async def laws_spa():
+    return spa_index_response()
+
+
+@app.get("/laws/{path:path}")
+async def laws_spa_fallback(path: str):
+    return spa_index_response()
+
+
 @app.get("/values")
 async def values_spa():
     return spa_index_response()

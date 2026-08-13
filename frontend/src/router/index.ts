@@ -23,6 +23,16 @@ const router = createRouter({
       component: () => import('@/views/CircularsView.vue'),
     },
     {
+      path: '/laws',
+      name: 'laws',
+      component: () => import('@/views/LawsView.vue'),
+    },
+    {
+      path: '/laws/:id',
+      name: 'law-detail',
+      component: () => import('@/views/LawsView.vue'),
+    },
+    {
       path: '/chat',
       name: 'chat',
       component: () => import('@/views/ChatView.vue'),

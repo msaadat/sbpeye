@@ -29,6 +29,12 @@ const navItems = computed(() => [
     active: route.path.startsWith('/circulars'),
   },
   {
+    label: 'Laws',
+    icon: 'pi pi-book',
+    route: '/laws',
+    active: route.path.startsWith('/laws'),
+  },
+  {
     label: 'Chat',
     icon: 'pi pi-comments',
     route: '/chat',

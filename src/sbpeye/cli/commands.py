@@ -873,27 +873,59 @@ def stats_cmd():
     _show_stats()
 
 
+def _clear_collection(col, batch_size: int = 5000) -> int:
+    """Empty the shared collection in place. Returns the number of chunks removed.
+
+    Deliberately not ``delete_collection`` + ``create_collection``: ``search``,
+    ``chat_retrieval``, and ``scraper.circulars`` bind ``collection`` at import, so
+    dropping it leaves those modules holding a dead handle. Paging ids and deleting
+    keeps every existing reference valid.
+    """
+    removed = 0
+    while True:
+        ids = col.get(limit=batch_size, include=[]).get("ids", [])
+        if not ids:
+            return removed
+        col.delete(ids=ids)
+        removed += len(ids)
+
+
 @cli.command("reindex")
 @click.option("--dry-run", is_flag=True, help="Show what would be indexed without writing")
 def reindex_cmd(dry_run):
-    """Re-index all circulars and extracted attachments into ChromaDB."""
-    from sbpeye.database import chroma_client, embedding_backend, embedding_config
+    """Re-index all circulars, attachments, and laws/regulations into ChromaDB."""
+    from sbpeye.database import collection, embedding_backend, embedding_config
     from sbpeye.checklist import prepare_reference_chunks
+    from sbpeye.models import RegDocument
     from sbpeye.scraper.circulars import (
         attachment_chunk_metadata,
         attachment_document,
         circular_chunk_metadata,
         circular_document,
     )
+    from sbpeye.scraper.laws import index_pending_laws
+    from sbpeye.search import NON_TEXT_LAW_FILE_TYPES, backfill_fts, backfill_laws_fts
 
-    COLLECTION_NAME = "circulars"
     BATCH_SIZE = 50
+
+    def _law_is_searchable(document) -> bool:
+        version = document.current_version
+        return (
+            version is not None
+            and version.file_type not in NON_TEXT_LAW_FILE_TYPES
+            and bool((version.content_text or "").strip())
+        )
 
     db = SessionLocal()
     try:
         circulars = db.query(Circular).all()
         total = len(circulars)
-        print(f"Found {total} circulars in database")
+        law_documents = db.query(RegDocument).all()
+        searchable_laws = sum(1 for d in law_documents if _law_is_searchable(d))
+        print(
+            f"Found {total} circulars and {len(law_documents)} law documents "
+            f"({searchable_laws} searchable) in database"
+        )
 
         if dry_run:
             total_chunks = 0
@@ -905,22 +937,19 @@ def reindex_cmd(dry_run):
                             prepare_reference_chunks(attachment_document(attachment))
                         )
             print(
-                f"Would create {total_chunks} chunks "
+                f"Would create {total_chunks} circular/attachment chunks "
                 f"(avg {total_chunks/max(total, 1):.1f} per circular)"
             )
+            print(f"Would re-index {searchable_laws} law/regulation documents")
             return
 
         print(f"Embedding backend: {embedding_config.provider} ({embedding_config.model})")
         probe = embedding_backend.embed_queries(["SBP circular search"])
         print(f"Embedding dimensions: {len(probe[0])}")
 
-        try:
-            chroma_client.delete_collection(COLLECTION_NAME)
-            print(f"Deleted old '{COLLECTION_NAME}' collection")
-        except Exception:
-            print(f"No existing '{COLLECTION_NAME}' collection to delete")
-
-        col = chroma_client.create_collection(name=COLLECTION_NAME, embedding_function=None)
+        col = collection
+        cleared = _clear_collection(col)
+        print(f"Cleared {cleared} existing chunk(s)")
 
         indexed = 0
         total_chunks = 0
@@ -982,15 +1011,24 @@ def reindex_cmd(dry_run):
         flush_batch()
         db.commit()
 
-        # Rebuild the persistent FTS5 lexical index alongside the vector store.
-        from sbpeye.search import backfill_fts
+        # Laws share this collection. Rebuilding circulars alone left the law arm empty
+        # while `is_vectorized` still read 1, so `index_pending_laws` skipped it on every
+        # later sync and laws stayed lexically findable but semantically invisible.
+        # `force=True` re-embeds regardless of that flag; the function applies the same
+        # currency and manifest rules as a normal sync.
+        indexed_laws = index_pending_laws(db, force=True)
+        print(f"Laws re-indexed: {indexed_laws}")
+
+        # Rebuild the persistent FTS5 lexical indexes alongside the vector store.
         backfill_fts(db, force=True)
-        print("Rebuilt FTS5 lexical index")
+        backfill_laws_fts(db, force=True)
+        print("Rebuilt FTS5 lexical indexes (circulars + laws)")
 
         print(f"\nRe-indexing complete:")
         print(f"  Circulars indexed: {indexed}")
         print(f"  Attachments indexed: {indexed_attachments}")
-        print(f"  Total chunks:      {total_chunks}")
+        print(f"  Laws indexed:      {indexed_laws} of {searchable_laws} searchable")
+        print(f"  Circular chunks:   {total_chunks}")
         print(f"  Avg chunks/doc:    {total_chunks/max(indexed,1):.1f}")
         print(f"  Errors:            {errors}")
         print(f"  Collection count:  {col.count()}")

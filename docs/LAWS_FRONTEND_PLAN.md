@@ -215,14 +215,18 @@ Each ends with something usable; F1–F3 are the spine.
 
 | Phase | Deliverable | Touches |
 |---|---|---|
-| **F0** | Close the three API gaps in §2.1 | `main.py`, `api/serializers.py` |
-| **F1** | Typed API client for laws, no UI | `lib/api.ts` |
-| **F2** | `/laws` list view + nav item + `LawResultContent` | `router`, `App.vue`, new `LawsView.vue`, new component |
-| **F3** | Document detail pane: in-force viewer, versions rail, cited-by | new `LawDetailPane.vue` |
-| **F4** | Container/parts presentation + breadcrumbs | `LawDetailPane.vue` |
+| ~~**F0**~~ ✅ | Close the API gaps in §2.1 | `main.py`, `api/serializers.py` |
+| ~~**F1**~~ ✅ | Typed API client for laws, no UI | `lib/api.ts` |
+| ~~**F2**~~ ✅ | `/laws` view + nav item | `router`, `App.vue`, `LawsView.vue` |
+| ~~**F3**~~ ✅ | In-force viewer, provenance, cited-by | `LawsView.vue` |
+| ~~**F4**~~ ✅ | Container/parts presentation + breadcrumbs | `LawsView.vue` |
 | **F5** | Source toggle + badged mixed results | `CircularsView.vue`, `lib/api.ts` |
 | ~~**F6**~~ ✅ | "Regulations cited" in circular detail | `CircularDetailPane.vue` |
-| **F7** | "Recently changed" view (needs F0 gap 2) | `LawsView.vue` |
+| **F7** | "Recently changed" view — *ordering ready, data is not* | `LawsView.vue` |
+
+The MVP collapsed F2–F4 into one library+reader view rather than the list + detail pane
+sketched in §4.1–§4.3; the deliverables landed, the shell did not. Search results also fold
+into the hierarchy now (`LAWS_FRONTEND_MVP.md` §6), which §4.1 did not anticipate.
 
 ---
 

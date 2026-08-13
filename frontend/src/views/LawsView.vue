@@ -33,6 +33,11 @@ const provenanceOpen = ref(false)
 const corpusTypes = ref<LawTypeCount[]>([])
 const typeFilter = ref('')
 
+const matchTotal = ref(0)
+const expandedMatches = ref<Set<string>>(new Set())
+/** Hits shown per container before the group folds; enough to judge, short enough to scan. */
+const MATCH_PREVIEW = 4
+
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 let searchController: AbortController | null = null
 
@@ -176,11 +181,91 @@ function isContainer(doc: LawSummary): boolean {
   return holdingsById.value.has(doc.id)
 }
 
-/** Some parts are titled with their own label ("NBFCs"); prefixing it reads as a stutter. */
-function partPrefix(doc: LawSummary): string {
+/** Some parts are titled with their own label ("NBFCs"); repeating it reads as a stutter. */
+function partLabelOf(doc: { part_label?: string | null; display_title: string }): string {
   const label = doc.part_label
-  if (!label || label === doc.display_title) return ''
-  return `${label} — `
+  return !label || label === doc.display_title ? '' : label
+}
+
+interface MatchGroup {
+  key: string
+  /** The container's own hit, when the container itself matched. */
+  self: LawSummary | null
+  containerId: string
+  containerTitle: string
+  /** Matching parts, in relevance order. */
+  hits: LawSummary[]
+}
+
+/**
+ * Search hits, folded back into the hierarchy (plan §1.2).
+ *
+ * Flat, a search for "export proceeds" is 49 rows of which 20-odd are Foreign Exchange
+ * Manual chapters sitting as siblings of unrelated documents — the container is the
+ * document, so its chapters belong under it. Groups keep the server's relevance order:
+ * a group takes the position of its best-ranked hit, so the most relevant thing is still
+ * at the top whether it is a whole document or one chapter of one.
+ */
+const matchGroups = computed<MatchGroup[]>(() => {
+  const list = matches.value
+  if (!list) return []
+  const groups = new Map<string, MatchGroup>()
+  const order: string[] = []
+
+  for (const item of list) {
+    const key = item.parent_id || item.id
+    let group = groups.get(key)
+    if (!group) {
+      group = {
+        key,
+        self: null,
+        containerId: item.parent_id || item.id,
+        containerTitle: item.parent_title || item.display_title,
+        hits: [],
+      }
+      groups.set(key, group)
+      order.push(key)
+    }
+    if (item.parent_id) {
+      group.hits.push(item)
+    } else {
+      group.self = item
+      // A container that matched on its own title knows its real name; a group built
+      // from a part only knows what `parent_title` told it.
+      group.containerTitle = item.display_title
+    }
+  }
+  return order.map((key) => groups.get(key) as MatchGroup)
+})
+
+const searchSummary = computed(() => {
+  if (searching.value) return 'Searching…'
+  const shown = matches.value?.length || 0
+  if (!shown) return 'No matches'
+  const documents = matchGroups.value.length
+  const summary =
+    `${matchTotal.value} match${matchTotal.value === 1 ? '' : 'es'}` +
+    ` in ${documents} document${documents === 1 ? '' : 's'}`
+  // Say so rather than quietly showing a slice of the answer.
+  return shown < matchTotal.value ? `${summary} · showing the top ${shown}` : summary
+})
+
+function visibleHits(group: MatchGroup): LawSummary[] {
+  if (expandedMatches.value.has(group.key) || group.hits.length <= MATCH_PREVIEW) return group.hits
+  return group.hits.slice(0, MATCH_PREVIEW)
+}
+
+function toggleMatchGroup(key: string) {
+  const next = new Set(expandedMatches.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  expandedMatches.value = next
+}
+
+/** Opening a group opens the container, whether or not the container itself matched. */
+function openGroup(group: MatchGroup) {
+  const doc = group.self || documents.value.find((item) => item.id === group.containerId)
+  if (doc) select(doc)
 }
 
 /** The one muted line under a row: what we hold, and which edition of it. */
@@ -266,18 +351,26 @@ function runSearch() {
 
   if (!value) {
     matches.value = null
+    matchTotal.value = 0
     searching.value = false
     return
   }
 
   searching.value = true
+  expandedMatches.value = new Set()
   searchController = new AbortController()
-  getLaws({ q: value, doc_type: typeFilter.value || undefined, per_page: 50 }, searchController.signal)
+  // 100 is the API's ceiling. Worth asking for now that hits fold into their container —
+  // "bank" matches all 133 documents, and 50 flat rows was a silent truncation.
+  getLaws({ q: value, doc_type: typeFilter.value || undefined, per_page: 100 }, searchController.signal)
     .then((response) => {
       matches.value = response.items
+      matchTotal.value = response.total
     })
     .catch((error) => {
-      if ((error as Error).name !== 'AbortError') matches.value = []
+      if ((error as Error).name !== 'AbortError') {
+        matches.value = []
+        matchTotal.value = 0
+      }
     })
     .finally(() => {
       searching.value = false
@@ -345,26 +438,69 @@ onMounted(() => {
       <p v-if="listLoading" class="library-note">Loading the corpus…</p>
       <p v-else-if="listError" class="library-note is-error">{{ listError }}</p>
 
-      <!-- Search results: flat, but a part still carries its container. -->
+      <!-- Search results, folded back into the hierarchy: chapters sit under their manual. -->
       <div v-else-if="matches" class="library-tree">
-        <p class="library-note">
-          {{ searching ? 'Searching…' : `${matches.length} match${matches.length === 1 ? '' : 'es'}` }}
-        </p>
-        <button
-          v-for="item in matches"
-          :key="item.id"
-          type="button"
-          class="node is-flat"
-          :class="{ 'is-selected': item.id === selectedId }"
-          @click="select(item)"
-        >
-          <span class="node-body">
-            <span v-if="item.parent_id" class="node-crumb">
-              {{ item.parent_title || 'Part of a collection' }}
+        <p class="library-note">{{ searchSummary }}</p>
+
+        <template v-for="group in matchGroups" :key="group.key">
+          <!-- A document whose parts did not match — nothing to nest. -->
+          <button
+            v-if="group.self && !group.hits.length"
+            type="button"
+            class="node is-flat"
+            :class="{ 'is-selected': group.self.id === selectedId }"
+            @click="select(group.self)"
+          >
+            <span class="node-body">
+              <span class="node-title">{{ group.self.display_title }}</span>
             </span>
-            <span class="node-title">{{ partPrefix(item) }}{{ item.display_title }}</span>
-          </span>
-        </button>
+          </button>
+
+          <template v-else>
+            <button
+              type="button"
+              class="node is-flat"
+              :class="{ 'is-selected': group.containerId === selectedId }"
+              @click="openGroup(group)"
+            >
+              <span class="node-body">
+                <span class="node-title">{{ group.containerTitle }}</span>
+                <span class="node-sub">
+                  {{ group.hits.length }} matching part{{ group.hits.length === 1 ? '' : 's' }}
+                  <template v-if="group.self"> · and the document itself</template>
+                </span>
+              </span>
+            </button>
+
+            <div class="node-children">
+              <button
+                v-for="hit in visibleHits(group)"
+                :key="hit.id"
+                type="button"
+                class="node is-child"
+                :class="{ 'is-selected': hit.id === selectedId }"
+                @click="select(hit)"
+              >
+                <span class="node-body">
+                  <span class="node-title">
+                    <span v-if="partLabelOf(hit)" class="node-part">{{ partLabelOf(hit) }}</span>
+                    {{ hit.display_title }}
+                  </span>
+                </span>
+              </button>
+              <button
+                v-if="group.hits.length > MATCH_PREVIEW"
+                type="button"
+                class="match-more"
+                @click="toggleMatchGroup(group.key)"
+              >
+                {{ expandedMatches.has(group.key)
+                  ? 'Show fewer'
+                  : `+${group.hits.length - MATCH_PREVIEW} more` }}
+              </button>
+            </div>
+          </template>
+        </template>
       </div>
 
       <div v-else class="library-tree">
@@ -408,7 +544,7 @@ onMounted(() => {
               >
                 <span class="node-body">
                   <span class="node-title">
-                    <span v-if="child.part_label !== child.display_title" class="node-part">{{ child.part_label }}</span>
+                    <span v-if="partLabelOf(child)" class="node-part">{{ partLabelOf(child) }}</span>
                     {{ child.display_title }}
                   </span>
                   <!-- The container's meter says how many are missing; this says which. -->
@@ -439,9 +575,7 @@ onMounted(() => {
           <div class="reader-identity">
             <p v-if="detail.parent" class="reader-crumb">{{ detail.parent.display_title }}</p>
             <h1 class="reader-title">
-              <span v-if="detail.part_label && detail.part_label !== detail.display_title" class="reader-part">
-                {{ detail.part_label }}
-              </span>
+              <span v-if="partLabelOf(detail)" class="reader-part">{{ partLabelOf(detail) }}</span>
               {{ detail.display_title }}
             </h1>
             <p class="reader-status">
@@ -762,6 +896,24 @@ onMounted(() => {
   margin: 0.15rem 0 0.35rem 0.75rem;
   padding-left: 0.55rem;
   border-left: 1px solid var(--sbp-border);
+}
+
+.match-more {
+  align-self: flex-start;
+  margin-top: 0.1rem;
+  padding: 0.2rem 0.4rem;
+  border: 0;
+  border-radius: var(--sbp-radius);
+  background: transparent;
+  color: var(--sbp-muted);
+  font: inherit;
+  font-size: 0.68rem;
+  cursor: pointer;
+}
+
+.match-more:hover {
+  background: var(--sbp-subtle);
+  color: var(--sbp-green-text);
 }
 
 /* ---- Reader ---- */

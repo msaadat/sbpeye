@@ -3,9 +3,9 @@
 Companion to `docs/LAWS_FRONTEND_PLAN.md`. Records what the MVP actually does, what it
 deliberately leaves out, and the order to build the rest in.
 
-**Status:** MVP (§1) shipped, plus Step 0 (archive), Step 1 (row legibility), Step 2 (the
-two API gaps) and Step 5 (the reverse link) — §2–§5. Next up is Step 4, hierarchical
-search, in §7; Step 3 is split, and half of it is on hold for data rather than code.
+**Status:** MVP (§1) shipped, plus Steps 0, 1, 2, 5 and 4 — §2–§6. Everything in the
+build order is done except Step 3 (split: the arrival panel is worth taking, "recently
+changed" waits on data), Step 6 and Step 7. See §8.
 
 ---
 
@@ -51,7 +51,7 @@ line and 4 citing circulars. `npm run typecheck` passes.
 The Python test suite was originally recorded here as unrunnable — a chromadb
 `PanicException` during collection. That was overstated: the panic is confined to the
 modules that import chromadb, and the laws suites run clean when named directly, so
-`part_order` *is* test-covered. See §7.
+`part_order` *is* test-covered. See §9.
 
 ---
 
@@ -122,7 +122,7 @@ rows, a search for "export proceeds" returns 49 matches with parts carrying thei
 container and narrows to 27 under the Regulation facet, the Foreign Exchange Manual's
 Chapter 12 loads Chrome's PDF embedder against the archived 791 KB file, and the
 Reporting Guidelines container explains that SBP's link is broken for all 9 of its parts.
-`npm run typecheck` clean; **168 backend tests pass** (see §7).
+`npm run typecheck` clean; **168 backend tests pass** (see §9).
 
 ---
 
@@ -213,16 +213,78 @@ payload if a better use appears.
 
 ---
 
-## 6. Deliberately left out
+## 6. Step 4 — search that respects the hierarchy ✅
+
+`frontend/src/views/LawsView.vue` only; no API work was needed, because `parent_id` and
+`parent_title` are already on every hit.
+
+Hits fold back into the hierarchy: a container heads its matching parts, with a count and
+a `+N more` fold after 4. Groups keep the server's relevance order — **a group takes the
+position of its best-ranked hit**, so the top of the list is still the most relevant
+thing, whether that is a whole document or one chapter of one.
+
+Measured on "export proceeds": **49 flat rows → 24 documents**, with 19 Foreign Exchange
+Manual chapters under one header instead of scattered among unrelated documents.
+
+Two smaller things came with it:
+
+- **The result count now names documents:** `49 matches in 24 documents`. That is plan
+  principle 2 stated in the UI — the container is the document.
+- **Page size 50 → 100** (the API ceiling), and truncation is now admitted rather than
+  silent: `133 matches in 48 documents · showing the top 100`. Grouping is what makes 100
+  rows navigable; at 50 flat rows the view was quietly dropping most of a broad result.
+
+Also folded the three copies of the part-label stutter guard into one `partLabelOf`.
+
+### Two search bugs this exposed — both pre-existing, neither fixed here
+
+**1. 33 of 133 documents are missing from the FTS index — including all 7 containers.**
+You cannot find the Foreign Exchange Manual by searching for its name. Every container has
+real text (the Manual has 7,130 characters) and none is indexed.
+
+The cause is in `index_pending_laws` (`scraper/laws.py:1132`):
+
+```python
+if version is None or version.file_type in NON_TEXT_LAW_FILE_TYPES:
+    continue          # NON_TEXT_LAW_FILE_TYPES == {"manifest"}
+```
+
+Skipping a manifest is right for Chroma — embedding a table of contents is waste — but it
+skips `index_law_fts` too, and a container's *title* is real text people search for.
+
+**Repair vs recurrence — two different fixes.** The `sbpeye reindex` work in flight ends
+with `backfill_laws_fts(db, force=True)`, which rebuilds from every `RegDocument` with no
+manifest filter; `_law_fts_row` gives a manifest a title with an empty body, which is
+exactly right. So running it **repairs the current index**, containers included.
+
+It does not stop the recurrence: a container added by a later sync goes through
+`index_pending_laws`, which still skips it, so it stays unfindable until the next full
+reindex. The durable fix is to call `index_law_fts` for skipped documents rather than
+`continue` past both indexes.
+
+This is why the group header's `· and the document itself` branch is currently almost
+unreachable: containers cannot be hits.
+
+**2. A query made only of stopwords returns the whole corpus.** `bank`, `state bank of
+pakistan` and `the of and` all return **133 of 133** documents; `collateral` returns 29
+and nonsense returns 0. `"state"`, `"bank"` and `"pakistan"` are deliberate SBP-boilerplate
+stopwords (`search.py:31`) — defensible for circulars, where every document says it — but
+it means the most natural one-word query in a central-bank app degenerates into "match
+everything" instead of returning nothing or asking for a better term.
+
+---
+
+## 7. Deliberately left out
 
 Not bugs — scope. Roughly in the order they hurt:
 
-1. **Search results are flat**, not nested under their container, and the reader does not
-   highlight matches.
+1. **The reader does not highlight search matches.** Hits nest under their container now
+   (§6), but opening one drops you into a PDF with no indication of where the match is.
+   Needs the Text view — see Step 6.
 2. **No Text view.** PDF only, so no in-document search, no copying from scans.
 3. **No section navigation inside a single long PDF** — needs a label→page map.
-4. **No delisted filter, no "recently changed" view, no mixed search, no "regulations
-   cited" on circulars.** These are plan phases F5–F7.
+4. **No delisted filter, no "recently changed" view, no mixed search.** Plan phases
+   F5 and F7; F6 shipped in §5.
 5. **Cited-by is capped at 8 with no "show all"** — fine for most, wrong for the Banking
    Companies Ordinance's 314.
 6. **No empty-corpus state**, no retry affordance on a failed load.
@@ -230,12 +292,19 @@ Not bugs — scope. Roughly in the order they hurt:
 
 ---
 
-## 7. Order to build the rest
+## 8. Order to build the rest
 
 ### ~~Step 0 — populate the archive~~ ✅ §2
 ### ~~Step 1 — make the rows read correctly~~ ✅ §3
 ### ~~Step 2 — close the two API gaps~~ ✅ §4
 ### ~~Step 5 — the reverse link on circulars~~ ✅ §5 *(taken out of order)*
+### ~~Step 4 — search that respects the hierarchy~~ ✅ §6
+
+### Step 2.5 — index the containers *(new, and ahead of everything below)*
+Step 4 surfaced it: 7 containers and 26 other documents are absent from the FTS index, so
+the Foreign Exchange Manual cannot be found by name. Small fix, large effect, and it is
+the thing standing between hierarchical search and being properly useful. Details and the
+exact change in §6.
 
 ### Step 3 — split it: take the arrival panel, defer "recently changed"
 The reader's empty state should carry the **most-cited documents**, which is meaningful
@@ -246,11 +315,6 @@ product's argument for itself.
 current version was captured in the same sync, so the view would render as an
 alphabetical list under a heading promising the opposite. It needs SBP to swap a PDF
 while we are watching. Revisit once §1's "documents with >1 version" is more than 2.
-
-### Step 4 — search that respects the hierarchy
-Nest hits under their container in the tree; show a per-document hit count. Needs
-`parent_id` on every search hit — check whether the search path already returns it, since
-`_law_summary` includes it and the search results reuse that serializer.
 
 ### Step 6 — decide on Text view
 Only worth it once someone has used the PDF viewer in anger. The native iframe cannot
@@ -265,7 +329,7 @@ don't — sample a handful with `pypdf` before committing.
 
 ---
 
-## 7. Open items
+## 9. Open items
 
 - ~~**Two figures in the plan disagree.**~~ **Reconciled — both were wrong.** The 21
   no-content documents actually break down as **11 parts · 5 circular stubs · 3 dead
@@ -281,6 +345,9 @@ don't — sample a handful with `pypdf` before committing.
   group by 1, 2, 3;
   ```
 
+- **Containers are not in the FTS index** (§6, bug 1) — 33 of 133 documents missing, all 7
+  containers among them. The single highest-value search fix available.
+- **All-stopword queries return the whole corpus** (§6, bug 2) — `bank` returns all 133.
 - **Law search is running lexical-only right now.** The server logs
   `ChromaDB law vector search failed — lexical arm only` on every law query
   (`chromadb.errors.InternalError: Error executing plan: Internal error: Error finding

@@ -358,6 +358,8 @@ export interface CircularDetail extends CircularSummary {
   compliance_checklist: ComplianceChecklist | null
   entities: CircularEntity[]
   relationships: CircularRelationshipsResponse
+  /** The laws & regulations this circular cites — see `CircularRegulationLink`. */
+  regulations: CircularRegulationLink[]
   generation: CircularGenerationState
 }
 
@@ -1119,6 +1121,8 @@ export interface LawSummary {
   part_label?: string | null
   part_order?: number | null
   parent_id?: string | null
+  /** The container's name, when this document is a part. Never orphan a part. */
+  parent_title?: string | null
   source_url?: string | null
   is_external: boolean
   circular_id?: string | null
@@ -1148,6 +1152,14 @@ export interface LawLinkedCircular {
   confidence?: number | null
 }
 
+/** The mirror of `LawLinkedCircular`: the same edge, read circular-first. */
+export interface CircularRegulationLink {
+  document: LawSummary
+  link_type?: string | null
+  detected_via?: string | null
+  confidence?: number | null
+}
+
 export interface LawDetail extends LawSummary {
   normalized_title?: string | null
   page_slug?: string | null
@@ -1171,6 +1183,8 @@ export interface LawListFilters {
   parent_id?: string
   top_level?: boolean
   include_delisted?: boolean
+  /** `captured` orders by when the edition now in force was first seen, newest first. */
+  sort_by?: 'title' | 'captured'
   page?: number
   per_page?: number
 }
@@ -1179,10 +1193,19 @@ export async function getLaws(
   filters: LawListFilters = {},
   signal?: AbortSignal,
 ): Promise<PaginatedResponse<LawSummary>> {
-  const { q = '', doc_type, parent_id, top_level, include_delisted, page = 1, per_page = 100 } = filters
+  const {
+    q = '',
+    doc_type,
+    parent_id,
+    top_level,
+    include_delisted,
+    sort_by,
+    page = 1,
+    per_page = 100,
+  } = filters
 
   return requestJson<PaginatedResponse<LawSummary>>(
-    `/laws${toQueryString({ q, doc_type, parent_id, top_level, include_delisted, page, per_page })}`,
+    `/laws${toQueryString({ q, doc_type, parent_id, top_level, include_delisted, sort_by, page, per_page })}`,
     { signal },
   )
 }

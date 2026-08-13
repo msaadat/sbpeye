@@ -20,6 +20,7 @@ from ..models import (
     ChatSession,
     Circular,
     RegDocument,
+    RegDocumentLink,
     RegDocumentVersion,
     ResearchWorkspace,
     WorkspaceCircular,
@@ -161,6 +162,12 @@ def _law_summary(document: RegDocument, snippet: str | None = None) -> dict:
         "part_label": document.part_label,
         "part_order": document.part_order,
         "parent_id": document.parent_id,
+        # A part is meaningless without its container — "EXPORTS" is Chapter 12 of the
+        # Foreign Exchange Manual or it is nothing. Callers that hold the whole corpus can
+        # resolve `parent_id` themselves; the ones that show a law among circulars cannot.
+        "parent_title": (
+            split_law_title(document.parent.title)[0] if document.parent else None
+        ),
         "source_url": document.source_url,
         "is_external": bool(document.is_external),
         "circular_id": document.circular_id,
@@ -172,6 +179,68 @@ def _law_summary(document: RegDocument, snippet: str | None = None) -> dict:
         "tags": _safe_json_list(document.tags),
         "snippet": snippet or "",
     }
+
+
+# How much an edge is worth believing when two describe the same pair. A hyperlink to the
+# document beats SBP's own grouping, which beats a model's judgement, which beats the
+# document's name turning up in the text — the last of which can be an incidental mention.
+_DETECTION_PRECEDENCE = ("url_scan", "listing", "ai", "name_match")
+
+
+def _link_strength(link: RegDocumentLink) -> tuple[float, int]:
+    precedence = _DETECTION_PRECEDENCE.index(link.detected_via) if (
+        link.detected_via in _DETECTION_PRECEDENCE
+    ) else len(_DETECTION_PRECEDENCE)
+    return (link.confidence or 0.0, -precedence)
+
+
+def _circular_regulations(circular: Circular) -> list[dict]:
+    """The regulations a circular cites — the mirror of a law's `linked_circulars`.
+
+    The graph was one-way in the UI: 688 circulars carry links, but a circular's payload
+    never mentioned them, so the 809 edges were only navigable regulation-first. People
+    read circular-first.
+
+    Deduped by document: a few pairs are detected twice and the payload should name a
+    document once. Confidence decides, and where it is absent — which is every duplicate
+    in the corpus today — detection method breaks the tie, so the winner does not depend
+    on the order rows happen to come back in.
+    """
+    best: dict[str, RegDocumentLink] = {}
+    for link in circular.reg_links:
+        if link.document is None:
+            continue
+        seen = best.get(link.document_id)
+        if seen is None or _link_strength(link) > _link_strength(seen):
+            best[link.document_id] = link
+
+    return [
+        {
+            "document": _law_summary(link.document),
+            "link_type": link.link_type,
+            "detected_via": link.detected_via,
+            "confidence": link.confidence,
+        }
+        for link in sorted(best.values(), key=_regulation_sort_key)
+    ]
+
+
+def _regulation_sort_key(link: RegDocumentLink) -> tuple:
+    """Group parts under their container, container first, then chapter order.
+
+    Sorting these by title alone strands the container among its own chapters — an FE
+    circular revising four chapters lists them as BLOCKED ACCOUNTS, DEALINGS…, Foreign
+    Exchange Manual, INTRODUCTORY. Grouping reads as the manual and the chapters of it.
+    """
+    document = link.document
+    container = document.parent or document
+    return (
+        document.doc_type or "",
+        split_law_title(container.title)[0],
+        document.parent_id is not None,
+        document.part_order if document.part_order is not None else 0,
+        split_law_title(document.title)[0],
+    )
 
 
 def _law_detail(document: RegDocument) -> dict:

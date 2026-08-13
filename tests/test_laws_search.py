@@ -524,3 +524,116 @@ def test_circular_search_endpoint_stays_circular_by_default(client):
         "/api/circulars/search", params={"q": "x", "source": "bogus"}
     )
     assert rejected.status_code == 400
+
+
+# ------------------------------------------------- the two gaps closed in step 2
+
+
+def test_api_can_order_laws_by_when_we_captured_them(client):
+    """`sort_by=captured` — newest capture first, and what we hold nothing for last.
+
+    This is the ordering behind "what moved recently", the one question SBP's own site
+    cannot answer: it replaces files in place and keeps no history.
+    """
+    test_client, db = client
+    add_law(db, "old", title="Credit Bureau Act 2015", doc_type="law")
+    add_law(db, "new", title="Guidelines for Clearing Operations", doc_type="guideline")
+    for document_id, captured in (("old", datetime(2026, 7, 1)), ("new", datetime(2026, 8, 10))):
+        db.query(RegDocumentVersion).filter(
+            RegDocumentVersion.document_id == document_id
+        ).update({"first_seen_at": captured})
+    # An externally-hosted stub with no version at all: still listed, but never first.
+    db.add(RegDocument(id="stub", title="Banking Companies Ordinance 1962",
+                       doc_type="law", is_external=1, first_seen_at=datetime(2026, 8, 1)))
+    db.commit()
+
+    payload = test_client.get("/api/laws", params={"sort_by": "captured"}).json()
+
+    assert payload["total"] == 3
+    assert [item["id"] for item in payload["items"]] == ["new", "old", "stub"]
+
+    # An unknown or absent sort_by leaves the existing ordering untouched.
+    for params in ({}, {"sort_by": "title"}, {"sort_by": "nonsense"}):
+        default = test_client.get("/api/laws", params=params).json()
+        assert [item["id"] for item in default["items"]] == ["new", "stub", "old"]
+
+
+def test_api_circular_detail_lists_the_regulations_it_cites(client):
+    """The reverse of a law's `linked_circulars`: 809 edges, read circular-first."""
+    test_client, db = client
+    add_law(db, "fe-manual", title="Foreign Exchange Manual", file_type="manifest")
+    add_law(db, "chapter-12", title="EXPORTS", text_body=FE_TEXT,
+            parent_id="fe-manual", part_label="Chapter 12", part_order=12)
+    circular = add_circular(db)
+    db.add(RegDocumentLink(circular_id=circular.id, document_id="chapter-12",
+                           link_type="references", detected_via="url_scan", confidence=0.9))
+    # The same pair found twice; the payload must name the document once, via the
+    # more confident edge.
+    db.add(RegDocumentLink(circular_id=circular.id, document_id="chapter-12",
+                           link_type="listing", detected_via="listing", confidence=0.5))
+    db.commit()
+
+    payload = test_client.get(f"/api/circulars/{circular.id}").json()
+
+    assert len(payload["regulations"]) == 1
+    cited = payload["regulations"][0]
+    assert cited["link_type"] == "references"
+    assert cited["detected_via"] == "url_scan"
+    assert cited["document"]["id"] == "chapter-12"
+    assert cited["document"]["display_title"] == "EXPORTS"
+    # A part is never shown without its container.
+    assert cited["document"]["parent_title"] == "Foreign Exchange Manual"
+
+
+def test_api_circular_detail_regulations_is_empty_not_absent(client):
+    """A circular citing nothing still carries the key, so the UI need not guard for it."""
+    test_client, db = client
+    circular = add_circular(db)
+
+    payload = test_client.get(f"/api/circulars/{circular.id}").json()
+
+    assert payload["regulations"] == []
+
+
+def test_api_circular_regulations_dedupe_does_not_depend_on_row_order(client):
+    """Every duplicate pair in the corpus has null confidence on both edges, so the
+    tiebreak has to come from somewhere other than which row was inserted first."""
+    test_client, db = client
+    add_law(db, "fe-manual", title="Foreign Exchange Manual", file_type="manifest")
+    circular = add_circular(db)
+    # Inserted weakest-first, so row order would pick the wrong one.
+    db.add(RegDocumentLink(circular_id=circular.id, document_id="fe-manual",
+                           link_type="references", detected_via="name_match"))
+    db.add(RegDocumentLink(circular_id=circular.id, document_id="fe-manual",
+                           link_type="references", detected_via="url_scan"))
+    db.commit()
+
+    payload = test_client.get(f"/api/circulars/{circular.id}").json()
+
+    assert len(payload["regulations"]) == 1
+    assert payload["regulations"][0]["detected_via"] == "url_scan"
+
+
+def test_api_circular_regulations_group_parts_under_their_container(client):
+    """A circular revising four chapters should read as the manual, then its chapters in
+    chapter order — not as an alphabetical list with the manual stranded in the middle."""
+    test_client, db = client
+    add_law(db, "fe-manual", title="Foreign Exchange Manual", file_type="manifest")
+    for document_id, label, order, title in (
+        ("ch-9", "Chapter 9", 9, "BLOCKED ACCOUNTS"),
+        ("ch-1", "Chapter 1", 1, "INTRODUCTORY"),
+        ("ch-11", "Chapter 11", 11, "DEALINGS IN FOREIGN CURRENCY NOTES"),
+    ):
+        add_law(db, document_id, title=title, text_body=FE_TEXT,
+                parent_id="fe-manual", part_label=label, part_order=order)
+    circular = add_circular(db)
+    for document_id in ("ch-9", "ch-1", "fe-manual", "ch-11"):
+        db.add(RegDocumentLink(circular_id=circular.id, document_id=document_id,
+                               link_type="references", detected_via="name_match"))
+    db.commit()
+
+    payload = test_client.get(f"/api/circulars/{circular.id}").json()
+
+    assert [r["document"]["id"] for r in payload["regulations"]] == [
+        "fe-manual", "ch-1", "ch-9", "ch-11",
+    ]

@@ -3,8 +3,9 @@
 Companion to `docs/LAWS_FRONTEND_PLAN.md`. Records what the MVP actually does, what it
 deliberately leaves out, and the order to build the rest in.
 
-**Status:** MVP (§1) shipped; Step 0 (archive) and Step 1 (row legibility) done — §2, §3.
-Next up is Step 2, the two API gaps in §5.
+**Status:** MVP (§1) shipped, plus Step 0 (archive), Step 1 (row legibility) and Step 2
+(the two API gaps) — §2–§4. Next up is Step 3, "Recently changed", in §6 — though see the
+caveat in §4 about how flat that view reads today.
 
 ---
 
@@ -50,7 +51,7 @@ line and 4 citing circulars. `npm run typecheck` passes.
 The Python test suite was originally recorded here as unrunnable — a chromadb
 `PanicException` during collection. That was overstated: the panic is confined to the
 modules that import chromadb, and the laws suites run clean when named directly, so
-`part_order` *is* test-covered. See §6.
+`part_order` *is* test-covered. See §7.
 
 ---
 
@@ -121,11 +122,56 @@ rows, a search for "export proceeds" returns 49 matches with parts carrying thei
 container and narrows to 27 under the Regulation facet, the Foreign Exchange Manual's
 Chapter 12 loads Chrome's PDF embedder against the archived 791 KB file, and the
 Reporting Guidelines container explains that SBP's link is broken for all 9 of its parts.
-`npm run typecheck` clean; **168 backend tests pass** (see §6).
+`npm run typecheck` clean; **168 backend tests pass** (see §7).
 
 ---
 
-## 4. Deliberately left out
+## 4. Step 2 — the two API gaps, closed ✅
+
+| File | Change |
+|---|---|
+| `src/sbpeye/main.py` | `sort_by` on `/api/laws`; `regulations` on `/api/circulars/{id}` |
+| `src/sbpeye/api/serializers.py` | `_circular_regulations`, `_link_strength`, `_regulation_sort_key`; `parent_title` on `_law_summary` |
+| `frontend/src/lib/api.ts` | `sort_by` in `LawListFilters`, `CircularRegulationLink`, `parent_title` |
+| `tests/test_laws_search.py` | 5 tests: ordering, the null tail, the reverse link, dedupe, part grouping |
+
+**Gap 1 — `sort_by=captured`.** Orders by the `first_seen_at` of the version now in
+force, newest first. An **outer** join, so the 21 documents we hold nothing for still
+appear rather than vanishing, sorted to the end; `is_current` is unique per document, so
+it cannot multiply rows. Nulls are sorted explicitly rather than with `NULLS LAST`, so
+the result does not depend on the SQLite version underneath. Default ordering is
+untouched, and an unrecognised `sort_by` falls back to it rather than erroring.
+
+The docstring on `list_laws` already claimed this behaviour — *"a plain listing ordered by
+capture time"* — while the code ordered by type+title. Now it is true.
+
+**A caveat worth stating plainly:** all 112 current versions were captured in the same
+sync run, so *today* `sort_by=captured` is one big tie broken by title. It becomes the
+changelog the plan describes only as the watch period lengthens. The ordering is correct;
+the data has not arrived yet. Building the Step 3 view on it now would show a flat list.
+
+**Gap 2 — `regulations` on the circular payload.** The mirror of a law's
+`linked_circulars`: same edge, read circular-first. Always present, `[]` when empty, so
+the UI needs no guard. Two judgement calls:
+
+- **Deduped by document.** 4 pairs in the corpus carry two rows each, and *every one of
+  them has null confidence on both edges* — so "keep the most confident" silently
+  degenerates into "keep whichever row came back first". `_link_strength` breaks the tie
+  on detection method instead (`url_scan` > `listing` > `ai` > `name_match`), which is
+  deterministic and defensible.
+- **Parts grouped under their container**, container first, then chapter order. Sorting
+  by title alone strands the container among its own chapters: FE Circular 03 of 2019
+  listed as *BLOCKED ACCOUNTS, DEALINGS…, Foreign Exchange Manual, INTRODUCTORY*. It now
+  reads as the Manual, then Chapters 1, 8, 9, 11 — which is what the circular is about.
+
+`parent_title` was added to `_law_summary` for the same reason (plan §1.2: never orphan a
+part). 115 of the 809 links point at parts. `LawsView` holds the whole corpus so it could
+resolve `parent_id` itself; a circular's rail cannot. It costs one lazy load per part —
+`/api/laws?per_page=100` measured 23–124 ms, so the N+1 is not worth optimising.
+
+---
+
+## 5. Deliberately left out
 
 Not bugs — scope. Roughly in the order they hurt:
 
@@ -142,17 +188,11 @@ Not bugs — scope. Roughly in the order they hurt:
 
 ---
 
-## 5. Order to build the rest
+## 6. Order to build the rest
 
 ### ~~Step 0 — populate the archive~~ ✅ §2
 ### ~~Step 1 — make the rows read correctly~~ ✅ §3
-
-### Step 2 — close the two API gaps that block real features
-- `sort_by=captured` on `/api/laws` → unlocks "Recently changed", which is the single most
-  valuable view this corpus can offer, because it is the thing SBP itself cannot tell you.
-- `regulations` array on `/api/circulars/{id}` → unlocks the reverse link.
-
-Both are small and both are already named in the plan (§2.1).
+### ~~Step 2 — close the two API gaps~~ ✅ §4
 
 ### Step 3 — "Recently changed" and the arrival panel
 A tab above the library plus an overview in the reader when nothing is selected: what
@@ -181,7 +221,7 @@ don't — sample a handful with `pypdf` before committing.
 
 ---
 
-## 6. Open items
+## 7. Open items
 
 - ~~**Two figures in the plan disagree.**~~ **Reconciled — both were wrong.** The 21
   no-content documents actually break down as **11 parts · 5 circular stubs · 3 dead
@@ -197,6 +237,16 @@ don't — sample a handful with `pypdf` before committing.
   group by 1, 2, 3;
   ```
 
+- **Law search is running lexical-only right now.** The server logs
+  `ChromaDB law vector search failed — lexical arm only` on every law query
+  (`chromadb.errors.InternalError: Error executing plan: Internal error: Error finding
+  id`, from `search.py:753`). The hybrid ranker degrades gracefully, so results are still
+  good — but the vector arm is dead, and this is almost certainly the same corrupt
+  chromadb index that kills `pytest` collection. Rebuilding it likely fixes both.
+- **Search results can shift right after a restart.** `_warm_up_search_index` backfills
+  FTS in a background thread, so a query issued in the first second or two can rank
+  against a partially-built index. Harmless, but it makes "the results changed" a
+  misleading signal when verifying.
 - **The two pakistancode.gov.pk statutes** — including the Banking Companies Ordinance,
   the most-cited document in the corpus at 314 links — still cannot be opened. Now that
   the archive is populated and everything else renders, this is the largest remaining

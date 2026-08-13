@@ -62,16 +62,19 @@ Built in phases 5–6a, all live:
 
 ### 2.1 Gaps to close before UI work (small, backend)
 
-1. **The link graph is one-way in the UI.** `/api/circulars/{id}` returns no regulations,
-   so a circular cannot show what it cites even though 688 circulars have links. Add a
-   `regulations` array to the circular detail payload. *Blocks F6.*
-2. **No "recently changed" ordering.** `/api/laws` orders by type+title. A changelog view
-   ("what moved this month") needs ordering by the current version's `first_seen_at`. Add
-   `sort_by=captured`. *Blocks F7.*
-3. **Archived files cannot be previewed.** `PdfPreviewDialog.vue` goes through
-   `/api/pdf_preview?url=`, which re-fetches from sbp.org.pk — the one thing the archive
-   exists to avoid, and it fails outright for the documents SBP has since broken. Needs a
-   preview path that reads `local_path`. *Blocks F3.*
+1. ~~**The link graph is one-way in the UI.**~~ **Closed.** `/api/circulars/{id}` now
+   carries a `regulations` array — the mirror of a law's `linked_circulars`, deduped by
+   document and with parts grouped under their container. See `LAWS_FRONTEND_MVP.md` §4.
+2. ~~**No "recently changed" ordering.**~~ **Closed.** `/api/laws?sort_by=captured` orders
+   by the in-force version's `first_seen_at`, newest first, with the documents we hold
+   nothing for sorted last. Note it reads as one flat tie until the watch period
+   lengthens — every current version was captured in the same sync.
+3. **Archived files cannot be previewed** — *half closed.* Laws no longer need this: the
+   reader iframes `/api/laws/{id}/file`, which serves `local_path` from our disk (and
+   since the MVP, with an `inline` disposition, so browsers render it instead of
+   downloading it). But `PdfPreviewDialog.vue` still goes through `/api/pdf_preview?url=`
+   and re-fetches from sbp.org.pk for **circulars** — the one thing the archive exists to
+   avoid, and it fails outright for documents SBP has since broken. No longer blocks F3.
 
 ---
 

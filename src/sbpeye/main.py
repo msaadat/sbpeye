@@ -1,8 +1,8 @@
 from fastapi import FastAPI, Depends, Request, BackgroundTasks, Form, Body
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy.orm import Session
-from sqlalchemy import func, extract
+from sqlalchemy.orm import Session, aliased
+from sqlalchemy import func, extract, and_
 from urllib.parse import urljoin, urlparse, urlencode
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -55,6 +55,7 @@ from .api.serializers import (
     DEFAULT_WORKSPACE_NAME,
     WORKSPACE_CHAT_SESSION_PREFIX,
     _chat_session_payload,
+    _circular_regulations,
     _circular_summary,
     _document_payload,
     _ensure_default_workspace,
@@ -1075,6 +1076,9 @@ async def get_circular_detail(circular_id: str, db: Session = Depends(get_db)):
             "outgoing": [rel_dict(r) for r in outgoing],
             "incoming": [rel_dict(r) for r in incoming],
         },
+        # The laws & regulations this circular cites. `relationships` above is
+        # circular↔circular; this is the other half of the graph.
+        "regulations": _circular_regulations(c),
         "generation": {
             "summary": _isoformat(c.summary_generated_at),
             "tags": _isoformat(c.tags_generated_at),
@@ -1438,16 +1442,21 @@ def list_laws(
     parent_id: str | None = None,
     top_level: bool = False,
     include_delisted: bool = False,
+    sort_by: str = "title",
     page: int = 1,
     per_page: int = 20,
     db: Session = Depends(get_db),
 ):
     """List laws & regulations, or search them.
 
-    With `q` this runs the hybrid engine against the law corpus; without it, a plain
-    listing ordered by capture time. `top_level` hides the parts of container documents
-    (FE Manual chapters and the like), which are documents in their own right but noise
-    in a flat list.
+    With `q` this runs the hybrid engine against the law corpus, ordered by relevance;
+    `sort_by` applies to the plain listing only. `top_level` hides the parts of container
+    documents (FE Manual chapters and the like), which are documents in their own right
+    but noise in a flat list.
+
+    `sort_by=captured` orders by when we first saw the edition now in force, newest first
+    — the "what moved recently" view, and the one thing SBP's own site cannot answer,
+    since it replaces files in place and keeps no history.
     """
     page = max(page, 1)
     per_page = min(max(per_page, 1), 100)
@@ -1471,12 +1480,29 @@ def list_laws(
         query = query.filter(RegDocument.delisted_at.is_(None))
 
     total = query.count()
-    documents = (
-        query.order_by(RegDocument.doc_type, RegDocument.title)
-        .offset(offset)
-        .limit(per_page)
-        .all()
-    )
+
+    if sort_by == "captured":
+        # Outer join, not inner: the 21 documents with no version at all (stubs, external
+        # laws, dead links) must still appear, and they sort to the end. `is_current` is
+        # unique per document, so this cannot multiply rows.
+        current = aliased(RegDocumentVersion)
+        query = query.outerjoin(
+            current,
+            and_(
+                current.document_id == RegDocument.id,
+                current.is_current == 1,
+            ),
+        ).order_by(
+            # Explicit nulls-last, rather than NULLS LAST, so the ordering does not
+            # depend on the SQLite version underneath.
+            current.first_seen_at.is_(None),
+            current.first_seen_at.desc(),
+            RegDocument.title,
+        )
+    else:
+        query = query.order_by(RegDocument.doc_type, RegDocument.title)
+
+    documents = query.offset(offset).limit(per_page).all()
     return {
         "items": [_law_summary(document) for document in documents],
         "total": total,

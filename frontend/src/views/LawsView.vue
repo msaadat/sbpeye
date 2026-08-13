@@ -360,7 +360,7 @@ onMounted(() => {
         >
           <span class="node-body">
             <span v-if="item.parent_id" class="node-crumb">
-              {{ documents.find((d) => d.id === item.parent_id)?.display_title || 'Part of a collection' }}
+              {{ item.parent_title || 'Part of a collection' }}
             </span>
             <span class="node-title">{{ partPrefix(item) }}{{ item.display_title }}</span>
           </span>

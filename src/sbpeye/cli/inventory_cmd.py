@@ -209,7 +209,12 @@ def _render(response) -> None:
         f"Coverage:   {coverage.candidates_lexical} lexical + "
         f"{coverage.candidates_semantic} semantic -> "
         f"{coverage.candidates_union} candidates -> "
-        f"{coverage.adjudicated_included} included"
+        f"{coverage.adjudicated_included} included, "
+        f"{coverage.adjudicated_excluded} excluded, "
+        # Undetermined is the number that matters when the judge is flaky: it is the
+        # only one that means "not reviewed" rather than "reviewed and rejected", and
+        # printing just the included count hides it entirely.
+        f"{coverage.adjudicated_undetermined} undetermined"
     )
     click.echo(
         f"            vector {coverage.source_units_indexed}/"

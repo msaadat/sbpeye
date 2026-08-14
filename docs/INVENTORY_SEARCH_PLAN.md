@@ -96,7 +96,107 @@ Also fixed while verifying the rebuild: a source whose text chunks to zero chunk
 markers with no words) was being recorded `stale` rather than `empty`, which would have
 made `--repair` re-embed 183 sources on every run forever.
 
-### 0.3 Missing tests
+### 0.3 The LLM layers have now run against a real model (2026-08-14)
+
+Phase 5 is handed off in `docs/INVENTORY_NEXT_STAGE.md`. Its headline item — **no layer
+of the LLM pipeline has ever run against a real model** — is now closed. Layers 0, 2 and
+3 have each been exercised against OpenRouter / `nvidia/nemotron-3-ultra-550b-a55b:free`
+on live corpus data.
+
+All three work. Three defects were found and fixed in the process, every one of them
+invisible to a `FakeLLM` because they concern the shape of a real provider's reply rather
+than its content: an opaque crash on an empty response body, correct answers discarded
+because the model renamed or reshaped the JSON field holding them, and a term-generation
+failure that is far more costly than section 6.1 claimed. Section 13.1 records the
+measurements; section 12.1b.1 records what the `terms-v2` prompt did to lexical recall
+(61 % → 100 % on the contact-centre ground truth).
+
+What is measured and what is not:
+
+| | Status |
+|---|---|
+| Layer 0 term generation | 4/4 queries, 48 terms each, 100 % recall on the one topic with ground truth |
+| Layer 2 adjudication | one batch of 12: 11 included, 1 excluded, 0 undetermined, 63.5 s |
+| Layer 3 extraction | 8/8 spans verified as literal substrings, ~37 s per passage |
+| End-to-end `inventory search` with all layers on | 97 candidates → 22 included, ~6 min |
+| Reviewed relevance set (Phase 5 calibration) | **not started** |
+
+**Layer 2 discriminates on the right question.** The single exclusion in the probe batch
+was `CL14-Annex_1.pdf`, whose passage reads "Uni Centre, I.I. Chundrigar Road, Karachi
+Tel: …" — a lexical match on *Centre* inside a street address. The judge rejected it as
+"Only lists firm contact details, no call centre content", while including a passage
+whose only relevance is one line of a complaint-channel list. That is the mention
+question of section 1.1 answered correctly in both directions, and it is the case
+section 4.2 showed a cosine threshold cannot get right.
+
+**Layer 3's verification constraint holds in practice.** 8/8 spans came back as literal
+substrings, so nothing fell back to the whole chunk. The output is citable as designed —
+for example "In case of outsourcing of call centre function or its HR resources,
+relevant instructions on Outsourcing issued by SBP should also be complied with." The
+concern in the handoff, that a high unverified rate would tempt someone to loosen
+`verify_span`, did not materialise and the constraint stays as written.
+
+Judge latency is the open operational question: 63.5 s for a batch of 12 means a real
+query at the measured candidate volumes (160-227 documents) is 14-19 batches, roughly
+4-5 minutes at `MAX_WORKERS=4`. That is usable but it is the constraint to design
+around, and it is the cost half of handoff decision 1.
+
+**4. The lexical arm was feeding layer 2 the wrong passage.** Found by the first
+end-to-end run, not by any probe, and the most consequential defect of the four.
+
+Only the dense arm assigns `chunk_indices`. A document found by the lexical arm alone
+therefore arrived at adjudication with none, and `_best_passage` fell back to the first
+1,500 characters of the document. For a long framework whose only call-centre paragraph
+sits on page 40, the judge was shown the cover page and correctly answered "no" about
+text it had never seen. The same gap left `_build_results` with nothing to attach, so
+those results were emitted with an **empty evidence list** — a direct violation of
+acceptance criterion 5, on the path the recall backbone actually takes.
+
+`service._locate_lexical_chunks` now points every lexical-only candidate at the chunks
+that literally contain one of its matched terms, before adjudication. The head-of-document
+fallback survives only for the case it was really meant for: a document matched on its
+FTS-indexed title or reference rather than its body.
+
+Measured on the same query, `inventory search "call centre" --source circulars --band 20`:
+
+| | Candidates | Included |
+|---|---:|---:|
+| before | 122 | **4** |
+| after | 97 | **22** |
+
+The top of the "after" inventory is what the feature is for — *Guidelines on Call Center
+Management at Banks* (BC & CPD 01 of 2018), *Call Center Management* (BC & CPD 03 of
+2021), the Business Conduct guidelines' complaint-channel provisions, Branchless Banking
+Regulations, and the ATM help-desk circular — each with quoted, located evidence. Before
+the fix the judge had rejected almost all of them on the strength of their cover pages.
+
+This is a good argument for keeping section 15.2's "a document found only lexically and a
+document found only semantically both appear" test honest about *evidence*, not just
+presence — a document can be returned and still be useless.
+
+### 13.2 Open observations from the first end-to-end run
+
+Not defects, but things a reviewer will hit and Phase 5 should decide on.
+
+- **`adjudicated_undetermined` was invisible in the human-readable output.** The CLI
+  printed only the included count, so a run where the judge silently failed on three
+  batches looked identical to one where it rejected those documents. It now prints
+  included/excluded/undetermined. The measured run shows **37 undetermined of 97** —
+  entirely provider flakiness, and exactly the number section 7 says must surface.
+- **`extraction_verified: false` conflates two different things.** It means either "the
+  model paraphrased, so the quote was rejected" or "the model found nothing in this
+  passage worth quoting" — `_extract_one` returns the same `Extraction("", False)` for
+  both. A reviewer wants to tell those apart; the first is a model failure and the second
+  is a correct answer about an irrelevant chunk. Separating them is a small schema
+  change and is deliberately left for Phase 5.
+- **The resolved term set is not stable across runs** even at temperature 0. Two runs of
+  the same query produced 48 terms each with substantial overlap but real differences
+  (the second reached for branchless- and digital-banking call centre variants). Section
+  5.4 already relaxed reproducibility, and the response echoes the term set, so this is
+  disclosed rather than hidden — but it means a recall number is a property of a run, not
+  of the system, which matters for how the Phase 5 calibration set is measured.
+
+### 0.4 Missing tests
 
 From section 15, not yet written: a relevant chunk beyond the first `collection.get()`
 page; an assertion that no `collection.query()` path exists; vectorized-batch versus
@@ -113,7 +213,7 @@ purged 31 orphan chunks and re-indexed 31 stale law versions, returning the stor
 purges orphans now — gap 0.2.1's fix already stops them scoring, but leaving them grows
 the store with unreachable data and hides real drift behind a non-zero orphan count.
 
-### 0.4 Operational constraint learned the hard way
+### 0.5 Operational constraint learned the hard way
 
 **Chroma's `PersistentClient` is single-process.** A running dev server holds the HNSW
 segment files (`data_level0.bin`, `link_lists.bin`, `header.bin`) open while holding no
@@ -401,10 +501,19 @@ Invoked as a tool call with no human in the loop. Two rules make that safe:
 - **Echoed in the response.** The resolved term set ships in the output as the audit
   trail. It cannot be approved in advance, but it is always visible after the fact.
 
+> **Do not read the first rule as making this layer optional** (measured, section 13.1).
+> It bounds the *output*, but the baseline it guarantees is whatever the raw query
+> retrieves, and the lexical arm matches a multi-word term as a single phrase. Measured:
+> "outsourcing of customer support functions" retrieves **0** documents verbatim, and
+> "responsibilities of Internal Audit" retrieves 3. For a query phrased as a question —
+> which is what section 1 is about — generation *is* the recall backbone, not a
+> supplement to it.
+
 The generator is prompted for regulatory-domain vocabulary: acronym expansions and
 contractions (`AML` ↔ `anti-money laundering` ↔ `AML/CFT`), British/American spelling
-variants (`centre`/`center`), SBP- and Pakistan-specific terminology, and closely
-associated instruments (`CDD`, `STR`, `beneficial ownership` for AML).
+variants (`centre`/`center`), singular and plural forms of every phrase (the FTS
+tokenizer has no stemmer — section 12.1b), SBP- and Pakistan-specific terminology, and
+closely associated instruments (`CDD`, `STR`, `beneficial ownership` for AML).
 
 A caller may supply explicit `alternate_queries`; these are merged into the term set and
 marked as caller-supplied. A caller may also disable generation entirely, in which case
@@ -851,6 +960,41 @@ generation prompt must emit plural and spelling variants, not only synonyms, and
 6.1's prompt should be evaluated on that in Phase 5. Adding a porter-stemmed FTS column is
 the alternative if generation proves unreliable.
 
+#### 12.1b.1 Resolved by `terms-v2` (2026-08-14) — measured, not asserted
+
+The morphology instruction was added to the section 6.1 prompt and measured against the
+live index. Ground truth is the 41 circulars matching `"call cent"* OR "contact cent"*`;
+recall is over that set, and "returned" is what the whole term set retrieves.
+
+| Term set | Recall | Circulars returned |
+|---|---:|---:|
+| verbatim `call centre` only | 8/41 (19.5 %) | 8 |
+| `terms-v1` generated set | 25/41 (61.0 %) | 89 |
+| **`terms-v2` generated set** | **41/41 (100 %)** | 146 |
+
+The distribution explains why the singular alone is hopeless: `call centers` (American
+plural) matches **20** circulars on its own, `call center` 15, `call centre` 8,
+`call centres` 3. The largest single bucket is the one form the old prompt never emitted.
+
+100 % recall costs 89 → 146 circulars of adjudication, a 64 % rise in layer-2 workload.
+That is the trade the design already chose — recall is mechanical, precision is layer 2 —
+but it is the number to revisit if judge throughput becomes the constraint.
+
+`MAX_GENERATED_TERMS` was raised 24 → 48 in the same change: 24 was already binding
+(both `AML` and `outsourcing` filled it exactly and were cut mid-list under `terms-v1`),
+and asking for plurals roughly doubles what the model wants to say.
+
+**A caveat worth keeping.** For `AML` the expanded set went 222 → 212 documents, i.e.
+slightly *down*. Both versions hit the cap, but they spend it differently: `terms-v1`
+chose KYC/CDD/EDD/PEP/beneficial-ownership vocabulary, `terms-v2` spent budget on
+statutory instruments and their plurals (NACTA, FMU, UNSCR, proscribed/designated
+persons/entities). For an acronym query where morphology barely matters, the plural
+instruction crowds out synonyms. The cap is what forces the choice, and the model's
+choice is not stable across runs — a reason to keep the resolved term set in the
+response, and a candidate for Phase 5 tuning.
+
+A porter-stemmed FTS column is therefore **not** needed and remains unbuilt.
+
 ### 12.2 Chunking changes
 
 - **Chunk at ~120-150 words with ~30 words overlap.** 100 tested well; slightly larger
@@ -925,6 +1069,71 @@ Expected errors:
 Do not fall back silently to ordinary top-K search. Do not silently drop LLM layers on
 failure — degrade explicitly and record it in `coverage.warnings`.
 
+### 13.1 Measured provider behaviour (2026-08-14) — first live-model run
+
+Until this date no layer of the LLM pipeline had ever run against a real model; layers
+0, 2 and 3 were unit-tested against `FakeLLM` only. Running them against the configured
+client (OpenRouter, `nvidia/nemotron-3-ultra-550b-a55b:free`) found three defects, none
+of which a stub could have surfaced, because every one of them is about the *shape* of a
+real provider's reply rather than its content.
+
+**1. Structured-output tiers are per-request unreliable, not per-model.** Asking the same
+prompt at each tier:
+
+| Tier | Result |
+|---|---|
+| `json_schema` | worked (75.4 s); on a later call returned HTTP 404 "Provider returned error" |
+| `json_object` | worked (29.2 s, 63 terms); on an earlier call returned 200 with `choices` null |
+| `text` | worked (44.5 s) |
+
+Every tier works and every tier intermittently fails. The conclusion is **not** to change
+which tier `AIClient` starts at — measurement supports no ranking between them — but that
+transient faults must never be fed into the tier ladder, which is a one-way ratchet. A
+hiccup misread as a missing capability strands the client in a weaker mode for the rest
+of the process.
+
+`_complete` therefore retries an empty response at the *same* tier (`_EMPTY_RESPONSE_RETRIES`)
+and raises a named `ProviderResponseError` when the provider truly never answers. Before
+this it raised `TypeError: 'NoneType' object is not subscriptable` from `choices[0]`,
+which every inventory layer caught as a generic failure.
+
+**2. Without schema enforcement the model renames and reshapes fields — and correct
+answers were being discarded as failures.** This was the expensive one. Under the
+`json_object` tier nothing binds the reply to the schema, and the model was measured:
+
+- answering the term schema's `terms` with **`search_terms`** on one call and `terms` on
+  the very next, same prompt, same tier — so the key is not even stable across calls;
+- answering the judge schema's `{"verdicts": [...]}` with the passage numbers as
+  top-level keys, `{"0": {"discusses": true, ...}, "1": {...}}`.
+
+In both cases the *content* was complete and correct. The readers took one hard-coded
+key, found nothing, and reported the layer as having produced nothing — costing the
+entire lexical arm in the first case and twelve documents per batch in the second.
+
+The layers now accept the field under any name when there is exactly one field of the
+expected type (`llm.field_of_type`), the judge additionally accepts the id-keyed mapping
+(`adjudicate._coerce_verdicts`), and every prompt states the shape it wants literally.
+Ambiguity is still failed loudly: two candidate lists in one object is a guess, not a
+rename.
+
+**3. Layer 0 failure is far more damaging than section 6.1 implies.** That section argues
+term generation is safe unsupervised because it is strictly additive, so "the worst case
+is added noise". True of the *output*, misleading about the *failure*. Measured verbatim
+retrieval when generation produces nothing:
+
+| Query | Documents retrieved by the verbatim query alone |
+|---|---:|
+| `outsourcing of customer support functions` | **0** |
+| `responsibilities of Internal Audit` | **3** |
+| `call centre` | 10 |
+| `AML` | 149 |
+
+The lexical arm matches a multi-word term as a phrase, so a query phrased as a question
+retrieves almost nothing on its own. For any natural-language research question — which
+is the entire point of section 1 — term generation is not an enhancement to the recall
+backbone, it *is* the backbone. Its failure warning now says so rather than reporting a
+bare "no usable terms".
+
 ---
 
 ## 14. Implementation phases
@@ -991,19 +1200,24 @@ JSON output follows the future MCP schema so it doubles as contract testing.
 **Deliverable:** the feature produces the intended output shape, exercisable independently
 of chat.
 
-### Phase 5 — Calibration and optional consumers  ·  **not started**
+### Phase 5 — Calibration and optional consumers  ·  **started**
 
-Calibration:
-
+0. **Bring up the LLM layers against a real model.** ✅ **done 2026-08-14** — sections
+   0.3 and 13.1. Layers 0, 2 and 3 each verified on live data; three provider-shape
+   defects found and fixed. The prompts survive contact with a real model; the readers
+   did not, and now do.
 1. Build a reviewed relevance set for AML/AML-CFT, Internal Audit responsibilities,
    contact/call centers, outsourcing, consumer complaints, and quantitative prudential
    topics.
 2. Include short circulars, long frameworks, attachment-only hits, acronyms, alternate
    spellings, law parts, and hard negatives containing incidental mentions.
 3. Measure end-to-end recall and reviewer workload; tune `semantic_band`,
-   `max_candidates`, and the term-generation prompt.
+   `max_candidates`, and the term-generation prompt. The term-generation prompt has had
+   one measured pass already (`terms-v2`, section 12.1b.1); `MAX_GENERATED_TERMS` and the
+   synonym-vs-morphology trade it forces are the open knobs.
 4. Evaluate SPLADE (section 12.3) against LLM term generation and adopt it if it adds
-   recall the term set misses.
+   recall the term set misses. Note that `terms-v2` reaching 100 % lexical recall on the
+   contact-centre set weakens the case for it.
 
 Optional consumers:
 
@@ -1033,6 +1247,11 @@ These consumers do not change inventory semantics.
 - Extraction rejects a span that is not a literal substring and falls back to the chunk.
 - `locator_kind` is `page` for PDF attachment hits and `offset`/`chunk` for HTML bodies.
 - Truncation never drops a lexical exact-term match before a semantic-band-only candidate.
+- A model reply that renames the schema's field, or returns verdicts keyed by passage
+  number, is still read; a genuinely ambiguous reply fails loudly instead of being
+  guessed at (section 13.1 item 2).
+- A lexical-only candidate is pointed at the chunk containing its matched term, however
+  deep in the document that sits (section 13.1 item 4).
 
 ### 15.2 Exhaustiveness tests
 
@@ -1041,7 +1260,9 @@ These consumers do not change inventory semantics.
 - Compare the vectorized batch result with a literal document-by-document loop.
 - Test a document with many irrelevant chunks and one qualifying passage.
 - A document found only lexically and a document found only semantically both appear, with
-  correct `matched_via`.
+  correct `matched_via` — **and with evidence**. Presence alone is not the property worth
+  testing: section 13.1 item 4 shipped lexical-only results that appeared in the output
+  with an empty evidence list, which is a result no reviewer can use.
 
 ### 15.3 Coverage and failure tests
 

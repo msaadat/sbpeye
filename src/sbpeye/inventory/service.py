@@ -239,6 +239,9 @@ class InventorySearchService:
         # candidates whose database row has disappeared since the index was written.
         records = self._load_records(db, candidates)
         candidates = [c for c in candidates if c.key in records]
+        self._locate_lexical_chunks(
+            snapshot, candidates, max(1, request.evidence_per_result)
+        )
 
         # ---- layer 2: adjudication ---------------------------------------
         passages = [self._best_passage(snapshot, c, records) for c in candidates]
@@ -372,11 +375,45 @@ class InventorySearchService:
         return records
 
     @staticmethod
+    def _locate_lexical_chunks(snapshot, candidates, limit: int) -> None:
+        """Point lexical-only candidates at the chunks that actually contain their terms.
+
+        A document found by the lexical arm alone has no `chunk_indices`, because only
+        the dense arm assigns them. Two things then go wrong, and both were visible on
+        the first live end-to-end run:
+
+        * the judge was shown the head of the document instead of the matching passage,
+          so a long framework with one call-centre paragraph on page 40 was judged on
+          its cover page and correctly answered "no" to a question about text the model
+          never saw;
+        * the result carried no evidence at all, which acceptance criterion 5 forbids.
+
+        The lexical arm is the recall backbone, so this is not a corner case — it is the
+        common path for exactly the documents the inventory exists to find.
+        """
+        wanted = {c.key: c for c in candidates if not c.chunk_indices}
+        if not wanted:
+            return
+
+        found: dict[tuple[str, str], list[int]] = {}
+        for index, key in enumerate(snapshot.logical_keys()):
+            candidate = wanted.get(key)
+            if candidate is None or len(found.get(key, ())) >= limit:
+                continue
+            haystack = (snapshot.documents[index] or "").lower()
+            if any(term.lower() in haystack for term in candidate.matched_terms):
+                found.setdefault(key, []).append(index)
+
+        for key, indices in found.items():
+            wanted[key].chunk_indices = indices
+
+    @staticmethod
     def _best_passage(snapshot, candidate, records) -> str:
         if candidate.chunk_indices:
             return snapshot.documents[candidate.chunk_indices[0]]
-        # Lexical-only hit: the dense arm never scored it, so fall back to the head of
-        # the document's own text rather than sending the judge nothing.
+        # No chunk contains the term literally — it matched the FTS-tokenized title or
+        # reference, or the chunk text differs from what was indexed for search. Fall
+        # back to the head of the document rather than sending the judge nothing.
         record = records.get(candidate.key)
         text = getattr(record, "content_text", "") or ""
         if not text and getattr(record, "current_version", None) is not None:

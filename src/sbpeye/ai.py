@@ -294,6 +294,15 @@ def friendly_chat_error(exc: Exception) -> str:
     def has(*needles: str) -> bool:
         return any(needle in text for needle in needles)
 
+    # The provider was reachable and accepted the request but sent back no completion.
+    # Measured as intermittent on OpenRouter free tiers, so "try again" is genuinely
+    # the right advice here and the generic message would bury it.
+    if isinstance(exc, ProviderResponseError):
+        return (
+            "The AI provider accepted the request but returned an empty response. "
+            "This is usually temporary — please try again."
+        )
+
     # Request too large / rate limited / context window exceeded.
     if status in (413, 429) or has(
         "rate_limit_exceeded",
@@ -379,6 +388,9 @@ def classify_provider_state(exc: Exception) -> tuple[str, str]:
 
     def has(*needles: str) -> bool:
         return any(needle in text for needle in needles)
+
+    if isinstance(exc, ProviderResponseError):
+        return "server_error", "Provider returned an empty response"
 
     if status in (413, 429) or has(
         "rate_limit", "rate limit", "too many requests",
@@ -707,10 +719,53 @@ _DEFAULT_CONTEXT_WINDOW = 8_192
 _CONTEXT_INPUT_FRACTION = 0.6
 # Structured-output capability tiers, strongest first.
 _STRUCTURED_MODES = ("json_schema", "json_object", "text")
+# Retries for a provider that answers 200 with no usable choice. Measured on
+# OpenRouter's free tier (nvidia/nemotron-3-ultra): the same request succeeds at one
+# moment and returns an empty body the next, at every structured-output tier.
+_EMPTY_RESPONSE_RETRIES = 2
 # Relationship extraction reads the whole cover letter: supersession clauses often sit
 # at the very end, past the default max_context_tokens clip. 24k chars covers the
 # longest cover letter observed in the DB while still bounding pathological inputs.
 RELATIONSHIP_CONTEXT_CHARS = 24_000
+
+
+class ProviderResponseError(RuntimeError):
+    """The provider answered, but with no completion in it."""
+
+
+def _first_choice_message(response: Any) -> Any | None:
+    """The first choice's message, or ``None`` when the provider returned no choice.
+
+    Indexing ``choices[0]`` directly turns an empty body into
+    ``TypeError: 'NoneType' object is not subscriptable``, which reaches the caller as
+    an opaque crash rather than as the transient provider fault it actually is.
+
+    Callers that need the whole message — the tool-calling loop reads ``tool_calls`` —
+    use this; callers that only want text use :func:`_first_choice_content`.
+    """
+    choices = getattr(response, "choices", None) or []
+    if not choices:
+        return None
+    return getattr(choices[0], "message", None)
+
+
+def _first_choice_content(response: Any) -> str | None:
+    """The completion text, or ``None`` when the provider returned no usable choice."""
+    message = _first_choice_message(response)
+    if message is None:
+        return None
+    # A reasoning model that spends its whole budget thinking returns content=None with
+    # the text in `reasoning`. That is not an answer, so it counts as no choice.
+    return getattr(message, "content", None)
+
+
+def _empty_response_error(
+    provider: str, model: str, detail: str = ""
+) -> ProviderResponseError:
+    suffix = f" ({detail})" if detail else ""
+    return ProviderResponseError(
+        f"{provider} returned no completion for {model}{suffix}"
+    )
 
 
 def _status_code(exc: Exception) -> int | None:
@@ -925,6 +980,7 @@ class AIClient:
         json_schema: dict[str, Any] | None = None,
     ) -> str:
         model = model or self.config.model
+        empty_responses = 0
         while True:
             mode = self._structured_mode if json_schema else "text"
             kwargs = self._build_completion_kwargs(
@@ -944,7 +1000,22 @@ class AIClient:
                     self._structured_mode = self._downgrade_structured_mode(mode)
                     continue
                 raise
-            return response.choices[0].message.content or ""
+
+            content = _first_choice_content(response)
+            if content is not None:
+                return content
+
+            # Retry the *same* tier rather than downgrading. The tier cache is a
+            # one-way ratchet, so feeding an intermittent fault into it would strand
+            # the client in a weaker mode for the rest of the process on evidence that
+            # says nothing about what the model supports.
+            empty_responses += 1
+            if empty_responses > _EMPTY_RESPONSE_RETRIES:
+                raise _empty_response_error(
+                    self.config.provider,
+                    model,
+                    f"{empty_responses} attempts, mode={mode}",
+                )
 
     def _complete_json(
         self,
@@ -981,7 +1052,10 @@ class AIClient:
             messages=messages,
             temperature=temperature,
         )
-        return response.choices[0].message.content or ""
+        content = _first_choice_content(response)
+        if content is None:
+            raise _empty_response_error(self.config.provider, model)
+        return content
 
     @staticmethod
     def _is_tool_choice_none_error(exc: Exception) -> bool:
@@ -2622,7 +2696,15 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
                 tool_choice="auto",
             )
 
-            msg = response.choices[0].message
+            msg = _first_choice_message(response)
+            if msg is None:
+                # Raised, not swallowed: the chat routes already funnel exceptions
+                # through friendly_chat_error, so this reaches the user as a clear
+                # "try again" rather than as an empty assistant turn that looks like
+                # the model chose to say nothing.
+                raise _empty_response_error(
+                    self.config.provider, self.config.effective_chat_model
+                )
 
             if not msg.tool_calls:
                 return msg.content or ""
@@ -2660,7 +2742,12 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
             if self._is_tool_choice_none_error(exc):
                 return self._tool_iteration_limit_message()
             raise
-        return final_response.choices[0].message.content or ""
+        content = _first_choice_content(final_response)
+        if content is None:
+            raise _empty_response_error(
+                self.config.provider, self.config.effective_chat_model
+            )
+        return content
 
     def stream_chat(
         self,
@@ -2687,10 +2774,12 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
 
             content_parts: list[str] = []
             tool_calls: dict[int, dict] = {}
+            saw_choice = False
 
             for chunk in stream:
                 if not chunk.choices:
                     continue
+                saw_choice = True
                 delta = chunk.choices[0].delta
                 if delta.content:
                     content_parts.append(delta.content)
@@ -2711,6 +2800,17 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
                             item["function"]["name"] += tc.function.name
                         if tc.function.arguments:
                             item["function"]["arguments"] += tc.function.arguments
+
+            # An empty `choices` on an individual chunk is normal framing and is skipped
+            # above. A whole stream without a single one is the streaming form of the
+            # empty-body fault, and would otherwise end the turn silently — the user
+            # sees a blank answer and no reason for it. Only status markers have been
+            # yielded so far, never assistant text, so the route's handler turns this
+            # into an error event rather than truncating a half-written reply.
+            if not saw_choice:
+                raise _empty_response_error(
+                    self.config.provider, self.config.effective_chat_model, "streamed"
+                )
 
             if not tool_calls:
                 return
@@ -2790,7 +2890,16 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
                 max_tokens=10,
                 temperature=0.0,
             )
-            content = response.choices[0].message.content or ""
+            content = _first_choice_content(response)
+            if content is None:
+                # Reaching the provider but getting nothing back is a failed connection
+                # test, not a successful one with an empty string.
+                return {
+                    "success": False,
+                    "error": str(
+                        _empty_response_error(self.config.provider, self.config.model)
+                    ),
+                }
             return {"success": True, "response": content}
         except Exception as e:
             return {"success": False, "error": str(e)}

@@ -15,6 +15,8 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
+from .llm import field_of_type
+
 logger = logging.getLogger(__name__)
 
 EXTRACT_PROMPT_VERSION = "extract-v1"
@@ -76,10 +78,11 @@ def _extract_one(llm, query: str, passage: str) -> Extraction:
     try:
         response = llm.complete_json(
             _SYSTEM_PROMPT,
-            f"Subject: {query}\n\nPassage:\n{passage}",
+            f"Subject: {query}\n\nPassage:\n{passage}\n\n"
+            'Return JSON of the form {"span": "..."}.',
             json_schema=_SCHEMA,
         )
-        span = str(response.get("span") or "")
+        span = field_of_type(response, "span", str) or ""
     except Exception as exc:  # noqa: BLE001
         logger.warning("span extraction failed: %s", exc)
         return Extraction("", False)

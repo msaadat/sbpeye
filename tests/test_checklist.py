@@ -4,7 +4,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from sbpeye.ai import AIClient, AIConfig
+from sbpeye.ai import (
+    _EMPTY_RESPONSE_RETRIES,
+    GENERIC_CHAT_ERROR,
+    AIClient,
+    AIConfig,
+    ProviderResponseError,
+    classify_provider_state,
+    friendly_chat_error,
+)
 from sbpeye.checklist import (
     AnalysisBlock,
     ReferenceUnit,
@@ -568,6 +576,168 @@ def test_complete_json_downgrades_when_model_ignores_structured_output():
 
     assert result == '{"items": []}'
     assert client._structured_mode == "text"
+
+
+def test_complete_retries_an_empty_provider_response_without_downgrading():
+    """A provider hiccup must not be read as a missing capability.
+
+    OpenRouter's free tier intermittently answers 200 with no choices. Downgrading on
+    that would strand the client in a weaker tier for the rest of the process on
+    evidence that says nothing about what the model supports.
+    """
+    client = AIClient(AIConfig())
+    client._structured_mode = "json_schema"
+    calls = []
+
+    def create(**kwargs):
+        calls.append((kwargs.get("response_format") or {}).get("type"))
+        if len(calls) == 1:
+            return SimpleNamespace(choices=None)
+        return _fake_response('{"items": []}')
+
+    _install_fake_client(client, create)
+    result = client._complete("sys", "user", json_schema={"type": "object"})
+
+    assert result == '{"items": []}'
+    assert calls == ["json_schema", "json_schema"]
+    assert client._structured_mode == "json_schema"
+
+
+def test_complete_raises_a_named_error_when_the_provider_never_answers():
+    """Never `TypeError: 'NoneType' object is not subscriptable` at the call site."""
+    client = AIClient(AIConfig())
+    calls = []
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(choices=[])
+
+    _install_fake_client(client, create)
+    with pytest.raises(ProviderResponseError) as excinfo:
+        client._complete("sys", "user", json_schema={"type": "object"})
+
+    assert len(calls) == _EMPTY_RESPONSE_RETRIES + 1
+    assert "no completion" in str(excinfo.value)
+
+
+def test_complete_treats_a_reasoning_only_response_as_no_answer():
+    """Content=None with the text in `reasoning` is thinking, not an answer."""
+    client = AIClient(AIConfig())
+
+    def create(**kwargs):
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content=None, reasoning="I should answer with JSON.")
+        )])
+
+    _install_fake_client(client, create)
+    with pytest.raises(ProviderResponseError):
+        client._complete("sys", "user", json_schema={"type": "object"})
+
+
+def _tool_call_response(content, tool_calls=None):
+    return SimpleNamespace(choices=[SimpleNamespace(
+        message=SimpleNamespace(content=content, tool_calls=tool_calls)
+    )])
+
+
+def test_chat_raises_a_named_error_when_the_provider_returns_no_choice():
+    """An empty body must not reach the tool-calling loop as a TypeError.
+
+    `chat` reads `.tool_calls` off the message, so it needs the whole choice rather
+    than just its text — the same fault, one layer further in.
+    """
+    client = AIClient(AIConfig())
+    _install_fake_client(client, lambda **kwargs: SimpleNamespace(choices=None))
+
+    with pytest.raises(ProviderResponseError):
+        client.chat([{"role": "user", "content": "hello"}], db=None)
+
+
+def test_chat_synthesis_fallback_raises_rather_than_answering_emptily():
+    """The post-tool-loop synthesis call has the same exposure as the loop itself."""
+    client = AIClient(AIConfig())
+    client._apply_tool_calls = lambda *a, **kw: None
+
+    def create(**kwargs):
+        # Tool-enabled calls keep asking for another round, so the loop exhausts its
+        # iterations and falls through to the synthesis call — the site under test,
+        # which is issued without `tools`.
+        if "tools" in kwargs:
+            return _tool_call_response("", tool_calls=[SimpleNamespace(
+                id="1",
+                function=SimpleNamespace(name="search", arguments="{}"),
+            )])
+        return SimpleNamespace(choices=[])
+
+    _install_fake_client(client, create)
+    with pytest.raises(ProviderResponseError):
+        client.chat([{"role": "user", "content": "hello"}], db=None)
+
+
+def _stream_chunk(content=None, has_choice=True):
+    if not has_choice:
+        return SimpleNamespace(choices=[])
+    return SimpleNamespace(choices=[SimpleNamespace(
+        delta=SimpleNamespace(content=content, tool_calls=None)
+    )])
+
+
+def test_stream_chat_skips_empty_chunks_but_still_streams_content():
+    """A chunk with no choices is normal framing, not a fault."""
+    client = AIClient(AIConfig())
+    _install_fake_client(client, lambda **kwargs: iter([
+        _stream_chunk(has_choice=False),
+        _stream_chunk("Hello "),
+        _stream_chunk(has_choice=False),
+        _stream_chunk("world."),
+    ]))
+
+    parts = [c for c in client.stream_chat([{"role": "user", "content": "hi"}], db=None)
+             if not isinstance(c, dict)]
+
+    assert "".join(parts) == "Hello world."
+
+
+def test_stream_chat_raises_when_the_whole_stream_carries_no_choice():
+    """The streaming form of the empty body — otherwise a silent blank answer."""
+    client = AIClient(AIConfig())
+    _install_fake_client(client, lambda **kwargs: iter([
+        _stream_chunk(has_choice=False),
+        _stream_chunk(has_choice=False),
+    ]))
+
+    with pytest.raises(ProviderResponseError):
+        list(client.stream_chat([{"role": "user", "content": "hi"}], db=None))
+
+
+def test_an_empty_response_gets_its_own_user_facing_message():
+    """`friendly_chat_error` must not bury this in the generic message.
+
+    The advice that matters — retry, it is transient — is specific to this fault.
+    """
+    message = friendly_chat_error(ProviderResponseError("openrouter returned no completion"))
+
+    assert message != GENERIC_CHAT_ERROR
+    assert "empty response" in message
+    assert "try again" in message.lower()
+
+
+def test_an_empty_response_classifies_as_a_server_error():
+    state, detail = classify_provider_state(ProviderResponseError("no completion"))
+
+    assert state == "server_error"
+    assert "empty" in detail.lower()
+
+
+def test_connection_test_reports_an_empty_response_as_failure():
+    """Reaching the provider and getting nothing is a failed test, not a passing one."""
+    client = AIClient(AIConfig())
+    _install_fake_client(client, lambda **kwargs: SimpleNamespace(choices=[]))
+
+    result = client.test_connection()
+
+    assert result["success"] is False
+    assert "no completion" in result["error"]
 
 
 def test_run_checklist_batch_recovers_by_splitting_failed_batch(monkeypatch):

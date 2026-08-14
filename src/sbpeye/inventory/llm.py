@@ -59,3 +59,24 @@ def load_llm(db=None) -> InventoryLLM:
 
 def dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
+
+
+def field_of_type(response: dict[str, Any], key: str, kind: type) -> Any | None:
+    """The field named ``key``, or — failing that — the object's only field of ``kind``.
+
+    Only the ``json_schema`` tier makes the provider enforce field names. Under
+    ``json_object`` and ``text`` the model names the field itself, and it was measured
+    answering the term-generation schema's ``terms`` with ``search_terms`` and a full,
+    correct list of terms. Reading one hard-coded key throws that away and reports it
+    as though the layer had produced nothing, which is indistinguishable from real
+    failure and costs the whole lexical arm.
+
+    Falling back only when there is exactly one field of the expected type keeps this a
+    rename-tolerance, not a guess: an object with two lists in it is ambiguous, so it
+    is left to fail loudly.
+    """
+    value = response.get(key)
+    if isinstance(value, kind):
+        return value
+    matches = [v for v in response.values() if isinstance(v, kind)]
+    return matches[0] if len(matches) == 1 else None

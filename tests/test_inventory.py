@@ -23,7 +23,8 @@ from sbpeye.models import (
     RegDocumentVersion,
     SemanticIndexSource,
 )
-from sbpeye.inventory import corpus, ledger, retrieval, terms
+from sbpeye.inventory import adjudicate as adjudicate_module
+from sbpeye.inventory import corpus, extract, ledger, retrieval, terms
 from sbpeye.inventory.adjudicate import VERDICT_INCLUDED, VERDICT_UNDETERMINED, adjudicate
 from sbpeye.inventory.extract import resolve_locator, verify_span
 from sbpeye.inventory.index import SNAPSHOT_CACHE, CorpusEmbeddingSnapshot, load_snapshot
@@ -344,11 +345,96 @@ def test_degenerate_llm_response_cannot_shrink_the_term_set():
     )
 
     assert term_set.all_terms == ["AML", "money laundering"]
-    assert warnings == ["term generation returned no usable terms"]
+    assert warnings and "no usable terms returned" in warnings[0]
 
 
 def test_multi_word_terms_match_as_phrases():
     assert terms.fts_match_query(["call centre"]) == '"call centre"'
+
+
+class _RenamingLLM:
+    """Answers with the right content under a field name of its own choosing.
+
+    Measured against nvidia/nemotron-3-ultra on OpenRouter: under the ``json_object``
+    tier, which enforces no field names, the same prompt returned ``search_terms`` on
+    one call and ``terms`` on the next.
+    """
+
+    model_name = "renaming"
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def complete_json(self, system_prompt, user_prompt, *, json_schema):
+        return self._payload
+
+
+def test_a_renamed_terms_field_is_still_read():
+    """A good answer under the wrong key is a good answer, not a failed layer."""
+    term_set, warnings = terms.build_term_set(
+        "call centre",
+        llm=_RenamingLLM({"search_terms": ["call centres", "call centers"]}),
+    )
+
+    assert term_set.generated == ["call centres", "call centers"]
+    assert not warnings
+
+
+def test_an_ambiguous_response_is_not_guessed_at():
+    """Two lists means no way to tell which is the answer, so fail loudly instead."""
+    term_set, warnings = terms.build_term_set(
+        "call centre",
+        llm=_RenamingLLM({"terms": "not a list", "notes": [], "other": []}),
+    )
+
+    assert term_set.all_terms == ["call centre"]
+    assert warnings and "term generation failed" in warnings[0]
+
+
+def test_a_renamed_verdict_field_is_still_read():
+    entries = [("A", "passage one"), ("B", "passage two")]
+    llm = _RenamingLLM({"judgments": [
+        {"id": 0, "discusses": True, "reason": "yes"},
+        {"id": 1, "discusses": False, "reason": "no"},
+    ]})
+
+    verdicts = adjudicate_module.adjudicate(llm, "call centre", entries, max_workers=1)
+
+    assert [v.verdict for v in verdicts] == ["included", "excluded"]
+
+
+def test_verdicts_keyed_by_passage_number_are_still_read():
+    """Measured shape: the judge answered with the passage numbers as top-level keys."""
+    entries = [("A", "passage one"), ("B", "passage two")]
+    llm = _RenamingLLM({
+        "0": {"discusses": True, "reason": "yes"},
+        "1": {"discusses": False, "reason": "no"},
+    })
+
+    verdicts = adjudicate_module.adjudicate(llm, "call centre", entries, max_workers=1)
+
+    assert [v.verdict for v in verdicts] == ["included", "excluded"]
+    assert [v.reason for v in verdicts] == ["yes", "no"]
+
+
+def test_a_response_that_is_neither_shape_leaves_candidates_undetermined():
+    """Undetermined, never excluded — an unreadable answer is not a rejection."""
+    entries = [("A", "passage one")]
+    llm = _RenamingLLM({"commentary": "I could not decide."})
+
+    verdicts = adjudicate_module.adjudicate(llm, "call centre", entries, max_workers=1)
+
+    assert verdicts[0].verdict == VERDICT_UNDETERMINED
+
+
+def test_a_renamed_span_field_is_still_read():
+    passage = "The bank shall staff its call centre at all times."
+    llm = _RenamingLLM({"extracted_text": "shall staff its call centre"})
+
+    results = extract.extract_spans(llm, "call centre", [passage], max_workers=1)
+
+    assert results[0].verified
+    assert results[0].text == "shall staff its call centre"
 
 
 # --------------------------------------------------------------- retrieval
@@ -499,6 +585,76 @@ def test_extraction_falls_back_to_the_passage_when_unverifiable(indexed):
     assert evidence.extraction_verified is False
     assert evidence.extracted_text == evidence.passage
     assert any("could not be verified" in w for w in response.coverage.warnings)
+
+
+def test_a_lexical_only_hit_still_carries_evidence(indexed):
+    """Acceptance criterion 5, on the path the recall backbone actually takes.
+
+    Only the dense arm assigns chunk indices, so with the band switched off every
+    candidate arrives without them. That used to emit results with an empty evidence
+    list, and hand the judge the head of the document instead of the passage that
+    matched — found on the first live end-to-end run.
+    """
+    db, collection = indexed
+    request = InventorySearchRequest(
+        query="anti-money laundering", generate_terms=False, use_hyde=False,
+        semantic_band=0, extract_spans=False,
+    )
+
+    response = make_service(collection, llm=FakeLLM()).search(request, db)
+
+    assert response.results, "the lexical arm alone must still return documents"
+    for result in response.results:
+        assert result.matched_via == ["lexical"]
+        assert result.evidence, f"{result.document_id} was returned with no evidence"
+        evidence = result.evidence[0]
+        assert evidence.locator_kind in {"page", "offset", "chunk"}
+        assert "anti-money laundering" in evidence.passage.lower()
+
+
+def test_lexical_chunks_are_located_deep_inside_a_long_document():
+    """The matching chunk is found wherever it sits, not just near the start.
+
+    This is the case that made the defect matter: a long framework whose only
+    call-centre paragraph is on page 40 was being judged on its cover page.
+    """
+    snapshot = CorpusEmbeddingSnapshot(
+        snapshot_id="s",
+        chunk_ids=[f"c-long__chunk_{i}" for i in range(60)],
+        metadatas=[{"circular_id": "c-long"} for _ in range(60)],
+        documents=[
+            "the call centre shall be staffed at all times" if i == 42
+            else "unrelated provisions about liquidity ratios"
+            for i in range(60)
+        ],
+    )
+    candidate = retrieval.Candidate(
+        logical_kind="circular", document_id="c-long",
+        matched_via={"lexical"}, matched_terms=["call centre"],
+    )
+
+    InventorySearchService._locate_lexical_chunks(snapshot, [candidate], 3)
+
+    assert candidate.chunk_indices == [42]
+
+
+def test_locating_lexical_chunks_leaves_dense_candidates_alone():
+    """A candidate the dense arm already scored keeps its own, better ordering."""
+    snapshot = CorpusEmbeddingSnapshot(
+        snapshot_id="s",
+        chunk_ids=["c-1__chunk_0", "c-1__chunk_1"],
+        metadatas=[{"circular_id": "c-1"}, {"circular_id": "c-1"}],
+        documents=["call centre here", "call centre there"],
+    )
+    candidate = retrieval.Candidate(
+        logical_kind="circular", document_id="c-1",
+        matched_via={"lexical", "semantic"}, matched_terms=["call centre"],
+        chunk_indices=[1],
+    )
+
+    InventorySearchService._locate_lexical_chunks(snapshot, [candidate], 3)
+
+    assert candidate.chunk_indices == [1]
 
 
 def test_strict_coverage_refuses_an_incomplete_index(indexed):

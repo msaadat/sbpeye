@@ -14,6 +14,8 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
+from .llm import field_of_type
+
 logger = logging.getLogger(__name__)
 
 JUDGE_PROMPT_VERSION = "judge-v1"
@@ -70,8 +72,37 @@ def _build_prompt(query: str, items: list[tuple[int, str, str]]) -> str:
         text = passage[:PASSAGE_CHARS].replace("\n", " ").strip()
         lines.append(f"[{number}] ({label}) {text}")
     lines.append("")
-    lines.append("Return a verdict for every numbered passage.")
+    lines.append(
+        "Return a verdict for every numbered passage, as JSON of the form "
+        '{"verdicts": [{"id": 0, "discusses": true, "reason": "..."}]}.'
+    )
     return "\n".join(lines)
+
+
+def _coerce_verdicts(response: dict) -> list | None:
+    """Accept either shape the judge actually returns, or ``None`` if neither.
+
+    Only the ``json_schema`` tier makes the provider enforce the shape. Measured under
+    ``json_object``: the model answered with the passage numbers as top-level keys —
+    ``{"0": {"discusses": true, "reason": "..."}, "1": {...}}`` — a complete and correct
+    set of verdicts in a shape the reader rejected, costing every document in the batch.
+    Twelve documents per malformed call is too expensive to spend on a formatting
+    preference.
+    """
+    entries = field_of_type(response, "verdicts", list)
+    if entries is not None:
+        return entries
+
+    coerced: list[dict] = []
+    for key, value in response.items():
+        if not isinstance(value, dict):
+            return None
+        try:
+            number = int(key)
+        except (TypeError, ValueError):
+            return None
+        coerced.append({**value, "id": number})
+    return coerced or None
 
 
 def _judge_batch(
@@ -81,9 +112,9 @@ def _judge_batch(
         response = llm.complete_json(
             _SYSTEM_PROMPT, _build_prompt(query, items), json_schema=_SCHEMA
         )
-        verdicts = response.get("verdicts") or []
-        if not isinstance(verdicts, list):
-            raise ValueError("`verdicts` was not a list")
+        verdicts = _coerce_verdicts(response)
+        if verdicts is None:
+            raise ValueError(f"response contained no verdicts: {sorted(response)}")
     except Exception as exc:  # noqa: BLE001
         logger.warning("adjudication batch failed: %s", exc)
         # Undetermined, not excluded. Silently dropping a candidate the model could not

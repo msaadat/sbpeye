@@ -13,25 +13,41 @@ the code rather than in a human review step:
 
 which means a degenerate, empty, or hostile model response can add noise but can never
 retrieve less than the plain query would have. Layer 2 removes the noise.
+
+That guarantee is about the *output*, and it is easy to over-read. It does not make this
+layer optional: the lexical arm matches a multi-word term as one phrase, so the floor it
+guarantees is whatever the raw query happens to retrieve — measured at **zero** documents
+for "outsourcing of customer support functions" and three for "responsibilities of
+Internal Audit". For a question phrased as a question, generation is not an enhancement
+to the recall backbone, it is the backbone, and its failure is reported accordingly.
 """
 
 from dataclasses import dataclass, field
 
 from ..search import tokenize
-from .llm import InventoryLLM
+from .llm import InventoryLLM, field_of_type
 
-TERM_PROMPT_VERSION = "terms-v1"
+TERM_PROMPT_VERSION = "terms-v2"
 
-MAX_GENERATED_TERMS = 24
+# Measured: the model fills 24 for a topic as broad as AML and gets cut off mid-list,
+# and asking for plurals roughly doubles what it wants to say. Each term costs two
+# millisecond FTS queries, so the cap exists to bound noise, not cost.
+MAX_GENERATED_TERMS = 48
 MAX_TERM_WORDS = 6
 
 _SYSTEM_PROMPT = """You expand a search topic into the vocabulary that Pakistani banking \
 regulation actually uses, so that a keyword search over State Bank of Pakistan circulars \
 and regulations finds every document discussing the topic.
 
+The search has no stemmer and matches whole words exactly, so a noun and its plural are \
+two unrelated terms. "call centre", "call centres", "call center" and "call centers" are \
+four separate terms, and listing only three of them misses every document that used the \
+fourth.
+
 Return terms that a document would literally contain. Include:
+- both the singular and the plural of every noun phrase you list
+- British and American spellings (centre / center, organisation / organization)
 - acronym expansions and contractions (AML <-> anti-money laundering, CDD, KYC)
-- British and American spellings (centre / center)
 - SBP and Pakistan specific terminology and institution names
 - closely associated instruments and obligations that imply the topic
 
@@ -91,6 +107,20 @@ def _acceptable(term: str) -> bool:
     return bool(tokenize(cleaned))
 
 
+def _failure_warning(detail: object) -> str:
+    """Say what generation failing actually costs, not just that it happened.
+
+    Measured on the live corpus: the verbatim query "outsourcing of customer support
+    functions" retrieves **zero** documents, because the lexical arm matches it as one
+    phrase. Generation is not an enhancement to the recall backbone for a question
+    phrased as a question — it is the backbone.
+    """
+    return (
+        f"term generation failed ({detail}); the lexical arm is limited to the verbatim "
+        "query, which for a sentence-shaped query can retrieve almost nothing"
+    )
+
+
 def build_term_set(
     query: str,
     alternate_queries: list[str] | None = None,
@@ -112,14 +142,14 @@ def build_term_set(
     try:
         response = llm.complete_json(
             _SYSTEM_PROMPT,
-            f"Topic: {query}\n\nReturn the search terms as JSON.",
+            f'Topic: {query}\n\nReturn JSON of the form {{"terms": ["...", "..."]}}.',
             json_schema=_SCHEMA,
         )
-        raw_terms = response.get("terms") or []
-        if not isinstance(raw_terms, list):
-            raise ValueError("`terms` was not a list")
+        raw_terms = field_of_type(response, "terms", list)
+        if raw_terms is None:
+            raise ValueError(f"response contained no list of terms: {sorted(response)}")
     except Exception as exc:  # noqa: BLE001 - degrade explicitly, never silently
-        warnings.append(f"term generation failed, using verbatim query only: {exc}")
+        warnings.append(_failure_warning(exc))
         return term_set, warnings
 
     existing = {t.lower() for t in term_set.all_terms}
@@ -137,7 +167,7 @@ def build_term_set(
 
     term_set.generated = generated
     if not generated:
-        warnings.append("term generation returned no usable terms")
+        warnings.append(_failure_warning("no usable terms returned"))
     return term_set, warnings
 
 

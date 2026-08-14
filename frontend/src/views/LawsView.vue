@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import StateBlock from '@/components/StateBlock.vue'
 import { useResizablePane } from '@/lib/useResizablePane'
@@ -70,36 +70,246 @@ function byAuthority(a: string, b: string): number {
   return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi)
 }
 
-/** Every group the tree can show, before the type filter narrows it. */
-const allGroups = computed(() => {
-  const buckets = new Map<string, LawSummary[]>()
-  for (const doc of documents.value) {
-    if (doc.parent_id) continue
-    const key = doc.doc_type || 'other'
-    const bucket = buckets.get(key) || []
-    bucket.push(doc)
-    buckets.set(key, bucket)
-  }
-  return [...buckets.entries()]
-    .sort((a, b) => byAuthority(a[0], b[0]))
-    .map(([doc_type, items]) => ({
-      doc_type,
-      items: items.sort((a, b) => a.display_title.localeCompare(b.display_title)),
-    }))
-})
+/**
+ * Topic series — authored here, because nothing in the data supports them.
+ *
+ * SBP lists its rulebook flat, and every candidate grouping key is empty or useless:
+ * `page_slug` is null for 68 of the 75 top-level documents (only containers have one),
+ * every `source_url` is the same `/assets/documents/laws_regulations/` directory, and
+ * `tags`/`summary` have never been generated. So the relationship has to be stated.
+ *
+ * It is stated by hand rather than inferred, because inference fails on exactly the
+ * cases that matter. A shared-title-prefix rule finds "Prudential Regulations for …"
+ * but misses both of its FAQs — SBP named them backwards ("FAQs - Prudential
+ * Regulations for SME Financing") — and finds the two "AML/CFT/CPF Regulations - …"
+ * satellites while missing their head document, which is titled "Anti-Money
+ * Laundering, Combating the Financing of Terrorism & …". A keyword rule does worse:
+ * 15 of 75 titles match two topics and 15 match none.
+ *
+ * Keyed on `display_title`, not `title`, so a document does not silently fall out of
+ * its series when SBP bumps a version suffix — the suffix is already split off
+ * server-side. Order within a series is authored, not alphabetical: the head document
+ * leads and each FAQ follows the regulation it answers for. A title that is not listed
+ * here simply renders as its own row, so a document SBP adds later is never hidden.
+ */
+interface LawSeries {
+  key: string
+  label: string
+  titles: string[]
+}
 
-const groups = computed(() =>
-  typeFilter.value ? allGroups.value.filter((g) => g.doc_type === typeFilter.value) : allGroups.value,
-)
+const SERIES: LawSeries[] = [
+  {
+    key: 'prudential',
+    label: 'Prudential Regulations',
+    titles: [
+      'Prudential Regulations for Corporate/Commercial Banking',
+      'Prudential Regulations for Corporate/Commercial Banking FAQs',
+      'Prudential Regulations for Consumer Financing',
+      'Prudential Regulations for Microfinance Banks',
+      'Prudential Regulations for SME Financing',
+      'FAQs - Prudential Regulations for SME Financing',
+      'Prudential Regulations for Housing Finance',
+      'FAQs-Housing Finance Prudential Regulations',
+      'Prudential Regulations for Agriculture Financing',
+      'Prudential Regulations for Infrastructure Project Finance (IPF)',
+    ],
+  },
+  {
+    key: 'aml',
+    label: 'AML / CFT / CPF',
+    titles: [
+      'Anti-Money Laundering, Combating the Financing of Terrorism & Countering Proliferation Financing (AML/CFT/CPF) Regulations',
+      'AML/CFT/CPF Regulations - Guidelines on Targeted Financial Sanctions (TFS) under UNSC Resolutions',
+      'AML/CFT/CPF Regulations - Frequently Asked Questions (FAQs) on Targeted Financial Sanctions (TFS) Obligations',
+      'Guidelines on Risk based Approach for banks/DFIs/MFBs',
+    ],
+  },
+  {
+    key: 'credit-bureaus',
+    label: 'Credit bureaus',
+    titles: [
+      'Credit Bureau Act 2015',
+      'Credit Bureaus Amendment Act 2016',
+      'Credit Bureau Rules, 2016',
+      'Credit Bureau Regulations, 2016',
+      'Credit Bureaus Licensing Criteria',
+      'Order: Minimum paid up Capital for Credit Bureaus',
+    ],
+  },
+  {
+    key: 'sbp',
+    label: 'State Bank of Pakistan',
+    titles: [
+      'State Bank of Pakistan Act, 1956',
+      'State Bank of Pakistan (Banking Services Corporation) Ordinance, 2001',
+      'Regulations for Lender of Last Resort (LOLR) Facility under Section 17G of the State Bank of Pakistan Act, 1956',
+    ],
+  },
+  {
+    key: 'foreign-exchange',
+    label: 'Foreign exchange',
+    titles: [
+      'Foreign Exchange Regulation Act, 1947',
+      'Foreign Exchange Manual',
+      'Regulatory Framework for Exchange Companies',
+    ],
+  },
+  {
+    key: 'coinage',
+    label: 'Currency & coinage',
+    titles: ['Pakistan Coinage Act, 1906', 'Pakistan Coinage (Amendment) Act, 2013'],
+  },
+  {
+    key: 'microfinance',
+    label: 'Microfinance',
+    titles: [
+      'Microfinance Institutions Ordinance, 2001',
+      'Licensing Requirements and Guidelines for Setting Up Microfinance Banks',
+      'Guidelines for Commercial Banks to undertake Microfinance Business',
+      'Guidelines for Mobile Banking Operations of Microfinance Banks/Institutions',
+    ],
+  },
+  {
+    key: 'islamic',
+    label: 'Islamic banking',
+    titles: [
+      'Instructions & Guidelines for Shariah compliance',
+      'Guidelines and Criteria for Establishing Islamic Banking Institutions (IBIs) and Commencement of Shariah Compliant Business and Operations by Development Finance Institutions (DFIs)',
+      'Guidelines for Conversion of a Conventional Bank into an Islamic Bank',
+      'Criteria for Conversion of Conventional Banking Branches Into Islamic Banking Branches',
+      'Revised Instructions on Islamic Banking Windows (IBWs) Operations',
+      'Risk Management Guidelines for Islamic Banking Institutions',
+      'Guidelines for Islamic Microfinance Business',
+      'Guidelines for Islamic Microfinance Business by Financial Institutions',
+      'Guidelines on Islamic Financing for Agriculture',
+    ],
+  },
+  {
+    key: 'payments',
+    label: 'Payments, cards & ATMs',
+    titles: [
+      'Payment Systems and Electronic Fund Transfer Act, 2007',
+      'Electronic Transactions Ordinance, 2002',
+      'PSD Guidelines for Standardisation of ATM Operations',
+      'Draft White Label ATM Guidelines for feedback',
+      'PSD Guidelines for Account Holders using Credit/Debit/Smart Cards (URDU)',
+      'Frequently Asked Questions (FAQs) on use of Biometric Technology',
+      'Digital Financial Services (DFS) - Innovation Challenge Facility',
+      'Revised Guidelines- Digital Financial Services (DFS) Innovation Challenge Facility (ICF)',
+    ],
+  },
+  {
+    key: 'reporting',
+    label: 'Statistical reporting',
+    titles: [
+      'Reporting Guidelines',
+      'Reporting Guides - Monetary and Financial Statistics',
+      'Foreign Exchange Returns-Coding system guide',
+      'Guidelines for Foreign Investment Survey (FIS)',
+      'Guidelines for Coordinated Portfolio Investment Survey (CPIS)',
+      'Data Revision Policy',
+    ],
+  },
+  {
+    key: 'agriculture',
+    label: 'Agriculture financing',
+    titles: [
+      'Guidelines on Horticulture Financing',
+      'Guidelines for Poultry Financing',
+      'ACD - Guidelines Fisheries',
+    ],
+  },
+  {
+    key: 'investor',
+    label: "Investor's guidelines",
+    titles: [
+      "Investor's Guidelines for Market Treasury Bills",
+      "Investor's Guidelines for Pakistan Investment Bonds",
+      "Investor's Guidelines for GOP Ijara Sukuk",
+    ],
+  },
+  {
+    key: 'licensing',
+    label: 'Licensing & establishment',
+    titles: [
+      'Branch Licensing Policy',
+      'Guidelines and Criteria for Setting Up a Commercial Bank',
+      'Policy for Opening of Overseas Offices & Establishment of a Subsidiary Banking Company Outside Pakistan',
+    ],
+  },
+]
+
+const SERIES_BY_TITLE = new Map<string, { series: LawSeries; rank: number }>()
+for (const series of SERIES) {
+  series.titles.forEach((title, rank) => SERIES_BY_TITLE.set(title, { series, rank }))
+}
+
+/** Expansion keys are shared between series and containers; namespace them apart. */
+function seriesKey(key: string): string {
+  return `series:${key}`
+}
+
+/**
+ * A series row and a standalone document row are both "one named thing you can open",
+ * so they sort together alphabetically rather than living in separate blocks. That is
+ * the same shape containers already had — an expandable row among plain ones.
+ */
+type TreeEntry =
+  | { kind: 'series'; key: string; label: string; items: LawSummary[] }
+  | { kind: 'doc'; key: string; label: string; doc: LawSummary }
+
+const treeEntries = computed<TreeEntry[]>(() => {
+  const tops = documents.value.filter(
+    (doc) => !doc.parent_id && (!typeFilter.value || doc.doc_type === typeFilter.value),
+  )
+  const bySeries = new Map<string, LawSummary[]>()
+  const entries: TreeEntry[] = []
+
+  for (const doc of tops) {
+    const found = SERIES_BY_TITLE.get(doc.display_title)
+    if (!found) {
+      entries.push({ kind: 'doc', key: doc.id, label: doc.display_title, doc })
+      continue
+    }
+    const bucket = bySeries.get(found.series.key) || []
+    bucket.push(doc)
+    bySeries.set(found.series.key, bucket)
+  }
+
+  for (const series of SERIES) {
+    const items = bySeries.get(series.key)
+    if (!items?.length) continue
+    items.sort(
+      (a, b) =>
+        (SERIES_BY_TITLE.get(a.display_title)?.rank ?? 0) -
+        (SERIES_BY_TITLE.get(b.display_title)?.rank ?? 0),
+    )
+    // A series of one is not a series — under a type filter most of them shrink to
+    // that, and a folder holding a single row is pure friction.
+    if (items.length === 1) {
+      entries.push({ kind: 'doc', key: items[0].id, label: items[0].display_title, doc: items[0] })
+      continue
+    }
+    entries.push({ kind: 'series', key: series.key, label: series.label, items })
+  }
+
+  return entries.sort((a, b) => a.label.localeCompare(b.label))
+})
 
 /**
  * Filter chips. `/api/laws/types` decides which types exist — so a type we have not
- * hardcoded still gets a chip — but the count shown is the number of *rows the tree
- * will render*, i.e. top-level only. The API's own count spans the whole corpus and
+ * hardcoded still gets a chip — but the count shown is the number of *documents the
+ * tree holds*, i.e. top-level only. The API's own count spans the whole corpus and
  * would contradict what the user is looking at; it goes in the tooltip instead.
  */
 const facets = computed(() => {
-  const topLevel = new Map(allGroups.value.map((g) => [g.doc_type, g.items.length]))
+  const topLevel = new Map<string, number>()
+  for (const doc of documents.value) {
+    if (doc.parent_id) continue
+    const key = doc.doc_type || 'other'
+    topLevel.set(key, (topLevel.get(key) || 0) + 1)
+  }
   const known = corpusTypes.value.map((t) => t.doc_type)
   const names = [...new Set([...known, ...topLevel.keys()])].sort(byAuthority)
   return names
@@ -112,7 +322,20 @@ const facets = computed(() => {
 })
 
 const topLevelTotal = computed(() => facets.value.reduce((sum, f) => sum + f.count, 0))
-const visibleTotal = computed(() => groups.value.reduce((sum, g) => sum + g.items.length, 0))
+
+const visibleTotal = computed(() =>
+  treeEntries.value.reduce((sum, entry) => sum + (entry.kind === 'series' ? entry.items.length : 1), 0),
+)
+
+/**
+ * The type mix of a series, in authority order — the signal the type headers used to
+ * carry. Silent under an active filter, where every member is that type by definition.
+ */
+function seriesTypes(items: LawSummary[]): string {
+  if (typeFilter.value) return ''
+  const names = [...new Set(items.map((item) => item.doc_type || 'other'))].sort(byAuthority)
+  return names.map(typeLabel).join(', ')
+}
 
 /**
  * How much of each collection we actually hold. "26 parts" is SBP's claim; `held` is
@@ -135,6 +358,28 @@ const currentVersion = computed(() => detail.value?.current_version || null)
 const partsHeld = computed(
   () => detail.value?.children.filter((child) => child.has_content).length || 0,
 )
+
+/**
+ * The rest of the series the open document belongs to.
+ *
+ * This is the half of grouping the tree cannot deliver: reading the SME Financing
+ * regulations, its own FAQ document is thirty rows away under "F", and nothing on
+ * the page says it exists. A part resolves through its container, so a chapter of
+ * the Foreign Exchange Manual offers the FE Regulation Act rather than its own
+ * sibling chapters — those are already one click away in the tree.
+ */
+const seriesSiblings = computed(() => {
+  const doc = detail.value
+  if (!doc) return null
+  const anchorTitle = doc.parent?.display_title || doc.display_title
+  const anchorId = doc.parent?.id || doc.id
+  const found = SERIES_BY_TITLE.get(anchorTitle)
+  if (!found) return null
+  const items = found.series.titles
+    .map((title) => documents.value.find((item) => item.display_title === title))
+    .filter((item): item is LawSummary => !!item && item.id !== anchorId)
+  return items.length ? { label: found.series.label, items } : null
+})
 
 const fileUrl = computed(() => {
   const doc = detail.value
@@ -272,14 +517,19 @@ function openGroup(group: MatchGroup) {
   if (doc) select(doc)
 }
 
-/** The one muted line under a row: what we hold, and which edition of it. */
+/**
+ * The one muted line under a row: what kind of document it is, what we hold, and
+ * which edition of it. The type leads because the tree no longer groups by type —
+ * without it a row gives no clue whether it is an Act or a guidance note.
+ */
 function subLine(doc: LawSummary): string {
+  // Under an active type filter every row would repeat the filter back at you.
+  const type = doc.doc_type === typeFilter.value ? '' : typeLabel(doc.doc_type)
   const held = holdingsById.value.get(doc.id)
   if (held) {
     const count = `${held.parts} part${held.parts === 1 ? '' : 's'}`
-    if (!held.held) return `${count} · none held`
-    if (held.held === held.parts) return `${count} · all held`
-    return `${count} · ${held.held} held`
+    const holding = !held.held ? 'none held' : held.held === held.parts ? 'all held' : `${held.held} held`
+    return [type, count, holding].filter(Boolean).join(' · ')
   }
   const edition = doc.current_version?.version_label || doc.version_suffix || ''
   const state = doc.is_external
@@ -289,20 +539,38 @@ function subLine(doc: LawSummary): string {
       : !doc.current_version
         ? 'no file held'
         : ''
-  return [state, edition].filter(Boolean).join(' · ') || 'in force'
+  // Only when there is nothing else to say — with a type in front of it, "in force"
+  // on every row is noise rather than information.
+  return [type, state, edition].filter(Boolean).join(' · ') || 'in force'
+}
+
+function toggleKey(key: string) {
+  const next = new Set(expanded.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  expanded.value = next
 }
 
 function toggle(doc: LawSummary) {
-  const next = new Set(expanded.value)
-  if (next.has(doc.id)) next.delete(doc.id)
-  else next.add(doc.id)
-  expanded.value = next
+  toggleKey(doc.id)
 }
 
 function select(doc: LawSummary) {
   if (isContainer(doc)) toggle(doc)
   if (doc.id === selectedId.value) return
   void router.push(`/laws/${encodeURIComponent(doc.id)}`)
+}
+
+/**
+ * Scroll the selected row into the rail. Opening `/laws/{id}` directly used to leave
+ * the rail at the top with the selection several screens below the fold — the tree
+ * expanded correctly, you just could not see it. `nearest` makes this a no-op when
+ * the row is already visible, so clicking around the tree does not jump the view.
+ */
+async function revealSelected() {
+  await nextTick()
+  const row = document.querySelector('.library-tree .node.is-selected')
+  row?.scrollIntoView({ block: 'nearest' })
 }
 
 async function loadCorpus() {
@@ -316,6 +584,9 @@ async function loadCorpus() {
       if (collected.length >= response.total || response.items.length === 0) break
     }
     documents.value = collected
+    // A deep link resolves its detail before the tree has any rows to scroll to,
+    // so the reveal has to be re-tried once the corpus is actually rendered.
+    if (selectedId.value) void revealSelected()
   } catch (error) {
     listError.value = (error as Error).message || 'Could not load the corpus'
   } finally {
@@ -335,12 +606,15 @@ async function loadDetail(id: string) {
     detail.value = await getLawDetail(id)
     // Keep a part's container open so the reader is never shown without its context,
     // and open a container reached by deep link so its parts are there to pick from.
+    const next = new Set(expanded.value)
     const toOpen = detail.value.parent?.id || (detail.value.children.length ? detail.value.id : '')
-    if (toOpen) {
-      const next = new Set(expanded.value)
-      next.add(toOpen)
-      expanded.value = next
-    }
+    if (toOpen) next.add(toOpen)
+    // …and the series it sits in, or a deep link lands on a row inside a shut folder.
+    const anchorTitle = detail.value.parent?.display_title || detail.value.display_title
+    const found = SERIES_BY_TITLE.get(anchorTitle)
+    if (found) next.add(seriesKey(found.series.key))
+    expanded.value = next
+    void revealSelected()
   } catch (error) {
     detail.value = null
     detailError.value = (error as Error).message || 'Could not load this document'
@@ -517,39 +791,123 @@ onMounted(() => {
         </template>
       </div>
 
+      <!--
+        Series folders and standalone documents, interleaved alphabetically. SBP lists
+        the corpus flat; the series map in the script is ours, so "Prudential
+        Regulations" reads as one entry instead of ten rows scattered under P and F.
+      -->
       <div v-else class="library-tree">
-        <template v-for="group in groups" :key="group.doc_type">
-          <p class="sbp-eyebrow group-label">{{ typeLabel(group.doc_type) }} · {{ group.items.length }}</p>
-          <template v-for="doc in group.items" :key="doc.id">
+        <template v-for="entry in treeEntries" :key="entry.key">
+          <template v-if="entry.kind === 'series'">
+            <button
+              type="button"
+              class="sbp-row node is-series"
+              :aria-expanded="expanded.has(seriesKey(entry.key))"
+              @click="toggleKey(seriesKey(entry.key))"
+            >
+              <span class="node-caret">
+                <i
+                  class="pi"
+                  :class="expanded.has(seriesKey(entry.key)) ? 'pi-chevron-down' : 'pi-chevron-right'"
+                />
+              </span>
+              <span class="node-body">
+                <span class="sbp-row-title">{{ entry.label }}</span>
+                <span class="sbp-row-sub">
+                  {{ [`${entry.items.length} documents`, seriesTypes(entry.items)].filter(Boolean).join(' · ') }}
+                </span>
+              </span>
+            </button>
+
+            <div v-if="expanded.has(seriesKey(entry.key))" class="node-children">
+              <template v-for="doc in entry.items" :key="doc.id">
+                <button
+                  type="button"
+                  class="sbp-row node"
+                  :class="{ 'is-selected': doc.id === selectedId }"
+                  :aria-expanded="isContainer(doc) ? expanded.has(doc.id) : undefined"
+                  @click="select(doc)"
+                >
+                  <span class="node-caret">
+                    <i
+                      v-if="isContainer(doc)"
+                      class="pi"
+                      :class="expanded.has(doc.id) ? 'pi-chevron-down' : 'pi-chevron-right'"
+                    />
+                  </span>
+                  <span class="node-body">
+                    <span class="sbp-row-title">{{ doc.display_title }}</span>
+                    <span class="sbp-row-sub">{{ subLine(doc) }}</span>
+                    <span
+                      v-if="holdingsById.get(doc.id) && holdingsById.get(doc.id)!.held < holdingsById.get(doc.id)!.parts"
+                      class="node-meter"
+                      aria-hidden="true"
+                    >
+                      <span
+                        class="node-meter-fill"
+                        :style="{ width: `${(holdingsById.get(doc.id)!.held / holdingsById.get(doc.id)!.parts) * 100}%` }"
+                      />
+                    </span>
+                  </span>
+                </button>
+
+                <div v-if="isContainer(doc) && expanded.has(doc.id)" class="node-children">
+                  <button
+                    v-for="child in childrenByParent.get(doc.id)"
+                    :key="child.id"
+                    type="button"
+                    class="sbp-row node is-child"
+                    :class="{ 'is-selected': child.id === selectedId }"
+                    @click="select(child)"
+                  >
+                    <span class="node-body">
+                      <span class="sbp-row-title">
+                        <span v-if="partLabelOf(child)" class="node-part">{{ partLabelOf(child) }}</span>
+                        {{ child.display_title }}
+                      </span>
+                      <span v-if="!child.current_version?.has_file" class="sbp-row-sub">not held</span>
+                    </span>
+                  </button>
+                </div>
+              </template>
+            </div>
+          </template>
+
+          <template v-else>
             <button
               type="button"
               class="sbp-row node"
-              :class="{ 'is-selected': doc.id === selectedId }"
-              @click="select(doc)"
+              :class="{ 'is-selected': entry.doc.id === selectedId }"
+              :aria-expanded="isContainer(entry.doc) ? expanded.has(entry.doc.id) : undefined"
+              @click="select(entry.doc)"
             >
               <span class="node-caret">
-                <i v-if="isContainer(doc)" class="pi" :class="expanded.has(doc.id) ? 'pi-chevron-down' : 'pi-chevron-right'" />
+                <i
+                  v-if="isContainer(entry.doc)"
+                  class="pi"
+                  :class="expanded.has(entry.doc.id) ? 'pi-chevron-down' : 'pi-chevron-right'"
+                />
               </span>
               <span class="node-body">
-                <span class="sbp-row-title">{{ doc.display_title }}</span>
-                <span class="sbp-row-sub">{{ subLine(doc) }}</span>
+                <span class="sbp-row-title">{{ entry.doc.display_title }}</span>
+                <span class="sbp-row-sub">{{ subLine(entry.doc) }}</span>
                 <!-- Only where the collection is incomplete: a full bar says nothing. -->
                 <span
-                  v-if="holdingsById.get(doc.id) && holdingsById.get(doc.id)!.held < holdingsById.get(doc.id)!.parts"
+                  v-if="holdingsById.get(entry.doc.id) && holdingsById.get(entry.doc.id)!.held < holdingsById.get(entry.doc.id)!.parts"
                   class="node-meter"
                   aria-hidden="true"
                 >
                   <span
                     class="node-meter-fill"
-                    :style="{ width: `${(holdingsById.get(doc.id)!.held / holdingsById.get(doc.id)!.parts) * 100}%` }"
+                    :style="{ width: `${(holdingsById.get(entry.doc.id)!.held / holdingsById.get(entry.doc.id)!.parts) * 100}%` }"
                   />
                 </span>
               </span>
             </button>
 
-            <div v-if="isContainer(doc) && expanded.has(doc.id)" class="node-children">
+            <div v-if="isContainer(entry.doc) && expanded.has(entry.doc.id)" class="node-children">
               <button
-                v-for="child in childrenByParent.get(doc.id)"
+                v-for="child in childrenByParent.get(entry.doc.id)"
                 :key="child.id"
                 type="button"
                 class="sbp-row node is-child"
@@ -662,6 +1020,10 @@ onMounted(() => {
             <span v-if="currentVersion">Held since {{ formatDate(currentVersion.first_seen_at) }}</span>
             <span v-else>Nothing archived</span>
             <span class="provenance-spacer" />
+            <!-- Named, not just counted: "3 more in AML / CFT / CPF" is the reason to open this. -->
+            <span v-if="seriesSiblings">
+              {{ seriesSiblings.items.length }} more in {{ seriesSiblings.label }}
+            </span>
             <span>Cited by {{ detail.linked_circulars.length }} circular{{ detail.linked_circulars.length === 1 ? '' : 's' }}</span>
             <i class="pi" :class="provenanceOpen ? 'pi-chevron-down' : 'pi-chevron-up'" />
           </button>
@@ -670,6 +1032,16 @@ onMounted(() => {
             <div>
               <h3>Custody</h3>
               <p>{{ custodyLine || 'No file has been archived for this document.' }}</p>
+            </div>
+            <div v-if="seriesSiblings">
+              <h3>{{ seriesSiblings.label }}</h3>
+              <ul>
+                <li v-for="sibling in seriesSiblings.items" :key="sibling.id">
+                  <RouterLink :to="`/laws/${encodeURIComponent(sibling.id)}`">
+                    {{ sibling.display_title }}
+                  </RouterLink>
+                </li>
+              </ul>
             </div>
             <div>
               <h3>Cited by</h3>
@@ -689,8 +1061,10 @@ onMounted(() => {
       <div v-else class="reader-overview">
         <h1>SBP's rulebook, as we hold it</h1>
         <p>
-          {{ documents.length }} documents captured from sbp.org.pk. SBP replaces these files in place and
-          keeps no history; from the day we started watching, we do. Pick anything on the left to open it.
+          {{ topLevelTotal }} documents captured from sbp.org.pk, plus
+          {{ documents.length - topLevelTotal }} chapters and appendices inside them. SBP replaces
+          these files in place and keeps no history; from the day we started watching, we do.
+          Pick anything on the left to open it.
         </p>
       </div>
     </section>
@@ -728,15 +1102,21 @@ onMounted(() => {
   gap: 1px;
 }
 
-.group-label {
-  margin: 0.75rem 0.35rem 0.3rem;
-}
-
 /* A tree row is a .sbp-row with a caret gutter. */
 .node {
   grid-template-columns: 0.85rem 1fr;
   gap: 0.4rem;
   align-items: start;
+}
+
+/* A series is a folder, not a document — it has no reader to open, so it must not
+   look selectable. Weight separates it from the rows nested under it. */
+.node.is-series .sbp-row-title {
+  font-weight: 600;
+}
+
+.node.is-series {
+  margin-top: 0.15rem;
 }
 
 /* Rows with no caret slot: without this they land in the 0.85rem caret column. */
@@ -905,9 +1285,11 @@ onMounted(() => {
   flex: 1;
 }
 
+/* Two sections normally, three when the document sits in a series — auto-fit rather
+   than a fixed 1fr 1fr so the third does not squeeze the other two into columns. */
 .provenance-open {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
   gap: 1.6rem;
   padding: 0 1.2rem 1rem;
 }

@@ -93,14 +93,27 @@ const SBPEyePreset = definePreset(Aura, {
       },
     },
   },
+  /*
+   * Component tokens live under a section — `root` for a component's own tokens,
+   * or a named section like toast's `summary`. Writing them flat (`button:
+   * { borderRadius }`) type-errors, and at runtime it is worse than useless: the
+   * merge adds a *sibling* of `button.root.borderRadius` rather than overriding it,
+   * both flatten to the same `--p-button-border-radius`, and Aura's default is
+   * emitted last, so it wins. Tags were rendering at Aura's 8px rather than the
+   * pill both this file and styles.css asked for.
+   */
   components: {
     button: {
-      borderRadius: 'var(--sbp-radius)',
-      sm: { fontSize: 'var(--sbp-fs-sm)' },
+      root: {
+        borderRadius: 'var(--sbp-radius)',
+        sm: { fontSize: 'var(--sbp-fs-sm)' },
+      },
     },
     tag: {
-      borderRadius: 'var(--sbp-radius-pill)',
-      fontSize: 'var(--sbp-fs-eyebrow)',
+      root: {
+        borderRadius: 'var(--sbp-radius-pill)',
+        fontSize: 'var(--sbp-fs-eyebrow)',
+      },
     },
     toast: {
       summary: { fontSize: 'var(--sbp-fs-body)' },

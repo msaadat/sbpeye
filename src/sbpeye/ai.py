@@ -87,6 +87,14 @@ TOOL_LABELS = {
 }
 
 
+# An inventory answer is a list, so per-row cost decides how complete it can be. 240
+# characters is enough passage to reject a false match (the measured worst case is a
+# street address matching "Centre") without spending the window on prose.
+_INVENTORY_PASSAGE_CHARS = 240
+# Only a backstop against a pathological corpus; the context budget is the real bound.
+_INVENTORY_MAX_ROWS = 1000
+
+
 def _inventory_locator(evidence) -> str:
     """Human-readable pointer into the source, per plan section 8.2.
 
@@ -231,7 +239,7 @@ TOOLS = [
                     "department": {"type": "string", "description": "Optional department filter, e.g. 'BPRD'"},
                     "start_year": {"type": "integer", "description": "Optional earliest circular year"},
                     "end_year": {"type": "integer", "description": "Optional latest circular year"},
-                    "limit": {"type": "integer", "description": "Max documents to return (1-30)", "default": 15}
+                    "limit": {"type": "integer", "description": "Optional. Omit to receive every matching document that fits the context budget, which is what an inventory question needs. Set it only to deliberately sample."}
                 },
                 "required": ["query"]
             }
@@ -2667,7 +2675,12 @@ SOURCE BLOCK:
 
         source = str(arguments.get("sources", "all")).strip().lower()
         sources = ["circulars", "laws"] if source not in ("circulars", "laws") else [source]
-        limit = max(1, min(int(arguments.get("limit", 15)), 30))
+        # No arbitrary row cap: a fixed ceiling turns "every document that mentions X"
+        # into "some documents that mention X", which is the one thing this feature
+        # exists not to do. What genuinely bounds the answer is the context window, so
+        # that is what bounds it — measured and disclosed below, never silently.
+        requested = arguments.get("limit")
+        limit = max(1, int(requested)) if requested is not None else _INVENTORY_MAX_ROWS
 
         department = str(arguments.get("department", "")).strip()
         start_year = arguments.get("start_year")
@@ -2693,6 +2706,7 @@ SOURCE BLOCK:
             max_results=limit,
             evidence_per_result=1,
         )
+        request.max_candidates = max(request.max_candidates, _INVENTORY_MAX_ROWS)
 
         try:
             response = InventorySearchService(
@@ -2702,13 +2716,19 @@ SOURCE BLOCK:
         except InventoryError as exc:
             return json.dumps({"error": f"[{exc.code}] {exc}"})
 
+        # Roughly four characters per token, matching `_estimate_tokens` elsewhere. A
+        # quarter of the window is the same share `search_selected_documents` takes.
+        budget = max(1, self.config.max_context_tokens // 4) * 4
+        spent = 0
+        omitted_for_size = 0
+
         results = []
         for result in response.results:
             evidence = result.evidence[0] if result.evidence else None
             item = {
                 "title": result.title,
                 "matched_terms": result.matched_terms[:6],
-                "passage": (evidence.passage[:400] if evidence else ""),
+                "passage": (evidence.passage[:_INVENTORY_PASSAGE_CHARS] if evidence else ""),
                 "locator": _inventory_locator(evidence),
             }
             if result.result_kind == "circular":
@@ -2720,13 +2740,28 @@ SOURCE BLOCK:
                 # so a law gets none rather than one that renders as dead text.
                 if row is not None:
                     item["citation"] = f"[[circular:{row.id}|{row.display_name}]]"
+                # The passage text opens with the chunk's "{filename}. Page N. " prefix,
+                # so withholding the attachment token shows the model a filename it is
+                # asked to cite and gives it nothing to cite with. Measured: it invented
+                # `[[attachment:C2-AML-CFT-Regulations.pdf|...]]` from exactly that gap.
+                if evidence is not None and evidence.source_kind == "attachment":
+                    item["attachment_citation"] = (
+                        f"[[attachment:{evidence.source_id}|{evidence.source_label}]]"
+                    )
             else:
                 item["law_type"] = result.law_type
                 item["parent_title"] = result.parent_title
+
+            cost = len(json.dumps(item, ensure_ascii=False))
+            if results and spent + cost > budget:
+                omitted_for_size += 1
+                continue
+            spent += cost
             results.append(item)
 
         coverage = response.coverage
-        return json.dumps({
+        dropped = response.results_truncated + omitted_for_size
+        payload = {
             "reviewed": False,
             "note": (
                 "Unreviewed candidates: each document contains a search term, but "
@@ -2736,9 +2771,19 @@ SOURCE BLOCK:
             "search_terms": response.retrieval_policy.term_set,
             "documents_matched": coverage.candidates_union,
             "documents_returned": len(results),
-            "truncated": bool(response.results_truncated),
+            "complete": not dropped,
             "results": results,
-        })
+        }
+        if dropped:
+            # Say it in the payload, not just as a flag: the model has to pass this on
+            # or it will present a partial list as an exhaustive one.
+            payload["omitted"] = dropped
+            payload["note"] += (
+                f" This list is INCOMPLETE: {dropped} further matching document(s) "
+                "were not included. Tell the user the list was cut short and how many "
+                "were left out."
+            )
+        return json.dumps(payload)
 
     def _chat_system_prompt(self, circulars_context: str | None = None) -> str:
         if circulars_context:

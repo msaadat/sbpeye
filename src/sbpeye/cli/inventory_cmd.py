@@ -149,15 +149,22 @@ def _repair(db, report) -> tuple[int, int]:
 @click.option("--max-results", type=int, default=500, show_default=True)
 @click.option("--no-llm", is_flag=True,
               help="Disable term generation, HyDE, adjudication, and extraction")
-@click.option("--format", "output_format", type=click.Choice(["text", "json"]),
-              default="text")
+@click.option("--format", "output_format",
+              type=click.Choice(["text", "json", "xlsx"]), default="text")
+@click.option("--out", "out_path", type=click.Path(dir_okay=False),
+              help="Destination file for --format xlsx")
 @click.option("--strict", is_flag=True, help="Fail if index coverage is incomplete")
 def inventory_search(query, source, band, max_candidates, max_results, no_llm,
-                     output_format, strict):
+                     output_format, out_path, strict):
     """Find every regulatory document that discusses QUERY."""
     from sbpeye.database import collection, embedding_backend, embedding_config
     from sbpeye.inventory.schemas import InventoryError, InventorySearchRequest
     from sbpeye.inventory.service import InventorySearchService
+
+    if output_format == "xlsx" and not out_path:
+        raise click.UsageError("--format xlsx requires --out FILE")
+    if out_path and output_format != "xlsx":
+        raise click.UsageError("--out is only meaningful with --format xlsx")
 
     sources = ["circulars", "laws"] if source == "all" else [source]
     request = InventorySearchRequest(
@@ -197,7 +204,33 @@ def inventory_search(query, source, band, max_candidates, max_results, no_llm,
     if output_format == "json":
         click.echo(json.dumps(response.to_dict(), indent=2, ensure_ascii=False))
         return
+    if output_format == "xlsx":
+        _write_workbook(response, out_path)
+        return
     _render(response)
+
+
+def _write_workbook(response, out_path: str) -> None:
+    from pathlib import Path
+
+    from sbpeye.inventory_export import build_inventory_workbook
+
+    destination = Path(out_path)
+    destination.write_bytes(build_inventory_workbook(response).getvalue())
+
+    coverage = response.coverage
+    rows = sum(max(1, len(r.evidence)) for r in response.results)
+    click.echo(f"Wrote {destination} — {response.matched_documents} document(s), {rows} row(s)")
+    # Repeat the two numbers that decide whether the sheet can be read as an
+    # inventory. They are in the Coverage sheet, but someone runs this command and
+    # forwards the file without opening it.
+    if coverage.adjudicated_undetermined:
+        click.echo(
+            f"  [warn] {coverage.adjudicated_undetermined} candidate(s) were never "
+            "reviewed by the judge and are absent from the Inventory sheet"
+        )
+    if not coverage.is_complete:
+        click.echo("  [warn] coverage is incomplete — see the Coverage sheet")
 
 
 def _render(response) -> None:

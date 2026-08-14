@@ -36,6 +36,7 @@ from sbpeye.inventory.schemas import (
     InventorySearchRequest,
 )
 from sbpeye.inventory.service import InventorySearchService
+from sbpeye.inventory_export import INVENTORY_HEADERS
 from sbpeye.search import backfill_fts, backfill_laws_fts
 
 
@@ -741,6 +742,122 @@ def test_chat_inventory_tool_cites_circulars_but_not_laws(indexed, monkeypatch):
             assert "citation" not in result, "a law token would render as dead text"
 
 
+def _index_attachment(db, collection, att_id, circular_id, filename, text):
+    """Add an attachment and its chunks, then re-reconcile so it is not an orphan.
+
+    The `indexed` fixture covers circular bodies and laws only, so attachment rollup
+    had no coverage at all (plan section 0.4).
+    """
+    from sbpeye.checklist import prepare_index_chunks
+
+    db.add(Attachment(
+        id=att_id, circular_id=circular_id, filename=filename,
+        original_url=f"https://example.test/{att_id}", file_type="pdf",
+        content_text=text, extraction_status="success", is_vectorized=1,
+    ))
+    db.commit()
+
+    backend = FakeBackend()
+    chunks = prepare_index_chunks({
+        "doc_id": att_id, "doc_type": "attachment", "doc_label": filename,
+        "text": text, "file_type": "pdf",
+    })
+    collection.add(
+        documents=[c["text"] for c in chunks],
+        embeddings=backend.embed_documents([c["embed_text"] for c in chunks]),
+        ids=[f"{att_id}__chunk_{i}" for i in range(len(chunks))],
+        metadatas=[{
+            "circular_id": circular_id, "doc_type": "attachment",
+            "attachment_id": att_id, "filename": filename, "ref": c["ref"],
+            "source_start": c["source_start"], "source_end": c["source_end"],
+        } for c in chunks],
+    )
+    ledger.reconcile(db, collection, FakeConfig(), write=True)
+    SNAPSHOT_CACHE.clear()
+
+
+def test_chat_inventory_tool_cites_the_attachment_a_passage_came_from(
+    indexed, monkeypatch
+):
+    """Showing a filename without its token is what makes the model invent one.
+
+    Measured in a real chat: the passage text opens with "C2-AML-CFT-Regulations.pdf.
+    Page 3. …", and the model produced `[[attachment:C2-AML-CFT-Regulations.pdf|…]]`
+    — a citation built out of the only identifier it had been shown.
+    """
+    db, collection = indexed
+    # Hang it off the one circular whose own body says nothing about AML, so the
+    # attachment is the only evidence there is — which also exercises the rollup of
+    # attachment evidence onto its parent circular (acceptance criterion 6).
+    _index_attachment(
+        db, collection, "att-aml", "c-none", "AML-Annex.pdf",
+        "Page 1. Anti-money laundering duties of the audit function.",
+    )
+    _install_inventory_backends(monkeypatch, collection)
+
+    payload = json.loads(_offline_chat_client()._inventory_tool(
+        {"query": "anti-money laundering", "sources": "circulars"}, db
+    ))
+
+    rolled_up = [r for r in payload["results"] if r.get("reference", "").startswith("DMMD")]
+    assert rolled_up, "a circular found only through its attachment must still appear"
+    assert rolled_up[0]["attachment_citation"] == (
+        "[[attachment:att-aml|AML-Annex.pdf]]"
+    )
+    assert "AML-Annex.pdf" in rolled_up[0]["passage"]
+
+
+def test_chat_inventory_tool_returns_every_match_by_default(indexed, monkeypatch):
+    """No arbitrary row cap — a fixed ceiling makes an inventory tool return a sample."""
+    db, collection = indexed
+    _install_inventory_backends(monkeypatch, collection)
+
+    payload = json.loads(_offline_chat_client()._inventory_tool(
+        {"query": "anti-money laundering", "sources": "circulars"}, db
+    ))
+
+    assert payload["documents_returned"] == payload["documents_matched"]
+    assert payload["complete"] is True
+    assert "omitted" not in payload
+
+
+def test_chat_inventory_tool_says_so_in_words_when_it_cuts_the_list(
+    indexed, monkeypatch
+):
+    """A flag alone lets the model present a partial list as an exhaustive one."""
+    db, collection = indexed
+    _install_inventory_backends(monkeypatch, collection)
+
+    payload = json.loads(_offline_chat_client()._inventory_tool(
+        {"query": "anti-money laundering", "sources": "circulars", "limit": 1}, db
+    ))
+
+    assert payload["documents_returned"] == 1
+    assert payload["complete"] is False
+    assert payload["omitted"] >= 1
+    assert "INCOMPLETE" in payload["note"]
+
+
+def test_chat_inventory_tool_stops_at_the_context_budget(indexed, monkeypatch):
+    """When the window is the binding constraint, it binds — and is disclosed."""
+    from sbpeye.ai import AIConfig
+
+    db, collection = indexed
+    _install_inventory_backends(monkeypatch, collection)
+
+    client = _offline_chat_client()
+    client.config = AIConfig(max_context_tokens=1)
+    payload = json.loads(client._inventory_tool(
+        {"query": "anti-money laundering", "sources": "circulars"}, db
+    ))
+
+    # The first row always goes out, however tight the budget: an empty inventory
+    # would be indistinguishable from "nothing matched".
+    assert payload["documents_returned"] == 1
+    assert payload["complete"] is False
+    assert "INCOMPLETE" in payload["note"]
+
+
 def test_chat_inventory_tool_reports_errors_rather_than_raising(indexed, monkeypatch):
     db, collection = indexed
     _install_inventory_backends(monkeypatch, collection)
@@ -748,6 +865,111 @@ def test_chat_inventory_tool_reports_errors_rather_than_raising(indexed, monkeyp
     payload = json.loads(_offline_chat_client()._inventory_tool({"query": "  "}, db))
 
     assert "error" in payload
+
+
+# ------------------------------------------------------------- xlsx export
+
+
+def _workbook_for(response):
+    from openpyxl import load_workbook
+
+    from sbpeye.inventory_export import build_inventory_workbook
+
+    return load_workbook(build_inventory_workbook(response))
+
+
+def _sheet_rows(sheet):
+    return [[cell.value for cell in row] for row in sheet.iter_rows()]
+
+
+def test_workbook_has_a_row_per_evidence_item(indexed):
+    db, collection = indexed
+    request = InventorySearchRequest(
+        query="anti-money laundering", generate_terms=False, use_hyde=False,
+        extract_spans=False,
+    )
+    response = make_service(collection, llm=FakeLLM()).search(request, db)
+
+    book = _workbook_for(response)
+    rows = _sheet_rows(book["Inventory"])
+
+    assert rows[0] == INVENTORY_HEADERS
+    expected = sum(max(1, len(r.evidence)) for r in response.results)
+    assert len(rows) - 1 == expected
+    assert any("anti-money laundering" in (r[1] or "").lower() for r in rows[1:])
+
+
+def test_workbook_carries_the_provenance_a_claim_depends_on(indexed):
+    """Plan 1.2: a completeness claim is only permitted alongside these fields."""
+    db, collection = indexed
+    request = InventorySearchRequest(
+        query="anti-money laundering", generate_terms=False, use_hyde=False,
+        extract_spans=False,
+    )
+    response = make_service(collection, llm=FakeLLM()).search(request, db)
+
+    fields = {row[0] for row in _sheet_rows(_workbook_for(response)["Coverage"])}
+
+    for required in (
+        "Corpus Snapshot", "Resolved Term Set", "Embedding Fingerprint",
+        "Chunker Version", "Adjudicated Undetermined", "Coverage Complete",
+    ):
+        assert required in fields, f"{required} missing from the Coverage sheet"
+
+
+def test_workbook_keeps_rejected_documents_with_their_reasons(indexed):
+    """Section 7: exclusions are returned, never silently dropped."""
+    db, collection = indexed
+    request = InventorySearchRequest(
+        query="anti-money laundering", generate_terms=False, use_hyde=False,
+        extract_spans=False,
+    )
+    response = make_service(collection, llm=FakeLLM(verdicts=False)).search(request, db)
+
+    rows = _sheet_rows(_workbook_for(response)["Excluded"])
+
+    assert len(rows) - 1 == len(response.excluded) > 0
+    assert all(row[4] for row in rows[1:]), "every exclusion needs a reason"
+
+
+def test_workbook_locators_do_not_need_formula_escaping(indexed):
+    """A leading '@' would put a literal apostrophe in every offset cell."""
+    db, collection = indexed
+    request = InventorySearchRequest(
+        query="anti-money laundering", generate_terms=False, use_hyde=False,
+        extract_spans=False,
+    )
+    response = make_service(collection, llm=FakeLLM()).search(request, db)
+
+    locators = [row[12] for row in _sheet_rows(_workbook_for(response)["Inventory"])[1:]]
+
+    assert locators, "the fixture should produce located evidence"
+    assert not any((loc or "").startswith("'") for loc in locators)
+    assert any((loc or "").startswith("char ") for loc in locators)
+
+
+def test_workbook_neutralises_text_that_would_become_a_formula():
+    """Regulatory text routinely starts with '-' or '='; Excel would evaluate it."""
+    from sbpeye.checklist_export import _cell_value
+
+    assert _cell_value("=cmd|' /c calc'!A1").startswith("'")
+    assert _cell_value("-3% of paid-up capital").startswith("'")
+    assert _cell_value("Ordinary text") == "Ordinary text"
+
+
+def test_workbook_emits_a_row_even_when_a_result_has_no_evidence():
+    """A document with nothing attached must not silently vanish from the sheet."""
+    from sbpeye.inventory_export import _result_rows
+    from sbpeye.inventory.schemas import InventoryResult
+
+    rows = _result_rows(InventoryResult(
+        result_kind="circular", document_id="c-1", title="A Circular",
+        reference="BPRD 1 of 2020", matched_via=["lexical"], evidence=[],
+    ))
+
+    assert len(rows) == 1
+    assert rows[0][0] == "BPRD 1 of 2020"
+    assert len(rows[0]) == len(INVENTORY_HEADERS)
 
 
 def test_strict_coverage_refuses_an_incomplete_index(indexed):

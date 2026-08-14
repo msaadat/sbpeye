@@ -184,7 +184,7 @@ watch(visible, async (isOpen) => {
 
 :deep(.news-sidebar-header) {
   font-weight: 600;
-  font-size: 1.1rem;
+  font-size: var(--sbp-fs-title);
 }
 
 :deep(.news-sidebar-content) {
@@ -201,7 +201,7 @@ watch(visible, async (isOpen) => {
 }
 
 .news-section + .news-section {
-  border-top: 1px solid var(--p-content-border-color, #e5e7eb);
+  border-top: 1px solid var(--sbp-border);
   margin-top: 0;
 }
 
@@ -210,7 +210,7 @@ watch(visible, async (isOpen) => {
   align-items: center;
   gap: 0.5rem;
   margin: 0 0 0.75rem;
-  font-size: 0.95rem;
+  font-size: var(--sbp-fs-body);
   font-weight: 600;
 }
 
@@ -228,13 +228,13 @@ watch(visible, async (isOpen) => {
 }
 
 .news-item + .news-item {
-  border-top: 1px solid var(--p-content-border-color, #e5e7eb);
+  border-top: 1px solid var(--sbp-border);
 }
 
 .news-item-icon {
   margin-top: 0.2rem;
-  font-size: 0.75rem;
-  color: var(--p-text-muted-color, #6b7280);
+  font-size: var(--sbp-fs-meta);
+  color: var(--sbp-muted);
   flex-shrink: 0;
 }
 
@@ -244,7 +244,7 @@ watch(visible, async (isOpen) => {
   gap: 0.35rem;
   text-decoration: none;
   color: var(--p-text-color, #1f2937);
-  font-size: 0.875rem;
+  font-size: var(--sbp-fs-body);
   line-height: 1.4;
   cursor: pointer;
   flex: 1;
@@ -272,7 +272,7 @@ watch(visible, async (isOpen) => {
 
 .news-arrow {
   flex-shrink: 0;
-  font-size: 0.75rem;
+  font-size: var(--sbp-fs-meta);
   margin-top: 0.2rem;
 }
 </style>

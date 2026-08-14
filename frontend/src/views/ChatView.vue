@@ -6,11 +6,9 @@ import { useToast } from 'primevue/usetoast'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import Button from 'primevue/button'
-import Card from 'primevue/card'
 import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
 import ProgressSpinner from 'primevue/progressspinner'
-import Tag from 'primevue/tag'
 import Textarea from 'primevue/textarea'
 import CircularResultContent from '@/components/CircularResultContent.vue'
 import {
@@ -787,307 +785,316 @@ onMounted(async () => {
   await scrollToBottom()
 })
 </script>
-
 <template>
-  <section class="view-stack chat-view">
-    <div class="chat-layout">
-      <Card class="session-panel glass-panel">
-        <template #content>
-          <div class="session-panel-actions">
-            <Button label="New" icon="pi pi-plus" size="small" fluid :disabled="sending" @click="newSession" />
-          </div>
+  <div class="chat-view sbp-pane-view">
+    <aside class="chat-rail sbp-rail">
+      <header class="sbp-rail-head">
+        <span class="sbp-rail-title">Conversations</span>
+        <span class="sbp-rail-count">{{ sessions.length || '—' }}</span>
+      </header>
 
-          <div v-if="sessionsLoading" class="preview-loading compact-loading">
-            <ProgressSpinner aria-label="Loading sessions" />
-            <span>Loading sessions</span>
-          </div>
+      <Button
+        label="New chat"
+        icon="pi pi-plus"
+        size="small"
+        fluid
+        outlined
+        :disabled="sending"
+        @click="newSession"
+      />
 
-          <div v-else-if="sessions.length" class="session-list">
-            <div
-              v-for="session in sessions"
-              :key="session.id"
-              class="session-item animated-card"
-              :class="{ active: session.id === currentSessionId, workspace: isWorkspaceSession(session) }"
-            >
-              <form
-                v-if="renamingSessionId === session.id"
-                class="session-rename"
-                @submit.prevent="saveSessionTitle(session.id)"
-              >
-                <InputText
-                  v-model="renameDraft"
-                  autofocus
-                  maxlength="120"
-                  aria-label="Session title"
-                  @keydown.escape="renamingSessionId = null"
-                />
-                <Button icon="pi pi-check" type="submit" text rounded aria-label="Save session title" />
-                <Button icon="pi pi-times" type="button" text rounded severity="secondary" aria-label="Cancel rename" @click="renamingSessionId = null" />
-              </form>
-              <template v-else>
-                <button type="button" :disabled="sending" @click="loadSession(session.id)">
-                  <strong>
-                    <i class="pi" :class="sessionIconClass(session)" />
-                    <span>{{ session.title || 'New chat' }}</span>
-                  </strong>
-                  <span>
-                    <template v-if="isWorkspaceSession(session)">
-                      {{ (session.pinned_count || 0).toLocaleString() }} pinned
-                    </template>
-                    <template v-else>
-                      {{ sessionDate(session) }}
-                    </template>
-                  </span>
-                </button>
-                <div class="session-item-actions">
-                  <Button
-                    v-if="!isWorkspaceSession(session)"
-                    icon="pi pi-pencil"
-                    text
-                    rounded
-                    severity="secondary"
-                    aria-label="Rename session"
-                    @click="startRenaming(session)"
-                  />
-                  <Button
-                    icon="pi pi-trash"
-                    text
-                    rounded
-                    severity="danger"
-                    aria-label="Delete session"
-                    @click="confirmDeleteSession(session)"
-                  />
-                </div>
-              </template>
-            </div>
-          </div>
+      <p v-if="sessionsLoading" class="sbp-note">Loading sessions…</p>
+      <p v-else-if="!sessions.length" class="sbp-note">No saved chat sessions.</p>
 
-          <Message v-else severity="secondary" :closable="false">
-            No saved chat sessions.
-          </Message>
-        </template>
-      </Card>
-
-      <div class="chat-main">
-        <Card class="context-card glass-panel">
-          <template #content>
-            <div class="context-header">
-              <Tag :value="contextModeLabel" :severity="hasContext ? 'success' : 'secondary'" />
-              <span>{{ selectedCirculars.length }} circulars selected</span>
-            </div>
-
-            <div v-if="selectedCirculars.length" class="context-chip-list">
-              <Tag
-                v-for="circular in selectedCirculars"
-                :key="circular.id"
-                severity="info"
-                class="context-chip"
-              >
-                <span>{{ circular.reference || circular.title }}</span>
-                <button
-                  v-if="!activeSessionIsWorkspace"
-                  type="button"
-                  :aria-label="`Remove ${circular.title}`"
-                  @click="removeContext(circular.id)"
-                >
-                  <i class="pi pi-times" />
-                </button>
-              </Tag>
-            </div>
-
-            <div v-if="activeSessionIsWorkspace" class="workspace-context-note">
-              <i class="pi pi-thumbtack" />
-              <span>Workspace pins</span>
-            </div>
-
-            <div v-else class="context-search">
-              <span class="p-input-icon-left">
-                <i class="pi pi-search" />
-                <InputText v-model="contextQuery" placeholder="Search circulars to add context" />
+      <div v-else class="session-list">
+        <div
+          v-for="session in sessions"
+          :key="session.id"
+          class="session-item"
+          :class="{ 'is-selected': session.id === currentSessionId, workspace: isWorkspaceSession(session) }"
+        >
+          <form
+            v-if="renamingSessionId === session.id"
+            class="session-rename"
+            @submit.prevent="saveSessionTitle(session.id)"
+          >
+            <InputText
+              v-model="renameDraft"
+              size="small"
+              autofocus
+              maxlength="120"
+              aria-label="Session title"
+              @keydown.escape="renamingSessionId = null"
+            />
+            <Button icon="pi pi-check" type="submit" size="small" text rounded aria-label="Save session title" />
+            <Button icon="pi pi-times" type="button" size="small" text rounded severity="secondary" aria-label="Cancel rename" @click="renamingSessionId = null" />
+          </form>
+          <template v-else>
+            <button type="button" class="sbp-row session-open" :disabled="sending" @click="loadSession(session.id)">
+              <span class="sbp-row-title session-name">
+                <i class="pi" :class="sessionIconClass(session)" />
+                <span>{{ session.title || 'New chat' }}</span>
               </span>
-
-              <div v-if="searchLoading" class="context-search-state">
-                <i class="pi pi-spin pi-spinner" />
-                <span>Searching circulars</span>
-              </div>
-
-              <div v-else-if="searchResults.length" class="context-results">
-                <button
-                  v-for="result in searchResults"
-                  :key="result.id"
-                  type="button"
-                  class="circular-result-item animated-card"
-                  :disabled="isSelected(result.id)"
-                  @click="addContext(result)"
-                >
-                  <span class="result-select result-action-icon">
-                    <i class="pi" :class="isSelected(result.id) ? 'pi-check' : 'pi-plus'" />
-                  </span>
-                  <CircularResultContent :circular="result" />
-                </button>
-              </div>
-            </div>
-          </template>
-        </Card>
-
-        <Card class="conversation-card glass-panel">
-          <template #content>
-            <Message v-if="errorMessage" severity="error" :closable="false">
-              {{ errorMessage }}
-            </Message>
-
-            <div ref="messagesEl" class="chat-messages">
-              <div v-if="sessionLoading" class="preview-loading compact-loading">
-                <ProgressSpinner aria-label="Loading conversation" />
-                <span>Loading conversation</span>
-              </div>
-
-              <div v-else-if="!messages.length" class="chat-empty-state">
-                <span class="chat-empty-icon"><i class="pi pi-comments" /></span>
-                <h2>Ask SBPEye about SBP circulars</h2>
-                <p>
-                  {{ hasContext
-                    ? 'Your selected circulars are attached as context. Ask a grounded question, or try one of these:'
-                    : 'Pin or attach circulars for grounded answers, or ask a general regulatory question. Try one of these:' }}
-                </p>
-                <div class="chat-empty-prompts">
-                  <button
-                    v-for="prompt in examplePrompts"
-                    :key="prompt"
-                    type="button"
-                    class="chat-empty-prompt"
-                    :disabled="sending"
-                    @click="useExamplePrompt(prompt)"
-                  >
-                    <i class="pi pi-arrow-right" />
-                    <span>{{ prompt }}</span>
-                  </button>
-                </div>
-              </div>
-
-              <article
-                v-for="(message, index) in messages"
-                v-else
-                :key="message.id"
-                :class="messageClass(message.role)"
-              >
-                <div class="chat-message-meta">
-                  <strong>{{ message.role === 'user' ? 'You' : 'Assistant' }}</strong>
-                  <div class="message-actions">
-                    <span v-if="message.pending">Sending</span>
-                    <Button
-                      icon="pi pi-copy"
-                      text
-                      rounded
-                      size="small"
-                      severity="secondary"
-                      aria-label="Copy message"
-                      title="Copy"
-                      @click="copyMessage(message.content)"
-                    />
-                    <Button
-                      v-if="message.role === 'user' && !message.pending"
-                      icon="pi pi-pencil"
-                      text
-                      rounded
-                      size="small"
-                      severity="secondary"
-                      aria-label="Edit message"
-                      title="Edit and regenerate"
-                      :disabled="sending"
-                      @click="startEditing(message)"
-                    />
-                    <Button
-                      v-if="message.role === 'assistant' && !message.pending"
-                      icon="pi pi-refresh"
-                      text
-                      rounded
-                      size="small"
-                      severity="secondary"
-                      aria-label="Regenerate response"
-                      title="Regenerate"
-                      :disabled="sending"
-                      @click="regenerateMessage(index)"
-                    />
-                    <Button
-                      v-if="!message.pending"
-                      icon="pi pi-trash"
-                      text
-                      rounded
-                      size="small"
-                      severity="danger"
-                      aria-label="Delete message and following history"
-                      title="Delete from here"
-                      :disabled="sending"
-                      @click="confirmDeleteMessage(message)"
-                    />
-                  </div>
-                </div>
-                <div v-if="editingMessageId === message.id" class="message-editor">
-                  <Textarea v-model="editDraft" rows="3" auto-resize autofocus />
-                  <div class="message-editor-actions">
-                    <Button label="Cancel" size="small" text severity="secondary" @click="editingMessageId = null" />
-                    <Button label="Save and regenerate" size="small" @click="saveEditedMessage(message)" />
-                  </div>
-                </div>
-                <div
-                  v-else-if="message.role === 'assistant'"
-                  class="markdown-body"
-                  v-html="renderMarkdown(message.content)"
-                  @click="handleCitationClick"
-                />
-                <p v-else>{{ message.content }}</p>
-                <Button
-                  v-if="isUnansweredUser(index) && !message.pending"
-                  class="retry-message"
-                  icon="pi pi-refresh"
-                  label="Retry"
-                  size="small"
-                  text
-                  :disabled="sending"
-                  @click="retryMessage(message)"
-                />
-              </article>
-
-              <div v-if="sending" class="assistant-typing">
-                <i class="pi pi-spin pi-spinner" />
-                <span>{{ activityStatus || 'Generating' }}</span>
-              </div>
-            </div>
-
-            <form class="composer" @submit.prevent="sendMessage">
-              <Textarea
-                v-model="inputMessage"
-                rows="3"
-                auto-resize
-                placeholder="Ask about selected circulars"
-                :disabled="sending"
-                @keydown.enter.exact.prevent="sendMessage"
+              <span class="sbp-row-sub">
+                <template v-if="isWorkspaceSession(session)">
+                  {{ (session.pinned_count || 0).toLocaleString() }} pinned
+                </template>
+                <template v-else>
+                  {{ sessionDate(session) }}
+                </template>
+              </span>
+            </button>
+            <div class="session-item-actions">
+              <Button
+                v-if="!isWorkspaceSession(session)"
+                icon="pi pi-pencil"
+                text
+                rounded
+                size="small"
+                severity="secondary"
+                aria-label="Rename session"
+                @click="startRenaming(session)"
               />
-              <div class="composer-actions">
-                <Button
-                  v-if="sending"
-                  icon="pi pi-stop"
-                  label="Stop"
-                  type="button"
-                  severity="danger"
-                  outlined
-                  @click="stopGeneration"
-                />
-                <Button
-                  v-else
-                  icon="pi pi-send"
-                  label="Send"
-                  type="submit"
-                  :disabled="!inputMessage.trim()"
-                />
-              </div>
-            </form>
+              <Button
+                icon="pi pi-trash"
+                text
+                rounded
+                size="small"
+                severity="danger"
+                aria-label="Delete session"
+                @click="confirmDeleteSession(session)"
+              />
+            </div>
           </template>
-        </Card>
+        </div>
       </div>
-    </div>
-  </section>
+    </aside>
+
+    <section class="chat-pane">
+      <!-- Context strip: the same role the search-controls bar plays on Circulars. -->
+      <header class="chat-context-bar">
+        <div class="context-header">
+          <span class="sbp-badge" :class="{ 'is-accent': hasContext }">{{ contextModeLabel }}</span>
+          <span class="context-count">{{ selectedCirculars.length }} circulars selected</span>
+
+          <div v-if="activeSessionIsWorkspace" class="workspace-context-note">
+            <i class="pi pi-thumbtack" />
+            <span>Workspace pins</span>
+          </div>
+
+          <div v-else class="sbp-search-field context-search-field">
+            <i class="pi pi-search" />
+            <input
+              v-model="contextQuery"
+              type="search"
+              placeholder="Search circulars to add context"
+              aria-label="Search circulars to add context"
+            >
+            <button
+              v-if="contextQuery"
+              type="button"
+              class="sbp-search-clear"
+              aria-label="Clear context search"
+              @click="contextQuery = ''"
+            ><i class="pi pi-times" /></button>
+          </div>
+        </div>
+
+        <div v-if="selectedCirculars.length" class="context-chip-list">
+          <span
+            v-for="circular in selectedCirculars"
+            :key="circular.id"
+            class="context-chip"
+          >
+            <span>{{ circular.reference || circular.title }}</span>
+            <button
+              v-if="!activeSessionIsWorkspace"
+              type="button"
+              :aria-label="`Remove ${circular.title}`"
+              @click="removeContext(circular.id)"
+            >
+              <i class="pi pi-times" />
+            </button>
+          </span>
+        </div>
+
+        <div v-if="searchLoading" class="context-search-state">
+          <i class="pi pi-spin pi-spinner" />
+          <span>Searching circulars</span>
+        </div>
+
+        <div v-else-if="!activeSessionIsWorkspace && searchResults.length" class="context-results">
+          <button
+            v-for="result in searchResults"
+            :key="result.id"
+            type="button"
+            class="circular-result-item"
+            :disabled="isSelected(result.id)"
+            @click="addContext(result)"
+          >
+            <span class="result-select result-action-icon">
+              <i class="pi" :class="isSelected(result.id) ? 'pi-check' : 'pi-plus'" />
+            </span>
+            <CircularResultContent :circular="result" />
+          </button>
+        </div>
+      </header>
+
+      <Message v-if="errorMessage" severity="error" :closable="false" class="chat-error">
+        {{ errorMessage }}
+      </Message>
+
+      <div ref="messagesEl" class="chat-messages">
+        <div v-if="sessionLoading" class="preview-loading compact-loading">
+          <ProgressSpinner aria-label="Loading conversation" />
+          <span>Loading conversation</span>
+        </div>
+
+        <div v-else-if="!messages.length" class="chat-empty-state">
+          <span class="chat-empty-icon"><i class="pi pi-comments" /></span>
+          <h2>Ask SBPEye about SBP circulars</h2>
+          <p>
+            {{ hasContext
+              ? 'Your selected circulars are attached as context. Ask a grounded question, or try one of these:'
+              : 'Pin or attach circulars for grounded answers, or ask a general regulatory question. Try one of these:' }}
+          </p>
+          <div class="chat-empty-prompts">
+            <button
+              v-for="prompt in examplePrompts"
+              :key="prompt"
+              type="button"
+              class="chat-empty-prompt"
+              :disabled="sending"
+              @click="useExamplePrompt(prompt)"
+            >
+              <i class="pi pi-arrow-right" />
+              <span>{{ prompt }}</span>
+            </button>
+          </div>
+        </div>
+
+        <article
+          v-for="(message, index) in messages"
+          v-else
+          :key="message.id"
+          :class="messageClass(message.role)"
+        >
+          <div class="chat-message-meta">
+            <strong>{{ message.role === 'user' ? 'You' : 'Assistant' }}</strong>
+            <div class="message-actions">
+              <span v-if="message.pending">Sending</span>
+              <Button
+                icon="pi pi-copy"
+                text
+                rounded
+                size="small"
+                severity="secondary"
+                aria-label="Copy message"
+                title="Copy"
+                @click="copyMessage(message.content)"
+              />
+              <Button
+                v-if="message.role === 'user' && !message.pending"
+                icon="pi pi-pencil"
+                text
+                rounded
+                size="small"
+                severity="secondary"
+                aria-label="Edit message"
+                title="Edit and regenerate"
+                :disabled="sending"
+                @click="startEditing(message)"
+              />
+              <Button
+                v-if="message.role === 'assistant' && !message.pending"
+                icon="pi pi-refresh"
+                text
+                rounded
+                size="small"
+                severity="secondary"
+                aria-label="Regenerate response"
+                title="Regenerate"
+                :disabled="sending"
+                @click="regenerateMessage(index)"
+              />
+              <Button
+                v-if="!message.pending"
+                icon="pi pi-trash"
+                text
+                rounded
+                size="small"
+                severity="danger"
+                aria-label="Delete message and following history"
+                title="Delete from here"
+                :disabled="sending"
+                @click="confirmDeleteMessage(message)"
+              />
+            </div>
+          </div>
+          <div v-if="editingMessageId === message.id" class="message-editor">
+            <Textarea v-model="editDraft" rows="3" auto-resize autofocus />
+            <div class="message-editor-actions">
+              <Button label="Cancel" size="small" text severity="secondary" @click="editingMessageId = null" />
+              <Button label="Save and regenerate" size="small" @click="saveEditedMessage(message)" />
+            </div>
+          </div>
+          <div
+            v-else-if="message.role === 'assistant'"
+            class="markdown-body"
+            v-html="renderMarkdown(message.content)"
+            @click="handleCitationClick"
+          />
+          <p v-else>{{ message.content }}</p>
+          <Button
+            v-if="isUnansweredUser(index) && !message.pending"
+            class="retry-message"
+            icon="pi pi-refresh"
+            label="Retry"
+            size="small"
+            text
+            :disabled="sending"
+            @click="retryMessage(message)"
+          />
+        </article>
+
+        <div v-if="sending" class="assistant-typing">
+          <i class="pi pi-spin pi-spinner" />
+          <span>{{ activityStatus || 'Generating' }}</span>
+        </div>
+      </div>
+
+      <form class="composer" @submit.prevent="sendMessage">
+        <Textarea
+          v-model="inputMessage"
+          rows="2"
+          auto-resize
+          placeholder="Ask about selected circulars"
+          :disabled="sending"
+          @keydown.enter.exact.prevent="sendMessage"
+        />
+        <div class="composer-actions">
+          <Button
+            v-if="sending"
+            icon="pi pi-stop"
+            label="Stop"
+            type="button"
+            size="small"
+            severity="danger"
+            outlined
+            @click="stopGeneration"
+          />
+          <Button
+            v-else
+            icon="pi pi-send"
+            label="Send"
+            type="submit"
+            size="small"
+            :disabled="!inputMessage.trim()"
+          />
+        </div>
+      </form>
+    </section>
+  </div>
   <PdfPreviewDialog
     v-if="selectedAttachment"
     v-model:visible="attachmentDialogVisible"

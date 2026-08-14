@@ -109,17 +109,14 @@ h1, h2, h3, h4, h5, h6 {
   transition: color 0.18s var(--sbp-ease), background-color 0.18s var(--sbp-ease);
 }
 
-/* ---- Calm hover for interactive cards (was a SaaS -4px lift) -------------- */
-.animated-card {
+/* ---- Calm hover for interactive rows (was a SaaS -4px lift) -------------- */
+.sbp-row,
+.sbp-filter-pill,
+.context-chip {
   transition:
+    color 0.18s var(--sbp-ease),
     background-color 0.18s var(--sbp-ease),
-    border-color 0.18s var(--sbp-ease),
-    box-shadow 0.18s var(--sbp-ease);
-}
-
-.session-item.animated-card:hover {
-  border-color: color-mix(in srgb, var(--sbp-green) 30%, var(--sbp-border));
-  background: color-mix(in srgb, var(--sbp-green) 5%, var(--sbp-surface));
+    border-color 0.18s var(--sbp-ease);
 }
 
 /* ---- Workspace tabs ------------------------------------------------------ */
@@ -193,7 +190,6 @@ h1, h2, h3, h4, h5, h6 {
 
 /* ---- Chat: messages, citations, empty state ------------------------------ */
 .chat-message {
-  border-radius: var(--sbp-radius-lg);
   animation: sbp-rise-in 0.22s var(--sbp-ease) both;
 }
 
@@ -233,14 +229,14 @@ h1, h2, h3, h4, h5, h6 {
 .chat-empty-state h2 {
   margin: 0;
   color: var(--sbp-text);
-  font-size: 1.12rem;
+  font-size: var(--sbp-fs-title);
 }
 
 .chat-empty-state p {
   margin: 0;
   max-width: 28rem;
   color: var(--sbp-muted);
-  font-size: 0.9rem;
+  font-size: var(--sbp-fs-body);
   line-height: 1.5;
 }
 
@@ -261,7 +257,7 @@ h1, h2, h3, h4, h5, h6 {
   border-radius: var(--sbp-radius);
   color: var(--sbp-text);
   font: inherit;
-  font-size: 0.86rem;
+  font-size: var(--sbp-fs-body);
   text-align: left;
   background: var(--sbp-surface);
   cursor: pointer;
@@ -270,7 +266,7 @@ h1, h2, h3, h4, h5, h6 {
 
 .chat-empty-prompt i {
   color: var(--sbp-green);
-  font-size: 0.8rem;
+  font-size: var(--sbp-fs-sm);
 }
 
 .chat-empty-prompt:hover {
@@ -318,7 +314,8 @@ h1, h2, h3, h4, h5, h6 {
   }
 
   .p-button,
-  .animated-card,
+  .sbp-row,
+  .sbp-filter-pill,
   .circular-result-item,
   .chat-empty-prompt {
     transition: none;

@@ -404,35 +404,42 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="laws-view">
-    <aside class="laws-library">
-      <header class="library-head">
-        <span class="library-title">Laws &amp; Regulations</span>
-        <span class="library-count">{{ visibleTotal || '—' }}</span>
+  <div class="laws-view sbp-pane-view">
+    <aside class="laws-library sbp-rail">
+      <header class="sbp-rail-head">
+        <span class="sbp-rail-title">Laws &amp; Regulations</span>
+        <span class="sbp-rail-count">{{ visibleTotal || '—' }}</span>
       </header>
 
-      <div class="library-field">
+      <div class="sbp-search-field">
         <i class="pi pi-search" />
         <input v-model="query" type="search" placeholder="Filter or search full text" />
+        <button
+          v-if="query"
+          type="button"
+          class="sbp-search-clear"
+          aria-label="Clear search"
+          @click="query = ''"
+        ><i class="pi pi-times" /></button>
       </div>
 
       <div v-if="facets.length > 1" class="library-facets">
         <button
           type="button"
-          class="facet"
+          class="sbp-filter-pill"
           :class="{ 'is-active': !typeFilter }"
           @click="typeFilter = ''"
-        >All <span class="facet-count">{{ topLevelTotal }}</span></button>
+        >All <span class="sbp-filter-pill-count">{{ topLevelTotal }}</span></button>
         <button
           v-for="facet in facets"
           :key="facet.doc_type"
           type="button"
-          class="facet"
+          class="sbp-filter-pill"
           :class="{ 'is-active': typeFilter === facet.doc_type }"
           :title="`${facet.corpusCount} in the corpus, including parts`"
           :aria-label="`${typeLabel(facet.doc_type)}, ${facet.count} documents`"
           @click="typeFilter = typeFilter === facet.doc_type ? '' : facet.doc_type"
-        >{{ typeLabel(facet.doc_type) }} <span class="facet-count">{{ facet.count }}</span></button>
+        >{{ typeLabel(facet.doc_type) }} <span class="sbp-filter-pill-count">{{ facet.count }}</span></button>
       </div>
 
       <p v-if="listLoading" class="library-note">Loading the corpus…</p>
@@ -447,25 +454,25 @@ onMounted(() => {
           <button
             v-if="group.self && !group.hits.length"
             type="button"
-            class="node is-flat"
+            class="sbp-row node is-flat"
             :class="{ 'is-selected': group.self.id === selectedId }"
             @click="select(group.self)"
           >
             <span class="node-body">
-              <span class="node-title">{{ group.self.display_title }}</span>
+              <span class="sbp-row-title">{{ group.self.display_title }}</span>
             </span>
           </button>
 
           <template v-else>
             <button
               type="button"
-              class="node is-flat"
+              class="sbp-row node is-flat"
               :class="{ 'is-selected': group.containerId === selectedId }"
               @click="openGroup(group)"
             >
               <span class="node-body">
-                <span class="node-title">{{ group.containerTitle }}</span>
-                <span class="node-sub">
+                <span class="sbp-row-title">{{ group.containerTitle }}</span>
+                <span class="sbp-row-sub">
                   {{ group.hits.length }} matching part{{ group.hits.length === 1 ? '' : 's' }}
                   <template v-if="group.self"> · and the document itself</template>
                 </span>
@@ -477,12 +484,12 @@ onMounted(() => {
                 v-for="hit in visibleHits(group)"
                 :key="hit.id"
                 type="button"
-                class="node is-child"
+                class="sbp-row node is-child"
                 :class="{ 'is-selected': hit.id === selectedId }"
                 @click="select(hit)"
               >
                 <span class="node-body">
-                  <span class="node-title">
+                  <span class="sbp-row-title">
                     <span v-if="partLabelOf(hit)" class="node-part">{{ partLabelOf(hit) }}</span>
                     {{ hit.display_title }}
                   </span>
@@ -505,11 +512,11 @@ onMounted(() => {
 
       <div v-else class="library-tree">
         <template v-for="group in groups" :key="group.doc_type">
-          <p class="group-label">{{ typeLabel(group.doc_type) }} · {{ group.items.length }}</p>
+          <p class="sbp-eyebrow group-label">{{ typeLabel(group.doc_type) }} · {{ group.items.length }}</p>
           <template v-for="doc in group.items" :key="doc.id">
             <button
               type="button"
-              class="node"
+              class="sbp-row node"
               :class="{ 'is-selected': doc.id === selectedId }"
               @click="select(doc)"
             >
@@ -517,8 +524,8 @@ onMounted(() => {
                 <i v-if="isContainer(doc)" class="pi" :class="expanded.has(doc.id) ? 'pi-chevron-down' : 'pi-chevron-right'" />
               </span>
               <span class="node-body">
-                <span class="node-title">{{ doc.display_title }}</span>
-                <span class="node-sub">{{ subLine(doc) }}</span>
+                <span class="sbp-row-title">{{ doc.display_title }}</span>
+                <span class="sbp-row-sub">{{ subLine(doc) }}</span>
                 <!-- Only where the collection is incomplete: a full bar says nothing. -->
                 <span
                   v-if="holdingsById.get(doc.id) && holdingsById.get(doc.id)!.held < holdingsById.get(doc.id)!.parts"
@@ -538,17 +545,17 @@ onMounted(() => {
                 v-for="child in childrenByParent.get(doc.id)"
                 :key="child.id"
                 type="button"
-                class="node is-child"
+                class="sbp-row node is-child"
                 :class="{ 'is-selected': child.id === selectedId }"
                 @click="select(child)"
               >
                 <span class="node-body">
-                  <span class="node-title">
+                  <span class="sbp-row-title">
                     <span v-if="partLabelOf(child)" class="node-part">{{ partLabelOf(child) }}</span>
                     {{ child.display_title }}
                   </span>
                   <!-- The container's meter says how many are missing; this says which. -->
-                  <span v-if="!child.current_version?.has_file" class="node-sub">not held</span>
+                  <span v-if="!child.current_version?.has_file" class="sbp-row-sub">not held</span>
                 </span>
               </button>
             </div>
@@ -571,22 +578,22 @@ onMounted(() => {
       />
 
       <template v-else-if="detail">
-        <header class="reader-head">
+        <header class="reader-head sbp-pane-head">
           <div class="reader-identity">
             <p v-if="detail.parent" class="reader-crumb">{{ detail.parent.display_title }}</p>
-            <h1 class="reader-title">
+            <h1 class="reader-title sbp-pane-title">
               <span v-if="partLabelOf(detail)" class="reader-part">{{ partLabelOf(detail) }}</span>
               {{ detail.display_title }}
             </h1>
-            <p class="reader-status">
-              <span class="reader-tag">{{ typeLabel(detail.doc_type) }}</span>
+            <p class="reader-status sbp-pane-substatus">
+              <span class="sbp-badge">{{ typeLabel(detail.doc_type) }}</span>
               <span v-if="currentVersion" class="reader-force">In force</span>
               <span v-if="statusLine">{{ statusLine }}</span>
             </p>
           </div>
           <a
             v-if="fileUrl"
-            class="reader-action"
+            class="sbp-ghost-button"
             :href="fileUrl"
             target="_blank"
             rel="noreferrer"
@@ -606,12 +613,12 @@ onMounted(() => {
           <template v-if="detail.circular_id">
             <h2>This entry is a circular.</h2>
             <p>SBP lists it among the regulations, but the document behind it lives with the circulars.</p>
-            <RouterLink class="reader-action" :to="`/circulars/${detail.circular_id}`">Open the circular</RouterLink>
+            <RouterLink class="sbp-ghost-button" :to="`/circulars/${detail.circular_id}`">Open the circular</RouterLink>
           </template>
           <template v-else-if="detail.is_external">
             <h2>Hosted outside SBP.</h2>
             <p>This one is published elsewhere, so we hold no copy of it — but the circulars that cite it are here.</p>
-            <a v-if="detail.source_url" class="reader-action" :href="detail.source_url" target="_blank" rel="noreferrer">
+            <a v-if="detail.source_url" class="sbp-ghost-button" :href="detail.source_url" target="_blank" rel="noreferrer">
               Open the external page
             </a>
           </template>
@@ -672,70 +679,14 @@ onMounted(() => {
     </section>
   </div>
 </template>
-
 <style scoped>
-.laws-view {
-  display: grid;
-  grid-template-columns: 300px 1fr;
-  height: 100%;
-  min-height: 0;
-  overflow: hidden;
-}
+/* The shell, rail, search field, filter pills, rows, badge, ghost button and
+   pane header all come from the .sbp-* primitives in styles.css. What is left
+   here is only what is genuinely specific to the laws corpus. */
 
 /* ---- Library ---- */
 .laws-library {
-  display: flex;
-  flex-direction: column;
   gap: 0.6rem;
-  padding: 0.85rem 0.7rem 1rem;
-  border-right: 1px solid var(--sbp-border);
-  background: var(--sbp-bg);
-  overflow-y: auto;
-}
-
-.library-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  padding: 0 0.25rem;
-}
-
-.library-title {
-  font-size: 0.9rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-
-.library-count {
-  font-size: 0.7rem;
-  color: var(--sbp-muted);
-  font-variant-numeric: tabular-nums;
-}
-
-.library-field {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.45rem 0.6rem;
-  border: 1px solid var(--sbp-border);
-  border-radius: var(--sbp-radius);
-  background: var(--sbp-surface);
-  color: var(--sbp-muted);
-}
-
-.library-field i {
-  font-size: 0.78rem;
-}
-
-.library-field input {
-  flex: 1;
-  min-width: 0;
-  border: 0;
-  outline: none;
-  background: transparent;
-  color: var(--sbp-text);
-  font: inherit;
-  font-size: 0.8rem;
 }
 
 .library-facets {
@@ -744,46 +695,14 @@ onMounted(() => {
   gap: 0.25rem;
 }
 
-.facet {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 0.3rem;
-  padding: 0.2rem 0.45rem;
-  border: 1px solid transparent;
-  border-radius: 999px;
-  background: var(--sbp-subtle);
-  color: var(--sbp-muted);
-  font: inherit;
-  font-size: 0.68rem;
-  cursor: pointer;
-  transition: color 0.16s var(--sbp-ease), border-color 0.16s var(--sbp-ease);
-}
-
-.facet:hover {
-  color: var(--sbp-text);
-}
-
-.facet.is-active {
-  border-color: color-mix(in srgb, var(--sbp-green) 40%, transparent);
-  background: color-mix(in srgb, var(--sbp-green) 11%, var(--sbp-surface));
-  color: var(--sbp-green-text);
-  font-weight: 600;
-}
-
-.facet-count {
-  font-size: 0.62rem;
-  font-variant-numeric: tabular-nums;
-  opacity: 0.75;
-}
-
 .library-note {
   margin: 0.3rem 0.35rem;
-  font-size: 0.72rem;
+  font-size: var(--sbp-fs-meta);
   color: var(--sbp-muted);
 }
 
 .library-note.is-error {
-  color: #a2453a;
+  color: var(--sbp-danger);
 }
 
 .library-tree {
@@ -794,41 +713,13 @@ onMounted(() => {
 
 .group-label {
   margin: 0.75rem 0.35rem 0.3rem;
-  font-size: 0.62rem;
-  font-weight: 700;
-  letter-spacing: 0.13em;
-  text-transform: uppercase;
-  color: var(--sbp-muted);
 }
 
+/* A tree row is a .sbp-row with a caret gutter. */
 .node {
-  display: grid;
   grid-template-columns: 0.85rem 1fr;
   gap: 0.4rem;
   align-items: start;
-  width: 100%;
-  padding: 0.38rem 0.4rem;
-  border: 0;
-  border-radius: var(--sbp-radius);
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  transition: background-color 0.16s var(--sbp-ease);
-}
-
-.node:hover {
-  background: var(--sbp-subtle);
-}
-
-.node.is-selected {
-  background: color-mix(in srgb, var(--sbp-green) 11%, var(--sbp-surface));
-}
-
-.node.is-selected .node-title {
-  color: var(--sbp-green-text);
-  font-weight: 600;
 }
 
 /* Rows with no caret slot: without this they land in the 0.85rem caret column. */
@@ -840,17 +731,11 @@ onMounted(() => {
 .node-caret {
   padding-top: 0.15rem;
   color: var(--sbp-muted);
-  font-size: 0.6rem;
+  font-size: var(--sbp-fs-eyebrow);
 }
 
 .node-body {
   min-width: 0;
-}
-
-.node-title {
-  display: block;
-  font-size: 0.79rem;
-  line-height: 1.35;
 }
 
 .node-part {
@@ -860,16 +745,9 @@ onMounted(() => {
 
 .node-crumb {
   display: block;
-  font-size: 0.66rem;
-  color: var(--sbp-green-text);
   margin-bottom: 0.1rem;
-}
-
-.node-sub {
-  display: block;
-  margin-top: 0.1rem;
-  font-size: 0.66rem;
-  color: var(--sbp-muted);
+  font-size: var(--sbp-fs-meta);
+  color: var(--sbp-green-text);
 }
 
 /* Sits under an incomplete container's count: the gap between SBP's claim and our archive. */
@@ -903,11 +781,11 @@ onMounted(() => {
   margin-top: 0.1rem;
   padding: 0.2rem 0.4rem;
   border: 0;
-  border-radius: var(--sbp-radius);
+  border-radius: var(--sbp-radius-sm);
   background: transparent;
   color: var(--sbp-muted);
   font: inherit;
-  font-size: 0.68rem;
+  font-size: var(--sbp-fs-meta);
   cursor: pointer;
 }
 
@@ -925,28 +803,11 @@ onMounted(() => {
   overflow: hidden;
 }
 
-.reader-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1.2rem;
-  padding: 0.85rem 1.2rem 0.75rem;
-  border-bottom: 1px solid var(--sbp-border);
-}
-
 .reader-crumb {
   margin: 0 0 0.2rem;
-  font-size: 0.72rem;
+  font-size: var(--sbp-fs-meta);
   color: var(--sbp-green-text);
   font-weight: 600;
-}
-
-.reader-title {
-  margin: 0;
-  font-size: 1.05rem;
-  font-weight: 600;
-  letter-spacing: -0.012em;
-  line-height: 1.25;
 }
 
 .reader-part {
@@ -954,45 +815,9 @@ onMounted(() => {
   font-weight: 500;
 }
 
-.reader-status {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.55rem;
-  margin: 0.35rem 0 0;
-  font-size: 0.74rem;
-  color: var(--sbp-muted);
-}
-
-.reader-tag {
-  padding: 0.12rem 0.4rem;
-  border-radius: 3px;
-  background: var(--sbp-subtle);
-  font-size: 0.62rem;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-}
-
 .reader-force {
   color: var(--sbp-green-text);
   font-weight: 600;
-}
-
-.reader-action {
-  flex: none;
-  padding: 0.35rem 0.7rem;
-  border: 1px solid var(--sbp-border);
-  border-radius: var(--sbp-radius);
-  background: var(--sbp-surface);
-  color: var(--sbp-text);
-  font-size: 0.74rem;
-  white-space: nowrap;
-}
-
-.reader-action:hover {
-  border-color: color-mix(in srgb, var(--sbp-green) 40%, var(--sbp-border));
-  color: var(--sbp-green-text);
 }
 
 .reader-frame {
@@ -1018,7 +843,7 @@ onMounted(() => {
 .reader-empty h2,
 .reader-overview h1 {
   margin: 0;
-  font-size: 1.05rem;
+  font-size: var(--sbp-fs-title);
   font-weight: 600;
 }
 
@@ -1026,11 +851,11 @@ onMounted(() => {
 .reader-overview p {
   margin: 0;
   color: var(--sbp-muted);
-  font-size: 0.85rem;
+  font-size: var(--sbp-fs-body);
   line-height: 1.6;
 }
 
-.reader-empty .reader-action {
+.reader-empty .sbp-ghost-button {
   margin-top: 0.5rem;
 }
 
@@ -1050,7 +875,7 @@ onMounted(() => {
   background: transparent;
   color: var(--sbp-muted);
   font: inherit;
-  font-size: 0.74rem;
+  font-size: var(--sbp-fs-meta);
   text-align: left;
   cursor: pointer;
 }
@@ -1072,16 +897,11 @@ onMounted(() => {
 
 .provenance-open h3 {
   margin: 0 0 0.4rem;
-  font-size: 0.62rem;
-  font-weight: 700;
-  letter-spacing: 0.13em;
-  text-transform: uppercase;
-  color: var(--sbp-muted);
 }
 
 .provenance-open p {
   margin: 0;
-  font-size: 0.78rem;
+  font-size: var(--sbp-fs-sm);
   line-height: 1.6;
   color: var(--sbp-text);
 }
@@ -1089,7 +909,7 @@ onMounted(() => {
 .provenance-open ul {
   margin: 0;
   padding-left: 1rem;
-  font-size: 0.78rem;
+  font-size: var(--sbp-fs-sm);
   line-height: 1.7;
 }
 

@@ -18,8 +18,30 @@
   --sbp-subtle: #eef2ed;
   --sbp-green-rgb: 21, 111, 82;
   --sbp-gold-rgb: 184, 137, 24;
+
+  /* Status colours. Previously each view hardcoded its own red/amber/green
+     (#dc2626, #b91c1c, #a2453a, #b3261e, #c2410c, #d97706, #b45309, #16a34a…),
+     which is why "error" looked like a different state on every screen. */
+  --sbp-success: #167a4a;
+  --sbp-warning: #a76a09;
+  --sbp-danger: #b3261e;
+
+  /* Radius scale. Everything rounded picks one of these four — no more
+     0.35/0.4/0.45/0.65rem/3px/4px/6px/8px drifting per component. */
+  --sbp-radius-sm: 0.35rem;
   --sbp-radius: 0.5rem;
   --sbp-radius-lg: 0.85rem;
+  --sbp-radius-pill: 999px;
+
+  /* Type scale. The app had ~42 distinct font-size values below 1.2rem; these
+     five steps cover every one of them. Named by role so views pick the same
+     step for the same kind of text. */
+  --sbp-fs-eyebrow: 0.64rem;  /* uppercase section labels, badges */
+  --sbp-fs-meta: 0.72rem;     /* counts, dates, snippets, secondary meta */
+  --sbp-fs-sm: 0.78rem;       /* list rows, chips, dense controls */
+  --sbp-fs-body: 0.86rem;     /* running prose, chat messages */
+  --sbp-fs-title: 1.05rem;    /* pane / document titles */
+
   --sbp-ease: cubic-bezier(0.16, 1, 0.3, 1);
   --sbp-shadow-sm: 0 1px 2px rgba(20, 33, 27, 0.05);
   --sbp-shadow: 0 1px 2px rgba(20, 33, 27, 0.04), 0 10px 28px -16px rgba(20, 33, 27, 0.22);
@@ -35,6 +57,25 @@
   --p-primary-800: #0d4735;
   --p-primary-900: #0a382a;
   --p-primary-950: #051f18;
+
+  /* Aura ships its own scale — 6px radii and 0.875rem small text — which is why
+     a PrimeVue Select next to a hand-rolled control was a different shape and a
+     different size. Bind Aura's tokens to ours so every component agrees. */
+  --p-border-radius-xs: var(--sbp-radius-sm);
+  --p-border-radius-sm: var(--sbp-radius-sm);
+  --p-border-radius-md: var(--sbp-radius);
+  --p-border-radius-lg: var(--sbp-radius);
+  --p-border-radius-xl: var(--sbp-radius-lg);
+  --p-list-option-border-radius: var(--sbp-radius-sm);
+  --p-navigation-item-border-radius: var(--sbp-radius-sm);
+  --p-tag-border-radius: var(--sbp-radius-pill);
+  --p-button-sm-font-size: var(--sbp-fs-sm);
+  --p-form-field-sm-font-size: var(--sbp-fs-sm);
+  --p-inputtext-sm-font-size: var(--sbp-fs-sm);
+  --p-select-sm-font-size: var(--sbp-fs-sm);
+  --p-tag-font-size: var(--sbp-fs-eyebrow);
+  --p-toast-detail-font-size: var(--sbp-fs-sm);
+  --p-toast-summary-font-size: var(--sbp-fs-body);
 }
 
 :root.sbpeye-dark {
@@ -46,6 +87,10 @@
   --sbp-muted: #a8b7af;
   --sbp-subtle: #202b26;
   --sbp-green-text: #4fae87;
+  /* Lightened so status text clears AA on the dark surfaces. */
+  --sbp-success: #56c48c;
+  --sbp-warning: #e0a336;
+  --sbp-danger: #f08a80;
   --sbp-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
   --sbp-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 30px -16px rgba(0, 0, 0, 0.6);
   --sbp-shadow-md: 0 10px 26px -12px rgba(0, 0, 0, 0.65);
@@ -72,6 +117,292 @@ a {
 
 #app {
   min-height: 100vh;
+}
+
+/* ============================================================================
+   Cross-view primitives
+   Circulars, Laws and Chat each grew their own search box, section label,
+   badge and list row. These are the single versions of each; views compose
+   them instead of restyling them.
+   ========================================================================== */
+
+/* ---- Pane shell: rail + main, shared by every workspace view ---- */
+.sbp-pane-view {
+  display: grid;
+  grid-template-columns: var(--sbp-rail-width, 18.75rem) minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--sbp-surface);
+}
+
+.sbp-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  min-height: 0;
+  padding: 0.85rem 0.7rem 1rem;
+  border-right: 1px solid var(--sbp-border);
+  background: var(--sbp-bg);
+  overflow-y: auto;
+}
+
+.sbp-rail-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0 0.25rem;
+}
+
+.sbp-rail-title {
+  font-size: var(--sbp-fs-sm);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.sbp-rail-count {
+  color: var(--sbp-muted);
+  font-size: var(--sbp-fs-meta);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- Section label (the small uppercase eyebrow) ---- */
+/* Laws used 0.62rem/0.13em, Circulars 0.68rem/0.08em, the detail pane
+   0.62rem/0.07em and the pinned heading 0.66rem/0.08em. One rule now. */
+.sbp-eyebrow,
+.group-label,
+.detail-eyebrow,
+.generation-menu-title,
+.provenance-open h3,
+.workspace-brandline span,
+.filter-stack label > span:first-child,
+.detail-section h2,
+.detail-pane-toolbar > span,
+.pinned-results-heading span {
+  color: var(--sbp-muted);
+  font-size: var(--sbp-fs-eyebrow);
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+/* ---- Search field ---- */
+/* Laws hand-rolled a bordered <input> wrapper, Circulars absolutely positioned
+   an icon over a PrimeVue InputText, and Chat used .p-input-icon-left — a
+   PrimeVue 3 class that no longer exists in v4, so its icon just sat inline
+   beside the box. All three now render identically. */
+.sbp-search-field {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--sbp-border);
+  border-radius: var(--sbp-radius);
+  background: var(--sbp-surface);
+  color: var(--sbp-muted);
+  transition: border-color 0.18s var(--sbp-ease), box-shadow 0.18s var(--sbp-ease);
+}
+
+.sbp-search-field:focus-within {
+  border-color: var(--sbp-green);
+  box-shadow: 0 0 0 3px rgba(var(--sbp-green-rgb), 0.16);
+}
+
+.sbp-search-field > i {
+  flex: 0 0 auto;
+  font-size: var(--sbp-fs-meta);
+}
+
+.sbp-search-field input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--sbp-text);
+  font: inherit;
+  font-size: var(--sbp-fs-sm);
+}
+
+.sbp-search-field input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.sbp-search-clear {
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  padding: 0;
+  border: 0;
+  border-radius: var(--sbp-radius-pill);
+  color: var(--sbp-muted);
+  font-size: var(--sbp-fs-meta);
+  background: transparent;
+  cursor: pointer;
+}
+
+.sbp-search-clear:hover {
+  color: var(--sbp-text);
+  background: var(--sbp-subtle);
+}
+
+/* ---- Badge: the small uppercase type/status marker ---- */
+.sbp-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.14rem 0.42rem;
+  border: 1px solid var(--sbp-border);
+  border-radius: var(--sbp-radius-pill);
+  background: var(--sbp-subtle);
+  color: var(--sbp-muted);
+  font-size: var(--sbp-fs-eyebrow);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.sbp-badge.is-accent {
+  border-color: color-mix(in srgb, var(--sbp-green) 32%, var(--sbp-border));
+  background: color-mix(in srgb, var(--sbp-green) 10%, var(--sbp-surface));
+  color: var(--sbp-green-text);
+}
+
+/* ---- Filter pill (Laws facets, and anything else that toggles a filter) ---- */
+.sbp-filter-pill {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3rem;
+  padding: 0.22rem 0.5rem;
+  border: 1px solid transparent;
+  border-radius: var(--sbp-radius-pill);
+  background: var(--sbp-subtle);
+  color: var(--sbp-muted);
+  font: inherit;
+  font-size: var(--sbp-fs-meta);
+  cursor: pointer;
+  transition: color 0.16s var(--sbp-ease), border-color 0.16s var(--sbp-ease),
+    background-color 0.16s var(--sbp-ease);
+}
+
+.sbp-filter-pill:hover {
+  color: var(--sbp-text);
+}
+
+.sbp-filter-pill.is-active {
+  border-color: color-mix(in srgb, var(--sbp-green) 40%, transparent);
+  background: color-mix(in srgb, var(--sbp-green) 11%, var(--sbp-surface));
+  color: var(--sbp-green-text);
+  font-weight: 600;
+}
+
+.sbp-filter-pill-count {
+  font-size: var(--sbp-fs-eyebrow);
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+}
+
+/* ---- List row: selectable rows in every rail and result list ---- */
+/* Green is the selection colour everywhere. Gold means "pinned" and nothing
+   else — Chat used to tint its active session gold, which read as a pin. */
+.sbp-row {
+  display: grid;
+  width: 100%;
+  padding: 0.4rem 0.45rem;
+  border: 0;
+  border-radius: var(--sbp-radius);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.16s var(--sbp-ease);
+}
+
+.sbp-row:hover {
+  background: var(--sbp-subtle);
+}
+
+.sbp-row.is-selected {
+  background: color-mix(in srgb, var(--sbp-green) 11%, var(--sbp-surface));
+}
+
+.sbp-row.is-selected .sbp-row-title {
+  color: var(--sbp-green-text);
+  font-weight: 600;
+}
+
+.sbp-row-title {
+  display: block;
+  overflow: hidden;
+  font-size: var(--sbp-fs-sm);
+  line-height: 1.35;
+  text-overflow: ellipsis;
+}
+
+.sbp-row-sub {
+  display: block;
+  margin-top: 0.1rem;
+  color: var(--sbp-muted);
+  font-size: var(--sbp-fs-meta);
+}
+
+/* ---- Ghost button: bordered, quiet, links-that-act-like-buttons ---- */
+.sbp-ghost-button {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--sbp-border);
+  border-radius: var(--sbp-radius);
+  background: var(--sbp-surface);
+  color: var(--sbp-text);
+  font: inherit;
+  font-size: var(--sbp-fs-meta);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 0.18s var(--sbp-ease), color 0.18s var(--sbp-ease);
+}
+
+.sbp-ghost-button:hover {
+  border-color: color-mix(in srgb, var(--sbp-green) 40%, var(--sbp-border));
+  color: var(--sbp-green-text);
+}
+
+/* ---- Pane header: the title strip at the top of a main pane ---- */
+.sbp-pane-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1.2rem;
+  flex: 0 0 auto;
+  padding: 0.85rem 1.2rem 0.75rem;
+  border-bottom: 1px solid var(--sbp-border);
+}
+
+.sbp-pane-title {
+  margin: 0;
+  font-size: var(--sbp-fs-title);
+  font-weight: 600;
+  letter-spacing: -0.012em;
+  line-height: 1.25;
+}
+
+.sbp-pane-substatus {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem;
+  margin: 0.35rem 0 0;
+  color: var(--sbp-muted);
+  font-size: var(--sbp-fs-meta);
 }
 
 /* ---- App shell: two-column layout (sidebar + body) ---- */
@@ -109,11 +440,11 @@ a {
   width: 2rem;
   height: 2rem;
   place-items: center;
-  border-radius: 0.5rem;
+  border-radius: var(--sbp-radius);
   color: #fff;
   background: linear-gradient(135deg, var(--sbp-green), var(--sbp-gold));
   font-weight: 800;
-  font-size: 0.78rem;
+  font-size: var(--sbp-fs-sm);
 }
 
 .sidebar-nav {
@@ -148,11 +479,11 @@ a {
 }
 
 .sidebar-nav-item .pi {
-  font-size: 1rem;
+  font-size: var(--sbp-fs-title);
 }
 
 .sidebar-nav-label {
-  font-size: 0.58rem;
+  font-size: var(--sbp-fs-eyebrow);
   font-weight: 600;
   letter-spacing: 0.01em;
   line-height: 1;
@@ -174,7 +505,7 @@ a {
   width: 2rem;
   height: 2rem;
   color: var(--sbp-muted);
-  font-size: 0.82rem;
+  font-size: var(--sbp-fs-sm);
   cursor: help;
 }
 
@@ -193,15 +524,15 @@ a {
 }
 
 .sync-status-button.is-fresh {
-  color: #16a34a;
+  color: var(--sbp-success);
 }
 
 .sync-status-button.is-stale {
-  color: #d97706;
+  color: var(--sbp-warning);
 }
 
 .sync-status-button.is-error {
-  color: #dc2626;
+  color: var(--sbp-danger);
 }
 
 .llm-status {
@@ -217,15 +548,15 @@ a {
 }
 
 .llm-status.is-online {
-  color: #16a34a;
+  color: var(--sbp-success);
 }
 
 .llm-status.is-warn {
-  color: #d97706;
+  color: var(--sbp-warning);
 }
 
 .llm-status.is-error {
-  color: #dc2626;
+  color: var(--sbp-danger);
 }
 
 /* ---- App body (the right column) ---- */
@@ -263,7 +594,7 @@ a {
   border-top: 1px solid var(--sbp-border);
   color: var(--sbp-muted);
   background: var(--sbp-surface);
-  font-size: 0.875rem;
+  font-size: var(--sbp-fs-body);
 }
 
 .view-stack {
@@ -281,7 +612,7 @@ a {
 .page-heading p {
   margin: 0 0 0.25rem;
   color: var(--sbp-gold);
-  font-size: 0.78rem;
+  font-size: var(--sbp-fs-sm);
   font-weight: 700;
   letter-spacing: 0;
   text-transform: uppercase;
@@ -341,7 +672,7 @@ a {
 .settings-grid label > span,
 .detail-grid span {
   color: var(--sbp-muted);
-  font-size: 0.85rem;
+  font-size: var(--sbp-fs-body);
 }
 
 .detail-grid {
@@ -380,7 +711,7 @@ a {
   max-height: 78vh;
   overflow: auto;
   border: 1px solid var(--sbp-border);
-  border-radius: 0.5rem;
+  border-radius: var(--sbp-radius);
   background: #ffffff;
 }
 
@@ -392,7 +723,7 @@ a {
   min-width: min(760px, 100%);
   padding: clamp(1rem, 2.4vw, 1.75rem);
   color: #172033;
-  font-size: 1rem;
+  font-size: var(--sbp-fs-title);
 
   line-height: 1.55;
 }
@@ -430,11 +761,11 @@ a {
   max-width: 100%;
   padding: 0.42rem 0.65rem;
   border: 1px solid color-mix(in srgb, var(--sbp-green) 34%, var(--sbp-border));
-  border-radius: 0.65rem;
-  color: var(--sbp-green-strong) !important;
+  border-radius: var(--sbp-radius-lg);
+  color: var(--sbp-green-text) !important;
   background: color-mix(in srgb, var(--sbp-green) 8%, var(--sbp-surface));
   font: inherit;
-  font-size: 0.78rem;
+  font-size: var(--sbp-fs-sm);
   line-height: 1.25;
   text-decoration: none;
   cursor: pointer;
@@ -453,7 +784,7 @@ a {
 
 .document-pill small {
   color: var(--sbp-muted);
-  font-size: 0.62rem;
+  font-size: var(--sbp-fs-eyebrow);
 }
 
 .chat-citation-pill {
@@ -478,7 +809,7 @@ a {
   align-items: center;
   padding: 1.5rem;
   border: 1px solid var(--sbp-border);
-  border-radius: 1rem;
+  border-radius: var(--sbp-radius-lg);
   background: var(--sbp-surface);
   box-shadow: var(--sbp-shadow);
 }
@@ -507,12 +838,12 @@ a {
   gap: 1rem;
   padding: 1rem;
   border: 1px dashed var(--sbp-border);
-  border-radius: 0.5rem;
+  border-radius: var(--sbp-radius);
   background: color-mix(in srgb, var(--sbp-surface) 72%, transparent);
 }
 
 .pdf-source-placeholder > i {
-  color: #b91c1c;
+  color: var(--sbp-danger);
   font-size: 2rem;
 }
 
@@ -551,7 +882,7 @@ a {
 .relationship-section h2 {
   margin: 0;
   color: var(--sbp-muted);
-  font-size: 0.78rem;
+  font-size: var(--sbp-fs-sm);
   font-weight: 700;
   letter-spacing: 0;
   text-transform: uppercase;
@@ -582,94 +913,67 @@ a {
   gap: 1rem;
 }
 
-.chat-layout {
+/* ---- Chat rail: sessions ---- */
+.session-list {
   display: grid;
-  grid-template-columns: minmax(15rem, 0.24fr) minmax(0, 1fr);
-  gap: 0.75rem;
-  align-items: stretch;
-}
-
-.session-panel {
-  position: sticky;
-  top: 1rem;
-}
-
-.session-list,
-.chat-main,
-.context-search,
-.context-results {
-  display: grid;
-  gap: 0.55rem;
-}
-
-.session-panel-actions {
-  margin-bottom: 0.5rem;
+  gap: 1px;
+  min-height: 0;
 }
 
 .session-item {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 0.35rem;
-  align-items: center;
-  padding: 0.2rem;
-  border: 1px solid var(--sbp-border);
-  border-radius: 0.4rem;
-  background: color-mix(in srgb, var(--sbp-surface) 78%, transparent);
-}
-
-.session-item.active {
-  border-color: var(--sbp-gold);
-  background: color-mix(in srgb, var(--sbp-gold) 14%, var(--sbp-surface));
-}
-
-.session-item.workspace {
-  border-color: color-mix(in srgb, var(--sbp-green) 32%, var(--sbp-border));
-}
-
-.session-item > button:first-child {
-  display: grid;
-  min-width: 0;
   gap: 0.15rem;
-  padding: 0.35rem 0.45rem;
-  border: 0;
-  color: var(--sbp-text);
-  text-align: left;
-  background: transparent;
-  cursor: pointer;
+  align-items: center;
+  border-radius: var(--sbp-radius);
 }
 
-.session-item > button:first-child:disabled {
+/* Selection is green, matching the Laws tree, the Circulars result list and the
+   sidebar. Gold is reserved for pinned/workspace items. */
+.session-item.is-selected {
+  background: color-mix(in srgb, var(--sbp-green) 11%, var(--sbp-surface));
+}
+
+.session-item.is-selected .sbp-row-title {
+  color: var(--sbp-green-text);
+  font-weight: 600;
+}
+
+.session-item.is-selected .session-open:hover {
+  background: transparent;
+}
+
+.session-item.workspace .session-name i {
+  color: var(--sbp-gold);
+}
+
+.session-open {
+  min-width: 0;
+  gap: 0.1rem;
+}
+
+.session-open:disabled {
   cursor: wait;
   opacity: 0.6;
 }
 
-.session-item strong,
-.session-item span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.session-item strong {
+.session-name {
   display: flex;
   align-items: center;
   min-width: 0;
   gap: 0.35rem;
+  white-space: nowrap;
 }
 
-.session-item strong i {
+.session-name i {
   flex: 0 0 auto;
   color: var(--sbp-green);
-  font-size: 0.85rem;
+  font-size: var(--sbp-fs-meta);
 }
 
-.session-item span,
-.context-header span,
-.context-results span,
-.composer-actions span,
-.chat-message-meta span {
-  color: var(--sbp-muted);
-  font-size: 0.82rem;
+.session-name span {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .session-item-actions,
@@ -693,29 +997,31 @@ a {
   width: 100%;
 }
 
-.context-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 1rem;
-  margin-bottom: 0.55rem;
-}
-
+/* ---- Chat context strip ---- */
 .context-chip-list {
   display: flex;
-  gap: 0.5rem;
+  gap: 0.3rem;
   flex-wrap: wrap;
-  margin-bottom: 0.55rem;
+  overflow-y: auto;
 }
 
+/* Was a PrimeVue Tag with severity="info" — the only blue in an app that has no
+   blue. Now the same green-tinted chip family as tags and relationship pills. */
 .context-chip {
   display: inline-flex;
   align-items: center;
   max-width: 100%;
-  gap: 0.35rem;
+  gap: 0.3rem;
+  padding: 0.16rem 0.28rem 0.16rem 0.45rem;
+  border: 1px solid color-mix(in srgb, var(--sbp-green) 30%, var(--sbp-border));
+  border-radius: var(--sbp-radius-pill);
+  background: color-mix(in srgb, var(--sbp-green) 9%, var(--sbp-surface));
+  color: var(--sbp-green-text);
+  font-size: var(--sbp-fs-meta);
+  line-height: 1.3;
 }
 
-.context-chip span {
+.context-chip > span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -723,33 +1029,34 @@ a {
 
 .context-chip button {
   display: inline-grid;
+  flex: 0 0 auto;
   place-items: center;
-  width: 1.2rem;
-  height: 1.2rem;
+  width: 1.1rem;
+  height: 1.1rem;
   padding: 0;
   border: 0;
-  border-radius: 999px;
+  border-radius: var(--sbp-radius-pill);
   color: inherit;
+  font-size: var(--sbp-fs-eyebrow);
   background: transparent;
   cursor: pointer;
+}
+
+.context-chip button:hover {
+  background: color-mix(in srgb, var(--sbp-green) 18%, transparent);
 }
 
 .workspace-context-note {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
-  margin-bottom: 0.55rem;
+  margin-left: auto;
   color: var(--sbp-muted);
-  font-size: 0.85rem;
+  font-size: var(--sbp-fs-meta);
 }
 
 .workspace-context-note i {
-  color: var(--sbp-green);
-}
-
-.context-search .p-input-icon-left,
-.context-search .p-inputtext {
-  width: 100%;
+  color: var(--sbp-gold);
 }
 
 .context-search-state,
@@ -758,14 +1065,17 @@ a {
   align-items: center;
   gap: 0.5rem;
   color: var(--sbp-muted);
-  font-size: 0.9rem;
+  font-size: var(--sbp-fs-meta);
 }
 
 .context-results {
+  display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 0;
+  min-height: 0;
   border: 1px solid var(--sbp-border);
-  border-radius: 0.4rem;
+  border-radius: var(--sbp-radius);
+  overflow: auto;
 }
 
 .context-results .circular-result-item:last-child {
@@ -780,12 +1090,6 @@ a {
 .result-action-icon {
   color: var(--sbp-green);
   text-align: center;
-}
-
-.conversation-card .p-card-content {
-  display: grid;
-  min-height: min(72vh, 820px);
-  gap: 0.7rem;
 }
 
 .chat-messages {
@@ -804,7 +1108,7 @@ a {
   max-width: min(46rem, 92%);
   padding: 0.7rem 0.85rem;
   border: 1px solid var(--sbp-border);
-  border-radius: 0.45rem;
+  border-radius: var(--sbp-radius);
   color: var(--sbp-text);
   background: color-mix(in srgb, var(--sbp-surface) 84%, transparent);
 }
@@ -886,7 +1190,7 @@ a {
   overflow: auto;
   margin: 0;
   padding: 0.85rem;
-  border-radius: 0.5rem;
+  border-radius: var(--sbp-radius);
   background: color-mix(in srgb, var(--sbp-bg) 72%, #000000);
 }
 
@@ -920,7 +1224,7 @@ a {
 .table-shell {
   overflow: hidden;
   border: 1px solid var(--sbp-border);
-  border-radius: 0.75rem;
+  border-radius: var(--sbp-radius-lg);
   background: var(--sbp-surface);
 }
 
@@ -932,7 +1236,7 @@ a {
   padding: 0.85rem 1rem;
   border-bottom: 1px solid var(--sbp-border);
   color: var(--sbp-muted);
-  font-size: 0.9rem;
+  font-size: var(--sbp-fs-body);
 }
 
 .circular-title-cell {
@@ -956,20 +1260,20 @@ a {
   gap: 0.75rem;
   flex-wrap: wrap;
   color: var(--sbp-muted);
-  font-size: 0.82rem;
+  font-size: var(--sbp-fs-sm);
 }
 
 .snippet {
   max-width: 54rem;
   margin: 0;
   color: var(--sbp-muted);
-  font-size: 0.88rem;
+  font-size: var(--sbp-fs-body);
   line-height: 1.45;
 }
 
 .snippet mark {
   padding: 0.05rem 0.2rem;
-  border-radius: 0.25rem;
+  border-radius: var(--sbp-radius-sm);
   color: var(--sbp-text);
   background: color-mix(in srgb, var(--sbp-gold) 28%, transparent);
 }
@@ -1047,7 +1351,7 @@ a {
   height: min(74vh, 58rem);
   min-height: 34rem;
   border: 1px solid color-mix(in srgb, var(--sbp-border) 72%, #000000);
-  border-radius: 0.5rem;
+  border-radius: var(--sbp-radius);
   background: #ffffff;
 }
 
@@ -1061,7 +1365,7 @@ a {
   gap: 0.8rem;
   padding: clamp(1.5rem, 4vw, 3rem);
   border: 1px dashed var(--sbp-border);
-  border-radius: 0.5rem;
+  border-radius: var(--sbp-radius);
   color: var(--sbp-muted);
   text-align: center;
   background: color-mix(in srgb, var(--sbp-surface) 72%, transparent);
@@ -1070,7 +1374,7 @@ a {
 .state-block h2 {
   margin: 0;
   color: var(--sbp-text);
-  font-size: 1.1rem;
+  font-size: var(--sbp-fs-title);
   letter-spacing: 0;
 }
 
@@ -1086,7 +1390,7 @@ a {
 }
 
 .state-error .state-icon {
-  color: #c2410c;
+  color: var(--sbp-danger);
 }
 
 .state-spinner {
@@ -1096,7 +1400,7 @@ a {
 
 /* Dense workspace system */
 .p-component {
-  font-size: 0.86rem;
+  font-size: var(--sbp-fs-body);
 }
 
 .p-button {
@@ -1122,7 +1426,7 @@ a {
 
 .p-card-title {
   margin-bottom: 0.55rem;
-  font-size: 1rem;
+  font-size: var(--sbp-fs-title);
 }
 
 .p-card-content {
@@ -1149,82 +1453,75 @@ a {
   padding: 0;
 }
 
+/* Chat is a rail + pane like Circulars and Laws, not a stack of floating cards. */
 .chat-view {
-  height: 100%;
-  min-height: 0;
-  grid-template-rows: minmax(0, 1fr);
+  --sbp-rail-width: 17rem;
 }
 
-.chat-view .chat-layout,
-.chat-view .chat-main,
-.chat-view .session-panel,
-.chat-view .conversation-card {
-  height: 100%;
-  min-height: 0;
-}
-
-.chat-view .session-panel {
-  position: static;
-  overflow: hidden;
-}
-
-.chat-view .session-panel .p-card-body,
-.chat-view .conversation-card .p-card-body {
-  display: grid;
-  height: 100%;
-  min-height: 0;
-  grid-template-rows: minmax(0, 1fr);
-}
-
-.chat-view .session-panel .p-card-content {
-  min-height: 0;
-  overflow-y: auto;
-}
-
-.chat-view .chat-main {
-  grid-template-rows: auto minmax(0, 1fr);
-  overflow: hidden;
-}
-
-.chat-view .context-card {
-  min-height: 0;
-  overflow: hidden;
-}
-
-.chat-view .context-card .p-card-content {
-  display: grid;
-  max-height: min(15rem, 32vh);
-  grid-template-rows: auto auto minmax(0, 1fr);
-  overflow: hidden;
-}
-
-.chat-view .context-results {
-  max-height: min(9rem, 20vh);
-  overflow-y: auto;
-}
-
-.chat-view .conversation-card {
-  overflow: hidden;
-}
-
-.chat-view .conversation-card .p-card-content {
+.chat-pane {
   display: flex;
-  min-height: 0;
-  height: 100%;
-  gap: 0.45rem;
   flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--sbp-surface);
+  overflow: hidden;
 }
 
-.chat-view .chat-messages {
+/* ---- Context strip ---- */
+/* Plays the same role as the Circulars search-controls bar: a quiet band under
+   the top of the pane holding the controls that scope what follows. */
+.chat-context-bar {
+  display: grid;
+  gap: 0.45rem;
+  flex: 0 0 auto;
+  max-height: min(16rem, 34vh);
+  padding: 0.5rem 0.85rem;
+  border-bottom: 1px solid var(--sbp-border);
+  background: color-mix(in srgb, var(--sbp-subtle) 30%, var(--sbp-surface));
+  overflow: hidden;
+}
+
+.context-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.context-count {
+  flex: 0 0 auto;
+  color: var(--sbp-muted);
+  font-size: var(--sbp-fs-meta);
+  white-space: nowrap;
+}
+
+.context-search-field {
+  flex: 1 1 auto;
+  max-width: 22rem;
+  margin-left: auto;
+  padding-block: 0.28rem;
+}
+
+.chat-error {
+  flex: 0 0 auto;
+  margin: 0.5rem 0.85rem 0;
+}
+
+.chat-messages {
+  flex: 1 1 auto;
   min-height: 0;
   max-height: none;
-  flex: 1 1 auto;
+  padding: 0.85rem;
+  overflow: auto;
   overscroll-behavior: contain;
 }
 
-.chat-view .composer {
+.composer {
   flex: 0 0 auto;
   margin-top: 0;
+  padding: 0.6rem 0.85rem 0.7rem;
+  border-top: 1px solid var(--sbp-border);
+  background: var(--sbp-surface);
 }
 
 .circulars-screen {
@@ -1269,10 +1566,10 @@ a {
   min-height: 2.1rem;
   padding: 0.35rem 0.55rem;
   border: 1px solid var(--sbp-border);
-  border-radius: 6px;
+  border-radius: var(--sbp-radius);
   color: var(--sbp-text);
   font: inherit;
-  font-size: 0.78rem;
+  font-size: var(--sbp-fs-sm);
   background: color-mix(in srgb, var(--sbp-surface) 72%, var(--sbp-subtle));
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
@@ -1307,14 +1604,14 @@ a {
   min-width: 1.35rem;
   height: 1.2rem;
   padding-inline: 0.28rem;
-  border-radius: 999px;
+  border-radius: var(--sbp-radius-pill);
   color: var(--sbp-muted);
-  font-size: 0.68rem;
+  font-size: var(--sbp-fs-eyebrow);
   background: color-mix(in srgb, var(--sbp-border) 72%, transparent);
 }
 
 .workspace-tab.active .workspace-tab-count {
-  color: var(--sbp-green-strong);
+  color: var(--sbp-green-text);
   background: color-mix(in srgb, var(--sbp-green) 16%, var(--sbp-subtle));
 }
 
@@ -1332,14 +1629,14 @@ a {
   min-height: 2rem;
   padding-inline: 0.45rem;
   color: var(--sbp-muted);
-  font-size: 0.75rem;
+  font-size: var(--sbp-fs-meta);
   font-weight: 650;
   white-space: nowrap;
 }
 
 .workspace-pinned-summary i {
   color: var(--sbp-gold);
-  font-size: 0.78rem;
+  font-size: var(--sbp-fs-sm);
 }
 
 .workspace-create-tab {
@@ -1419,7 +1716,7 @@ a {
   left: 0.55rem;
   z-index: 1;
   color: var(--sbp-muted);
-  font-size: 0.75rem;
+  font-size: var(--sbp-fs-meta);
   pointer-events: none;
 }
 
@@ -1453,7 +1750,7 @@ a {
 
 .year-sep {
   color: var(--sbp-muted);
-  font-size: 0.82rem;
+  font-size: var(--sbp-fs-sm);
   flex: 0 0 auto;
 }
 
@@ -1506,19 +1803,8 @@ a {
   gap: 0.08rem;
 }
 
-.workspace-brandline span,
-.filter-stack label > span:first-child,
-.detail-section h2,
-.detail-pane-toolbar > span {
-  color: var(--sbp-muted);
-  font-size: 0.68rem;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
 .workspace-brandline strong {
-  font-size: 0.9rem;
+  font-size: var(--sbp-fs-body);
 }
 
 .research-workspace-panel {
@@ -1537,7 +1823,7 @@ a {
 
 .workspace-panel-heading span {
   color: var(--sbp-muted);
-  font-size: 0.68rem;
+  font-size: var(--sbp-fs-eyebrow);
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -1592,7 +1878,7 @@ a {
   top: 50%;
   left: 0.6rem;
   color: var(--sbp-muted);
-  font-size: 0.8rem;
+  font-size: var(--sbp-fs-sm);
   transform: translateY(-50%);
   pointer-events: none;
 }
@@ -1657,14 +1943,14 @@ a {
 
 .results-count strong {
   color: var(--sbp-green);
-  font-size: 1rem;
+  font-size: var(--sbp-fs-title);
 }
 
 .results-count span,
 .results-toolbar-actions,
 .results-pagination {
   color: var(--sbp-muted);
-  font-size: 0.75rem;
+  font-size: var(--sbp-fs-meta);
 }
 
 .results-toolbar-actions {
@@ -1710,18 +1996,10 @@ a {
   gap: 0.05rem;
 }
 
-.pinned-results-heading span {
-  color: var(--sbp-muted);
-  font-size: 0.66rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
 .pinned-results-heading strong {
   overflow: hidden;
   color: var(--sbp-text);
-  font-size: 0.84rem;
+  font-size: var(--sbp-fs-sm);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1736,6 +2014,10 @@ a {
   border: 0;
   border-bottom: 1px solid var(--sbp-border);
   color: var(--sbp-text);
+  /* Without this the <button> keeps the UA default (13.33px system font), which
+     is what any child without an explicit size — .result-topline — inherited. */
+  font: inherit;
+  font-size: var(--sbp-fs-sm);
   text-align: left;
   background: transparent;
   cursor: pointer;
@@ -1781,7 +2063,7 @@ a {
 .result-content > strong {
   overflow: hidden;
   color: var(--sbp-text);
-  font-size: 0.84rem;
+  font-size: var(--sbp-fs-sm);
   font-weight: 650;
   line-height: 1.32;
 }
@@ -1801,8 +2083,8 @@ a {
 .result-reference {
   min-width: 0;
   overflow: hidden;
-  color: color-mix(in srgb, var(--sbp-green-strong) 82%, var(--sbp-text));
-  font-size: 0.73rem;
+  color: color-mix(in srgb, var(--sbp-green-text) 82%, var(--sbp-text));
+  font-size: var(--sbp-fs-meta);
   font-weight: 500;
   line-height: 1.3;
   text-overflow: ellipsis;
@@ -1812,7 +2094,7 @@ a {
 .result-meta,
 .result-snippet {
   color: var(--sbp-muted);
-  font-size: 0.73rem;
+  font-size: var(--sbp-fs-meta);
   line-height: 1.35;
 }
 
@@ -1832,7 +2114,7 @@ a {
 .result-topline .p-tag,
 .detail-badges .p-tag {
   padding: 0.12rem 0.38rem;
-  font-size: 0.65rem;
+  font-size: var(--sbp-fs-eyebrow);
 }
 
 .results-pagination {
@@ -1883,10 +2165,10 @@ a {
   flex: 1;
   padding: 0.4rem 0.5rem;
   border: 1px solid var(--sbp-border);
-  border-radius: 999px;
+  border-radius: var(--sbp-radius-pill);
   background: var(--sbp-subtle);
   color: var(--sbp-text);
-  font-size: 0.78rem;
+  font-size: var(--sbp-fs-sm);
   font-weight: 600;
   cursor: pointer;
 }
@@ -1894,7 +2176,7 @@ a {
 .detail-tabbar button.active {
   background: color-mix(in srgb, var(--sbp-green) 14%, var(--sbp-surface));
   border-color: color-mix(in srgb, var(--sbp-green) 35%, transparent);
-  color: var(--sbp-green-strong);
+  color: var(--sbp-green-text);
 }
 
 .detail-body {
@@ -1931,9 +2213,9 @@ a {
   align-items: center;
   gap: 0.5rem;
   padding: 2.5rem 1rem;
-  color: var(--sbp-text-muted, #6b7280);
+  color: var(--sbp-muted);
   text-align: center;
-  font-size: 0.85rem;
+  font-size: var(--sbp-fs-body);
 }
 
 .detail-source-empty i {
@@ -1950,18 +2232,18 @@ a {
   gap: 0.55rem;
   padding: 2rem 1.25rem;
   text-align: center;
-  color: var(--sbp-text-muted, #6b7280);
+  color: var(--sbp-muted);
 }
 
 .detail-rail-empty i {
   font-size: 1.7rem;
-  color: color-mix(in srgb, var(--sbp-green) 55%, var(--sbp-text-muted, #6b7280));
+  color: color-mix(in srgb, var(--sbp-green) 55%, var(--sbp-muted));
   opacity: 0.85;
 }
 
 .detail-rail-empty-title {
   margin: 0;
-  font-size: 0.9rem;
+  font-size: var(--sbp-fs-body);
   font-weight: 600;
   color: var(--sbp-text);
 }
@@ -1969,7 +2251,7 @@ a {
 .detail-rail-empty-text {
   margin: 0;
   max-width: 18rem;
-  font-size: 0.78rem;
+  font-size: var(--sbp-fs-sm);
   line-height: 1.4;
 }
 
@@ -2033,21 +2315,13 @@ a {
   line-height: 1.2;
 }
 
-.detail-eyebrow {
-  font-size: 0.62rem;
-  font-weight: 700;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-  color: var(--sbp-muted);
-}
-
 .status-chip {
   display: inline-flex;
   align-items: center;
   gap: 0.32rem;
   padding: 0.15rem 0.5rem;
-  border-radius: 999px;
-  font-size: 0.66rem;
+  border-radius: var(--sbp-radius-pill);
+  font-size: var(--sbp-fs-eyebrow);
   font-weight: 600;
   text-transform: capitalize;
   border: 1px solid var(--sbp-border);
@@ -2058,13 +2332,13 @@ a {
 .status-chip .status-dot {
   width: 0.42rem;
   height: 0.42rem;
-  border-radius: 999px;
+  border-radius: var(--sbp-radius-pill);
   background: var(--sbp-muted);
   flex: 0 0 auto;
 }
 
 .status-chip.status-success {
-  color: var(--sbp-green-strong);
+  color: var(--sbp-green-text);
   border-color: color-mix(in srgb, var(--sbp-green) 32%, var(--sbp-border));
   background: color-mix(in srgb, var(--sbp-green) 10%, var(--sbp-surface));
 }
@@ -2084,17 +2358,13 @@ a {
 }
 
 .status-chip.status-danger {
-  color: #b3261e;
-  border-color: color-mix(in srgb, #d3302a 34%, var(--sbp-border));
-  background: color-mix(in srgb, #d3302a 10%, var(--sbp-surface));
+  color: var(--sbp-danger);
+  border-color: color-mix(in srgb, var(--sbp-danger) 34%, var(--sbp-border));
+  background: color-mix(in srgb, var(--sbp-danger) 10%, var(--sbp-surface));
 }
 
 .status-chip.status-danger .status-dot {
-  background: #d3302a;
-}
-
-.sbpeye-dark .status-chip.status-success {
-  color: #aee0cc;
+  background: var(--sbp-danger);
 }
 
 .detail-actions-sep {
@@ -2116,11 +2386,11 @@ a {
 .detail-inline-meta {
   gap: 0.65rem;
   color: var(--sbp-muted);
-  font-size: 0.75rem;
+  font-size: var(--sbp-fs-meta);
 }
 
 .detail-inline-meta i {
-  font-size: 0.7rem;
+  font-size: var(--sbp-fs-meta);
 }
 
 .generation-progress {
@@ -2128,11 +2398,11 @@ a {
   align-items: center;
   gap: 0.35rem;
   color: var(--sbp-muted);
-  font-size: 0.72rem;
+  font-size: var(--sbp-fs-meta);
 }
 
 .generation-progress i {
-  color: var(--p-purple-500);
+  color: var(--sbp-gold);
 }
 
 .generation-menu {
@@ -2143,11 +2413,6 @@ a {
 
 .generation-menu-title {
   padding: 0.3rem 0.55rem;
-  color: var(--sbp-muted);
-  font-size: 0.7rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
 }
 
 .generation-menu .p-button {
@@ -2191,7 +2456,7 @@ a {
 }
 
 .section-icon {
-  font-size: 0.74rem;
+  font-size: var(--sbp-fs-meta);
   color: var(--sbp-green);
   padding-left: 0.4rem;
   border-left: 2px solid color-mix(in srgb, var(--sbp-green) 45%, transparent);
@@ -2213,11 +2478,11 @@ a {
 
 .collapsible-heading > i {
   color: var(--sbp-muted);
-  font-size: 0.68rem;
+  font-size: var(--sbp-fs-eyebrow);
 }
 
 .detail-copy {
-  font-size: 0.8rem;
+  font-size: var(--sbp-fs-sm);
   line-height: 1.42;
 }
 
@@ -2237,31 +2502,27 @@ a {
   max-width: 100%;
   padding: 0.2rem 0.42rem;
   border: 1px solid var(--sbp-border);
-  border-radius: 999px;
+  border-radius: var(--sbp-radius-pill);
   color: var(--sbp-text);
   background: var(--sbp-subtle);
-  font-size: 0.69rem;
+  font-size: var(--sbp-fs-eyebrow);
   line-height: 1.25;
 }
 
 .tag-pill {
   border-color: color-mix(in srgb, var(--sbp-green) 35%, var(--sbp-border));
-  color: var(--sbp-green-strong);
+  color: var(--sbp-green-text);
   background: color-mix(in srgb, var(--sbp-green) 9%, var(--sbp-surface));
 }
 
 .header-tag-pill {
   padding-block: 0.18rem;
-  font-size: 0.65rem;
-}
-
-.sbpeye-dark .tag-pill {
-  color: #aee0cc;
+  font-size: var(--sbp-fs-eyebrow);
 }
 
 .result-reference-location {
-  color: color-mix(in srgb, var(--sbp-green-strong) 76%, var(--sbp-text));
-  font-size: 0.72rem;
+  color: color-mix(in srgb, var(--sbp-green-text) 76%, var(--sbp-text));
+  font-size: var(--sbp-fs-meta);
   font-weight: 500;
 }
 
@@ -2282,12 +2543,12 @@ a {
   align-items: center;
   gap: 0.3rem;
   padding: 0.12rem 0.42rem;
-  border-radius: 999px;
-  font-size: 0.6rem;
+  border-radius: var(--sbp-radius-pill);
+  font-size: var(--sbp-fs-eyebrow);
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--sbp-green-strong);
+  color: var(--sbp-green-text);
   background: color-mix(in srgb, var(--sbp-green) 14%, var(--sbp-surface));
   border: 1px solid color-mix(in srgb, var(--sbp-green) 30%, transparent);
 }
@@ -2298,8 +2559,8 @@ a {
   justify-content: center;
   min-width: 1.1rem;
   padding: 0 0.2rem;
-  border-radius: 999px;
-  font-size: 0.58rem;
+  border-radius: var(--sbp-radius-pill);
+  font-size: var(--sbp-fs-eyebrow);
   color: var(--sbp-surface);
   background: color-mix(in srgb, var(--sbp-green-strong) 80%, var(--sbp-text));
 }
@@ -2315,7 +2576,7 @@ a {
 }
 
 .relationship-ref-pill {
-  font-size: 0.7rem;
+  font-size: var(--sbp-fs-meta);
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s;
 }
@@ -2343,10 +2604,10 @@ a {
 .relationship-show-more {
   padding: 0.18rem 0.42rem;
   border: 1px dashed var(--sbp-border);
-  border-radius: 999px;
+  border-radius: var(--sbp-radius-pill);
   background: transparent;
-  color: var(--sbp-text-muted, var(--sbp-text));
-  font-size: 0.66rem;
+  color: var(--sbp-muted);
+  font-size: var(--sbp-fs-eyebrow);
   font-weight: 600;
   cursor: pointer;
   transition: border-color 0.15s, color 0.15s;
@@ -2354,7 +2615,7 @@ a {
 
 .relationship-show-more:hover {
   border-color: var(--sbp-green);
-  color: var(--sbp-green-strong);
+  color: var(--sbp-green-text);
 }
 
 .compact-checklist {
@@ -2363,9 +2624,9 @@ a {
 
 .compact-checklist li {
   padding: 0.45rem 0.55rem;
-  border-radius: 0.35rem;
+  border-radius: var(--sbp-radius-sm);
   background: var(--sbp-subtle);
-  font-size: 0.8rem;
+  font-size: var(--sbp-fs-sm);
 }
 
 .compact-relationships {
@@ -2381,7 +2642,7 @@ a {
   width: 100%;
   padding: 0.45rem 0.55rem;
   border: 1px solid var(--sbp-border);
-  border-radius: 0.35rem;
+  border-radius: var(--sbp-radius-sm);
   color: var(--sbp-text);
   text-align: left;
   background: transparent;
@@ -2412,7 +2673,7 @@ a {
   max-width: 60rem;
   margin-inline: auto;
   padding: clamp(1rem, 2.5vw, 2rem);
-  font-size: 0.86rem;
+  font-size: var(--sbp-fs-body);
   font-weight: 400;
   line-height: 1.6;
   overflow-wrap: normal;
@@ -2520,7 +2781,7 @@ a {
 }
 
 .pdf-source-compact > i:first-child {
-  color: #b91c1c;
+  color: var(--sbp-danger);
   font-size: 1.4rem;
 }
 
@@ -2539,9 +2800,15 @@ a {
 }
 
 @media (max-width: 960px) {
-  .chat-view .chat-layout {
-    grid-template-rows: minmax(8rem, 0.35fr) minmax(18rem, 1fr);
-    overflow: hidden;
+  /* Rail-and-pane views stack: rail on top, main pane below. */
+  .sbp-pane-view {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(6rem, 0.32fr) minmax(16rem, 1fr);
+  }
+
+  .sbp-rail {
+    border-right: 0;
+    border-bottom: 1px solid var(--sbp-border);
   }
 
   .workspace-tabs-bar {
@@ -2627,13 +2894,17 @@ a {
   .settings-grid,
   .detail-grid,
   .detail-layout,
-  .chat-layout,
   .split-layout {
     grid-template-columns: 1fr;
   }
 
-  .session-panel {
-    position: static;
+  .context-header {
+    flex-wrap: wrap;
+  }
+
+  .context-search-field {
+    max-width: none;
+    margin-left: 0;
   }
 
   .context-results {

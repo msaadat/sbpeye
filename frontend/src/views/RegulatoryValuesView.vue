@@ -238,7 +238,7 @@ function openCircular(id?: string) {
 
 .values-header p {
   margin: 0;
-  color: var(--p-text-muted-color, #6b7280);
+  color: var(--sbp-muted);
 }
 
 .values-filters {
@@ -247,9 +247,9 @@ function openCircular(id?: string) {
   gap: 0.75rem 1rem;
   align-items: end;
   padding: 1rem;
-  border: 1px solid var(--p-content-border-color, #e5e7eb);
-  border-radius: 0.75rem;
-  background: var(--p-content-background, #fff);
+  border: 1px solid var(--sbp-border);
+  border-radius: var(--sbp-radius-lg);
+  background: var(--sbp-surface);
 }
 
 .filter-field {
@@ -259,11 +259,11 @@ function openCircular(id?: string) {
 }
 
 .filter-field > label {
-  font-size: 0.74rem;
+  font-size: var(--sbp-fs-meta);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.03em;
-  color: var(--p-text-muted-color, #6b7280);
+  color: var(--sbp-muted);
 }
 
 .filter-field :deep(.p-inputtext),
@@ -282,7 +282,7 @@ function openCircular(id?: string) {
 .filter-checkbox > label {
   text-transform: none;
   font-weight: 500;
-  font-size: 0.85rem;
+  font-size: var(--sbp-fs-body);
   color: var(--p-text-color, inherit);
 }
 
@@ -296,7 +296,7 @@ function openCircular(id?: string) {
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  color: var(--p-text-muted-color, #6b7280);
+  color: var(--sbp-muted);
 }
 
 .values-count {
@@ -307,7 +307,7 @@ function openCircular(id?: string) {
 .values-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.88rem;
+  font-size: var(--sbp-fs-body);
 }
 
 .values-table th,
@@ -315,20 +315,20 @@ function openCircular(id?: string) {
   padding: 0.5rem 0.6rem;
   text-align: left;
   vertical-align: top;
-  border-bottom: 1px solid var(--p-content-border-color, #e5e7eb);
+  border-bottom: 1px solid var(--sbp-border);
 }
 
 .values-table thead th {
-  font-size: 0.72rem;
+  font-size: var(--sbp-fs-meta);
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--p-text-muted-color, #6b7280);
+  color: var(--sbp-muted);
 }
 
 .col-metric { font-weight: 600; white-space: nowrap; }
 .col-value { font-variant-numeric: tabular-nums; white-space: nowrap; }
-.col-date { white-space: nowrap; color: var(--p-text-muted-color, #6b7280); }
-.unit { color: var(--p-text-muted-color, #6b7280); margin-left: 0.2rem; }
+.col-date { white-space: nowrap; color: var(--sbp-muted); }
+.unit { color: var(--sbp-muted); margin-left: 0.2rem; }
 
 .circular-link {
   background: none;
@@ -344,7 +344,7 @@ function openCircular(id?: string) {
 
 .status-flag {
   margin-left: 0.4rem;
-  font-size: 0.72rem;
+  font-size: var(--sbp-fs-meta);
   text-transform: uppercase;
   color: #b45309;
 }

@@ -873,7 +873,7 @@ onBeforeUnmount(stopPolling)
 }
 
 .regulation-list li + li {
-  border-top: 1px solid var(--p-content-border-color, #e5e7eb);
+  border-top: 1px solid var(--sbp-border);
 }
 
 .regulation-item {
@@ -881,7 +881,7 @@ onBeforeUnmount(stopPolling)
   width: 100%;
   padding: 0.35rem 0.3rem;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--sbp-radius-sm);
   background: transparent;
   color: inherit;
   font: inherit;
@@ -899,14 +899,14 @@ onBeforeUnmount(stopPolling)
 
 .regulation-crumb {
   display: block;
-  font-size: 0.64rem;
+  font-size: var(--sbp-fs-eyebrow);
   line-height: 1.3;
   color: var(--sbp-green-text);
 }
 
 .regulation-title {
   display: block;
-  font-size: 0.72rem;
+  font-size: var(--sbp-fs-meta);
   line-height: 1.35;
   font-weight: 600;
   overflow-wrap: anywhere;
@@ -914,26 +914,26 @@ onBeforeUnmount(stopPolling)
 
 .regulation-part {
   font-weight: 500;
-  color: var(--p-text-muted-color, #6b7280);
+  color: var(--sbp-muted);
   font-variant-numeric: tabular-nums;
 }
 
 .regulation-type {
   display: block;
   margin-top: 0.1rem;
-  font-size: 0.62rem;
+  font-size: var(--sbp-fs-eyebrow);
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--p-text-muted-color, #6b7280);
+  color: var(--sbp-muted);
 }
 
 .entity-group-label {
   display: block;
-  font-size: 0.64rem;
+  font-size: var(--sbp-fs-eyebrow);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--p-text-muted-color, #6b7280);
+  color: var(--sbp-muted);
   margin-bottom: 0.25rem;
 }
 
@@ -945,7 +945,7 @@ onBeforeUnmount(stopPolling)
 
 .entity-item {
   padding: 0.3rem 0;
-  border-top: 1px solid var(--p-content-border-color, #e5e7eb);
+  border-top: 1px solid var(--sbp-border);
 }
 
 .entity-line {
@@ -953,7 +953,7 @@ onBeforeUnmount(stopPolling)
   align-items: baseline;
   justify-content: space-between;
   gap: 0.4rem;
-  font-size: 0.72rem;
+  font-size: var(--sbp-fs-meta);
   line-height: 1.3;
 }
 
@@ -972,7 +972,7 @@ onBeforeUnmount(stopPolling)
 }
 
 .entity-unit {
-  color: var(--p-text-muted-color, #6b7280);
+  color: var(--sbp-muted);
   font-weight: 400;
   margin-left: 0.2rem;
 }
@@ -983,12 +983,12 @@ onBeforeUnmount(stopPolling)
   align-items: baseline;
   gap: 0.2rem 0.5rem;
   margin-top: 0.12rem;
-  font-size: 0.68rem;
+  font-size: var(--sbp-fs-eyebrow);
   line-height: 1.3;
 }
 
 .entity-subject {
-  color: var(--p-text-muted-color, #4b5563);
+  color: var(--sbp-muted);
   overflow-wrap: anywhere;
 }
 
@@ -996,7 +996,7 @@ onBeforeUnmount(stopPolling)
   display: inline-flex;
   align-items: center;
   gap: 0.2rem;
-  color: var(--p-text-muted-color, #6b7280);
+  color: var(--sbp-muted);
   white-space: nowrap;
 }
 </style>

@@ -67,12 +67,14 @@ interface TimelineEntry {
   rels: { type: string; dir: 'out' | 'in' }[]
 }
 
+// Categorical scale drawn from the app palette, ordered by how much force the
+// relationship carries: green = still in effect, gold = replaced, red = void.
 const TYPE_STYLES: Record<string, { label: string; color: string }> = {
   amends: { label: 'Amends', color: 'var(--sbp-green)' },
-  adds_to: { label: 'Adds to', color: 'var(--p-blue-500)' },
-  supersedes: { label: 'Supersedes', color: 'var(--p-orange-500)' },
-  clarifies: { label: 'Clarifies', color: 'var(--p-purple-400)' },
-  cancels: { label: 'Cancels', color: 'var(--p-red-500)' },
+  adds_to: { label: 'Adds to', color: 'var(--p-primary-400)' },
+  supersedes: { label: 'Supersedes', color: 'var(--sbp-gold)' },
+  clarifies: { label: 'Clarifies', color: 'var(--sbp-muted)' },
+  cancels: { label: 'Cancels', color: 'var(--sbp-danger)' },
 }
 
 function typeStyle(type: string): { label: string; color: string } {
@@ -251,9 +253,9 @@ function arcPath(p: { sourceX: number; sourceY: number; targetX: number; targetY
 
 function statusColor(status: string | null): string {
   const s = (status || '').toLowerCase()
-  if (s.includes('active') || s.includes('indexed')) return 'var(--p-green-500)'
+  if (s.includes('active') || s.includes('indexed')) return 'var(--sbp-success)'
   if (s.includes('superseded') || s.includes('replaced') || s.includes('amended')) return 'var(--sbp-gold)'
-  if (s.includes('withdrawn') || s.includes('cancel')) return 'var(--p-red-400)'
+  if (s.includes('withdrawn') || s.includes('cancel')) return 'var(--sbp-danger)'
   return 'var(--sbp-muted)'
 }
 
@@ -375,7 +377,7 @@ function onNodeClick({ node }: { node: Node<NodeData> }) {
   position: relative;
   width: 210px;
   padding: 10px 14px;
-  border-radius: 8px;
+  border-radius: var(--sbp-radius);
   border: 1.5px solid var(--sbp-border);
   background: var(--sbp-surface);
   font-family: inherit;
@@ -392,14 +394,14 @@ function onNodeClick({ node }: { node: Node<NodeData> }) {
   align-items: center;
   justify-content: center;
   padding: 0;
-  border-radius: 6px;
+  border-radius: var(--sbp-radius);
   border: 1px solid var(--sbp-border);
   background: var(--sbp-surface);
   color: var(--sbp-muted);
   cursor: pointer;
   opacity: 0;
   transition: opacity 0.15s, color 0.15s, border-color 0.15s;
-  font-size: 0.68rem;
+  font-size: var(--sbp-fs-eyebrow);
 }
 
 .cg-node:hover .cg-open-btn {
@@ -432,7 +434,7 @@ function onNodeClick({ node }: { node: Node<NodeData> }) {
 }
 
 .cg-node-label {
-  font-size: 0.78rem;
+  font-size: var(--sbp-fs-sm);
   font-weight: 500;
   color: var(--sbp-text);
   line-height: 1.35;
@@ -450,13 +452,13 @@ function onNodeClick({ node }: { node: Node<NodeData> }) {
 }
 
 .cg-node-date {
-  font-size: 0.66rem;
+  font-size: var(--sbp-fs-eyebrow);
   font-weight: 500;
   color: var(--sbp-muted);
 }
 
 .cg-node-status {
-  font-size: 0.62rem;
+  font-size: var(--sbp-fs-eyebrow);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.03em;
@@ -471,11 +473,11 @@ function onNodeClick({ node }: { node: Node<NodeData> }) {
   align-items: center;
   gap: 5px;
   padding: 6px 12px;
-  border-radius: 999px;
+  border-radius: var(--sbp-radius-pill);
   background: var(--sbp-surface);
   border: 1px solid var(--sbp-border);
   color: var(--sbp-text);
-  font-size: 0.72rem;
+  font-size: var(--sbp-fs-meta);
   font-family: inherit;
   cursor: pointer;
   box-shadow: var(--sbp-shadow-sm);
@@ -493,7 +495,7 @@ function onNodeClick({ node }: { node: Node<NodeData> }) {
   right: 16px;
   z-index: 5;
   color: var(--sbp-green);
-  font-size: 1rem;
+  font-size: var(--sbp-fs-title);
 }
 
 .cg-legend {
@@ -504,10 +506,10 @@ function onNodeClick({ node }: { node: Node<NodeData> }) {
   align-items: center;
   gap: 14px;
   padding: 6px 12px;
-  border-radius: 999px;
+  border-radius: var(--sbp-radius-pill);
   background: var(--sbp-surface);
   border: 1px solid var(--sbp-border);
-  font-size: 0.72rem;
+  font-size: var(--sbp-fs-meta);
   color: var(--sbp-text);
   pointer-events: none;
   box-shadow: var(--sbp-shadow-sm);

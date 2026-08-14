@@ -687,10 +687,10 @@ onMounted(() => {
   min-height: 2.65rem;
   padding: 0.4rem 0.55rem;
   border: 1px solid var(--sbp-border);
-  border-radius: 0.45rem;
+  border-radius: var(--sbp-radius);
   background: var(--sbp-surface);
   color: var(--sbp-text);
-  font-size: 0.78rem;
+  font-size: var(--sbp-fs-sm);
   font-weight: 600;
   line-height: 1.15;
   transition: border-color 0.15s ease, background 0.15s ease;
@@ -703,7 +703,7 @@ onMounted(() => {
 
 .toolbar-quick-link .pi {
   color: var(--sbp-green);
-  font-size: 0.7rem;
+  font-size: var(--sbp-fs-meta);
   flex: 0 0 auto;
 }
 
@@ -748,22 +748,22 @@ onMounted(() => {
 .eco-data-view :deep(.p-datatable-header-cell),
 .eco-data-view :deep(.p-datatable-tbody > tr > td) {
   padding: 0.32rem 0.5rem;
-  font-size: 0.82rem;
+  font-size: var(--sbp-fs-sm);
   line-height: 1.25;
 }
 
 .eco-data-view :deep(.p-tag) {
   padding: 0.15rem 0.38rem;
-  font-size: 0.7rem;
+  font-size: var(--sbp-fs-meta);
 }
 
 .eco-data-view :deep(.p-button-sm) {
   padding: 0.28rem 0.48rem;
-  font-size: 0.76rem;
+  font-size: var(--sbp-fs-meta);
 }
 
 .eco-data-view .table-shell {
-  border-radius: 0.45rem;
+  border-radius: var(--sbp-radius);
 }
 
 .eco-data-view .subsection-container {
@@ -788,7 +788,7 @@ onMounted(() => {
   align-items: center;
   gap: 0.25rem;
   color: var(--sbp-green);
-  font-size: 0.85rem;
+  font-size: var(--sbp-fs-body);
 }
 
 .archive-link:hover {

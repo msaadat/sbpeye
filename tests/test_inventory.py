@@ -7,6 +7,7 @@ text is verified against stored source text, and nothing is silently dropped.
 Chroma, the embedding backend, and the LLM are all stubbed, so runs are offline.
 """
 
+import json
 from datetime import datetime
 
 import numpy as np
@@ -655,6 +656,98 @@ def test_locating_lexical_chunks_leaves_dense_candidates_alone():
     InventorySearchService._locate_lexical_chunks(snapshot, [candidate], 3)
 
     assert candidate.chunk_indices == [1]
+
+
+# -------------------------------------------------------------- chat adapter
+
+
+def _install_inventory_backends(monkeypatch, collection):
+    """Point the chat tool's lazy `sbpeye.database` imports at the fixture doubles."""
+    import sbpeye.database as database
+
+    monkeypatch.setattr(database, "collection", collection)
+    monkeypatch.setattr(database, "embedding_backend", FakeBackend(), raising=False)
+    monkeypatch.setattr(database, "embedding_config", FakeConfig(), raising=False)
+
+
+def _offline_chat_client(terms=("money laundering",)):
+    """An `AIClient` whose only LLM call is stubbed, so the tool never hits a network.
+
+    `_inventory_tool` builds its own `AIClientAdapter(self)`, and the adapter goes
+    through `_complete_json`, so stubbing that one method covers every layer the tool
+    can reach.
+    """
+    from sbpeye.ai import AIClient, AIConfig
+
+    client = AIClient(AIConfig())
+    client._complete_json = lambda *a, **kw: json.dumps({"terms": list(terms)})
+    return client
+
+
+def test_chat_inventory_tool_returns_unreviewed_candidates(indexed, monkeypatch):
+    """The chat adapter must not present skipped adjudication as a reviewed answer.
+
+    With `skip_adjudication` the service marks every candidate included, so the honesty
+    has to come from the payload: the model is told these are unreviewed and why.
+    """
+    db, collection = indexed
+    _install_inventory_backends(monkeypatch, collection)
+
+    payload = json.loads(_offline_chat_client()._inventory_tool(
+        {"query": "anti-money laundering", "sources": "circulars"}, db
+    ))
+
+    assert payload["reviewed"] is False
+    assert "unreviewed" in payload["note"].lower()
+    assert payload["results"], "the sweep should find the AML circulars"
+    assert payload["documents_matched"] >= len(payload["results"])
+    assert "anti-money laundering" in payload["search_terms"]
+
+
+def test_chat_inventory_tool_never_calls_the_judge(indexed, monkeypatch):
+    """Adjudication is 60+ s per batch; a chat turn must not wait for it."""
+    db, collection = indexed
+    _install_inventory_backends(monkeypatch, collection)
+
+    client = _offline_chat_client()
+    asked: list[dict] = []
+
+    def fake_complete_json(system_prompt, user_prompt, *, json_schema, temperature=0.0):
+        asked.append(json_schema.get("properties", {}))
+        return '{"terms": ["money laundering"]}'
+
+    client._complete_json = fake_complete_json
+    client._inventory_tool({"query": "anti-money laundering"}, db)
+
+    assert asked, "term generation should still run — it is the recall backbone"
+    assert all("verdicts" not in props for props in asked), "the judge was called"
+    assert all("span" not in props for props in asked), "extraction was called"
+
+
+def test_chat_inventory_tool_cites_circulars_but_not_laws(indexed, monkeypatch):
+    """Only circular and attachment tokens are resolvable by the chat UI."""
+    db, collection = indexed
+    _install_inventory_backends(monkeypatch, collection)
+
+    payload = json.loads(_offline_chat_client()._inventory_tool(
+        {"query": "anti-money laundering", "sources": "all", "limit": 30}, db
+    ))
+
+    cited = [r for r in payload["results"] if "citation" in r]
+    assert cited, "circular results must carry a resolvable citation token"
+    assert all(r["citation"].startswith("[[circular:") for r in cited)
+    for result in payload["results"]:
+        if "law_type" in result:
+            assert "citation" not in result, "a law token would render as dead text"
+
+
+def test_chat_inventory_tool_reports_errors_rather_than_raising(indexed, monkeypatch):
+    db, collection = indexed
+    _install_inventory_backends(monkeypatch, collection)
+
+    payload = json.loads(_offline_chat_client()._inventory_tool({"query": "  "}, db))
+
+    assert "error" in payload
 
 
 def test_strict_coverage_refuses_an_incomplete_index(indexed):

@@ -83,7 +83,23 @@ TOOL_LABELS = {
     "get_circular_details": "Reading circular details",
     "query_regulatory_values": "Looking up regulatory values",
     "get_circulars_by_tag": "Browsing circulars by tag",
+    "search_regulatory_inventory": "Taking inventory across the whole corpus",
 }
+
+
+def _inventory_locator(evidence) -> str:
+    """Human-readable pointer into the source, per plan section 8.2.
+
+    A page number only exists where the chunker found page markers, which is the PDF
+    attachment path; circular HTML bodies carry character offsets instead.
+    """
+    if evidence is None:
+        return ""
+    if evidence.locator_kind == "page" and evidence.page_start is not None:
+        return f"p.{evidence.page_start}"
+    if evidence.locator_kind == "offset" and evidence.source_start is not None:
+        return f"@{evidence.source_start}"
+    return evidence.source_ref or ""
 
 
 def tool_activity_label(name: str) -> str:
@@ -185,6 +201,39 @@ TOOLS = [
                     "limit": {"type": "integer", "description": "Number of circulars to return (1-50)", "default": 10}
                 },
                 "required": ["tag"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_regulatory_inventory",
+            "description": (
+                "Sweep the ENTIRE corpus of circulars and regulations for every document that "
+                "mentions a subject, and return them as an inventory. Use this only for "
+                "exhaustive 'list all / find every / which documents' questions, e.g. 'list all "
+                "circulars that talk about AML' or 'which regulations mention contact centres'. "
+                "It expands the subject into a full vocabulary (acronyms, spellings, plurals) "
+                "and searches with no result cutoff, so it finds documents that mention the "
+                "subject in passing, which ordinary search misses. It is much slower than "
+                "search_circulars — prefer that tool for ordinary questions about a topic. "
+                "IMPORTANT: results are UNREVIEWED candidates. Every returned document contains "
+                "one of the search terms, but nothing has judged whether it genuinely discusses "
+                "the subject, so some will be false matches (a term appearing in an address or "
+                "a passing reference). Say so when presenting them, and use each item's passage "
+                "to judge relevance yourself."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The subject to take inventory of, e.g. 'anti-money laundering', 'responsibilities of internal audit', 'call centres'"},
+                    "sources": {"type": "string", "description": "Which corpus to sweep: 'all', 'circulars', or 'laws'", "default": "all"},
+                    "department": {"type": "string", "description": "Optional department filter, e.g. 'BPRD'"},
+                    "start_year": {"type": "integer", "description": "Optional earliest circular year"},
+                    "end_year": {"type": "integer", "description": "Optional latest circular year"},
+                    "limit": {"type": "integer", "description": "Max documents to return (1-30)", "default": 15}
+                },
+                "required": ["query"]
             }
         }
     }
@@ -2587,10 +2636,109 @@ SOURCE BLOCK:
                     })
                 return json.dumps({"results": out, "count": len(out)})
 
+            elif name == "search_regulatory_inventory":
+                return self._inventory_tool(arguments, db)
+
             else:
                 return json.dumps({"error": f"Unknown tool: {name}"})
         except Exception as e:
             return json.dumps({"error": str(e)})
+
+    def _inventory_tool(self, arguments: dict, db: Session) -> str:
+        """Adapter only — the search semantics live in InventorySearchService.
+
+        Imported lazily: `inventory.llm` reaches back into this module for its client,
+        so a module-level import here would close the cycle. It also keeps chat off the
+        inventory package's import path when the tool is never called.
+        """
+        from .inventory.schemas import (
+            InventoryError,
+            InventoryFilters,
+            InventorySearchRequest,
+        )
+        from .inventory.service import InventorySearchService
+        from .database import collection, embedding_backend, embedding_config
+        from .inventory.llm import AIClientAdapter
+        from .models import Circular
+
+        query = str(arguments.get("query", "")).strip()
+        if not query:
+            return json.dumps({"error": "No subject provided to take inventory of"})
+
+        source = str(arguments.get("sources", "all")).strip().lower()
+        sources = ["circulars", "laws"] if source not in ("circulars", "laws") else [source]
+        limit = max(1, min(int(arguments.get("limit", 15)), 30))
+
+        department = str(arguments.get("department", "")).strip()
+        start_year = arguments.get("start_year")
+        end_year = arguments.get("end_year")
+        filters = InventoryFilters(
+            departments=[department] if department else [],
+            start_year=int(start_year) if start_year is not None else None,
+            end_year=int(end_year) if end_year is not None else None,
+        )
+
+        request = InventorySearchRequest(
+            query=query,
+            sources=sources,
+            filters=filters,
+            # Adjudication is 60+ s per batch of 12 and a chat turn cannot wait for it.
+            # Term generation stays on: it is one call, and it is the recall backbone —
+            # without it a question-shaped query retrieves almost nothing. HyDE is off
+            # because the dense arm is only a supplement and it costs another call.
+            generate_terms=True,
+            use_hyde=False,
+            skip_adjudication=True,
+            extract_spans=False,
+            max_results=limit,
+            evidence_per_result=1,
+        )
+
+        try:
+            response = InventorySearchService(
+                collection, embedding_backend, embedding_config,
+                llm=AIClientAdapter(self),
+            ).search(request, db)
+        except InventoryError as exc:
+            return json.dumps({"error": f"[{exc.code}] {exc}"})
+
+        results = []
+        for result in response.results:
+            evidence = result.evidence[0] if result.evidence else None
+            item = {
+                "title": result.title,
+                "matched_terms": result.matched_terms[:6],
+                "passage": (evidence.passage[:400] if evidence else ""),
+                "locator": _inventory_locator(evidence),
+            }
+            if result.result_kind == "circular":
+                row = db.query(Circular).filter(Circular.id == result.document_id).first()
+                item["reference"] = result.reference
+                item["date"] = result.date
+                item["department"] = result.department
+                # Only circulars and attachments have a citation token the UI resolves,
+                # so a law gets none rather than one that renders as dead text.
+                if row is not None:
+                    item["citation"] = f"[[circular:{row.id}|{row.display_name}]]"
+            else:
+                item["law_type"] = result.law_type
+                item["parent_title"] = result.parent_title
+            results.append(item)
+
+        coverage = response.coverage
+        return json.dumps({
+            "reviewed": False,
+            "note": (
+                "Unreviewed candidates: each document contains a search term, but "
+                "nothing has judged whether it discusses the subject. Check each "
+                "passage before citing it."
+            ),
+            "search_terms": response.retrieval_policy.term_set,
+            "documents_matched": coverage.candidates_union,
+            "documents_returned": len(results),
+            "truncated": bool(response.results_truncated),
+            "results": results,
+        })
 
     def _chat_system_prompt(self, circulars_context: str | None = None) -> str:
         if circulars_context:

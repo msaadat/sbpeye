@@ -11,7 +11,7 @@ from datetime import datetime
 
 import numpy as np
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -26,8 +26,13 @@ from sbpeye.models import (
 from sbpeye.inventory import corpus, ledger, retrieval, terms
 from sbpeye.inventory.adjudicate import VERDICT_INCLUDED, VERDICT_UNDETERMINED, adjudicate
 from sbpeye.inventory.extract import resolve_locator, verify_span
-from sbpeye.inventory.index import CorpusEmbeddingSnapshot, load_snapshot
-from sbpeye.inventory.schemas import InvalidQuery, InventorySearchRequest
+from sbpeye.inventory.index import SNAPSHOT_CACHE, CorpusEmbeddingSnapshot, load_snapshot
+from sbpeye.inventory.schemas import (
+    EmbeddingFingerprintMismatch,
+    InventoryFilters,
+    InvalidQuery,
+    InventorySearchRequest,
+)
 from sbpeye.inventory.service import InventorySearchService
 from sbpeye.search import backfill_fts, backfill_laws_fts
 
@@ -171,10 +176,12 @@ def corpus_db():
     add_circular(db, "c-mention", "BSD Circular No. 37 of 2001",
                  "Non Performing Loans Database",
                  "Reporting of NPLs. Branches shall also observe AML instructions "
-                 "when onboarding. Remaining paragraphs concern loan classification.")
+                 "when onboarding. Remaining paragraphs concern loan classification.",
+                 department="BSD", year=2001)
     add_circular(db, "c-none", "DMMD Circular No. 09 of 2019",
                  "Statutory Liquidity Requirement",
-                 "Banks shall maintain the prescribed liquidity ratio.")
+                 "Banks shall maintain the prescribed liquidity ratio.",
+                 department="DMMD", year=2019)
     add_law(db, "l-aml", "AML/CFT Regulations",
             "Customer due diligence and anti-money laundering obligations apply.")
     db.commit()
@@ -521,6 +528,228 @@ def test_law_results_carry_version_and_hierarchy(indexed):
 
     law = next(r for r in response.results if r.document_id == "l-aml")
     assert law.result_kind == "law" and law.version_id == "l-aml-v1"
+
+
+def test_orphan_chunks_cannot_produce_a_hit(indexed):
+    """Gap 0.2.1: a chunk with no current ledger entry must not be scored.
+
+    Otherwise a deleted circular's leftovers keep surfacing as semantic matches long
+    after the database stopped considering them part of the corpus.
+    """
+    db, collection = indexed
+    collection.add(
+        documents=["Ghost circular about anti-money laundering and AML controls."],
+        embeddings=FakeBackend().embed_documents(["aml aml aml money laundering"]),
+        ids=["c-ghost__chunk_0"],
+        metadatas=[{"circular_id": "c-ghost", "doc_type": "circular", "ref": "Chunk 1"}],
+    )
+    SNAPSHOT_CACHE.clear()
+
+    snapshot = load_snapshot(collection, "snap", ledger.indexed_source_ids(db))
+
+    assert snapshot.excluded_orphans == 1
+    assert all("c-ghost" not in cid for cid in snapshot.chunk_ids)
+
+
+def test_orphan_exclusion_is_reported_in_coverage(indexed):
+    db, collection = indexed
+    collection.add(
+        documents=["Ghost."], embeddings=[[0.0, 0.0, 1.0]], ids=["c-ghost__chunk_0"],
+        metadatas=[{"circular_id": "c-ghost", "doc_type": "circular"}],
+    )
+    SNAPSHOT_CACHE.clear()
+    request = InventorySearchRequest(
+        query="AML", generate_terms=False, use_hyde=False, skip_adjudication=True,
+        extract_spans=False,
+    )
+
+    response = make_service(collection).search(request, db)
+
+    assert any("excluded from scoring" in w for w in response.coverage.warnings)
+    assert all(r.document_id != "c-ghost" for r in response.results)
+
+
+def test_search_aborts_when_the_embedding_model_changed(indexed):
+    """Gap 0.2.2: cosine across two embedding spaces is a meaningless number."""
+    db, collection = indexed
+
+    class OtherModel:
+        provider = "fastembed"
+        model = "a-different-model"
+
+    service = InventorySearchService(collection, FakeBackend(), OtherModel(), llm=None)
+    request = InventorySearchRequest(
+        query="AML", generate_terms=False, use_hyde=False, skip_adjudication=True,
+    )
+
+    with pytest.raises(EmbeddingFingerprintMismatch):
+        service.search(request, db)
+
+
+def test_search_aborts_on_a_dimension_mismatch(indexed):
+    db, collection = indexed
+
+    class WiderBackend(FakeBackend):
+        def embed_queries(self, queries):
+            return [[1.0, 0.0, 0.0, 0.0] for _ in queries]
+
+    SNAPSHOT_CACHE.clear()
+    service = InventorySearchService(collection, WiderBackend(), FakeConfig(), llm=None)
+    request = InventorySearchRequest(
+        query="AML", generate_terms=False, use_hyde=False, skip_adjudication=True,
+    )
+
+    with pytest.raises(EmbeddingFingerprintMismatch) as excinfo:
+        service.search(request, db)
+    assert "dimensional" in str(excinfo.value)
+
+
+def test_a_source_that_chunks_to_nothing_is_empty_not_stale(corpus_db):
+    """Page markers with no words are an empty source, not an indexing failure.
+
+    Marking them stale would make `--repair` re-embed them on every run forever.
+    """
+    corpus_db.add(Attachment(
+        id="a-markers", circular_id="c-aml", filename="scan.pdf",
+        original_url="https://example.test/s", file_type="pdf",
+        content_text="[[SBPEYE_PAGE:1]]\n[[SBPEYE_PAGE:2]]\n", extraction_status="ok",
+    ))
+    corpus_db.commit()
+
+    ledger.reconcile(corpus_db, FakeCollection(), FakeConfig(), write=True)
+    row = corpus_db.query(SemanticIndexSource).filter_by(source_id="a-markers").one()
+
+    assert row.status == corpus.STATUS_EMPTY
+    assert row.expected_chunks == 0
+
+
+def test_indexing_a_law_writes_its_ledger_row(corpus_db, monkeypatch):
+    """Gap 1: the ledger must track live indexing, not only batch reconciliation.
+
+    Without this, coverage keeps asserting a completeness it last checked at the previous
+    audit, which is exactly the claim the ledger exists to make honest.
+    """
+    import sbpeye.scraper.circulars as circulars_mod
+
+    fake = FakeCollection()
+    monkeypatch.setattr(circulars_mod, "collection", fake)
+    monkeypatch.setattr(circulars_mod, "embedding_backend", FakeBackend())
+
+    from sbpeye.scraper.laws import vectorize_law_document
+
+    document = corpus_db.query(RegDocument).filter_by(id="l-aml").one()
+    count = vectorize_law_document(corpus_db, document)
+
+    row = corpus_db.query(SemanticIndexSource).filter_by(source_id="l-aml-v1").one()
+    assert row.status == corpus.STATUS_INDEXED
+    assert row.indexed_chunks == row.expected_chunks == count
+    assert row.logical_document_id == "l-aml"
+    assert row.version_id == "l-aml-v1"
+
+
+def test_a_failed_index_write_is_recorded_as_index_error(corpus_db, monkeypatch):
+    """A Chroma failure must leave evidence, not an absent row that reads as 'fine'."""
+    import sbpeye.scraper.circulars as circulars_mod
+
+    class ExplodingCollection(FakeCollection):
+        def add(self, *args, **kwargs):
+            raise RuntimeError("chroma down")
+
+    monkeypatch.setattr(circulars_mod, "collection", ExplodingCollection())
+    monkeypatch.setattr(circulars_mod, "embedding_backend", FakeBackend())
+
+    circular = corpus_db.query(Circular).filter_by(id="c-aml").one()
+    circulars_mod._index_circular(circular, db=corpus_db)
+
+    row = corpus_db.query(SemanticIndexSource).filter_by(source_id="c-aml").one()
+    assert row.status == corpus.STATUS_INDEX_ERROR
+    assert "chroma down" in (row.error or "")
+    assert row.indexed_chunks == 0
+
+
+def test_ledger_write_failure_does_not_break_indexing(corpus_db, monkeypatch):
+    """Bookkeeping must never fail an index write; the row simply stays absent."""
+    import sbpeye.scraper.circulars as circulars_mod
+    from sbpeye.inventory import ledger as ledger_mod
+
+    monkeypatch.setattr(circulars_mod, "collection", FakeCollection())
+    monkeypatch.setattr(circulars_mod, "embedding_backend", FakeBackend())
+    monkeypatch.setattr(
+        ledger_mod, "expected_chunk_count",
+        lambda text: (_ for _ in ()).throw(RuntimeError("ledger boom")),
+    )
+
+    circular = corpus_db.query(Circular).filter_by(id="c-aml").one()
+    circulars_mod._index_circular(circular, db=corpus_db)  # must not raise
+
+    assert corpus_db.query(SemanticIndexSource).filter_by(source_id="c-aml").count() == 0
+
+
+def test_filters_apply_before_retrieval_so_counts_describe_the_search(indexed):
+    """Gap 2: filtering afterwards leaves the candidate counts describing excluded docs."""
+    db, collection = indexed
+    request = InventorySearchRequest(
+        query="AML", sources=["circulars"], generate_terms=False, use_hyde=False,
+        skip_adjudication=True, extract_spans=False, semantic_band=100,
+        filters=InventoryFilters(departments=["BPRD"]),
+    )
+
+    response = make_service(collection).search(request, db)
+
+    # c-mention is BSD, so it must not be counted by either arm.
+    assert all(r.department == "BPRD" for r in response.results)
+    assert response.coverage.candidates_semantic <= 2
+    assert all(r.document_id != "c-mention" for r in response.results)
+
+
+def test_a_filtered_out_document_is_not_even_a_lexical_candidate(indexed):
+    db, collection = indexed
+    request = InventorySearchRequest(
+        query="AML", sources=["circulars"], generate_terms=False, use_hyde=False,
+        skip_adjudication=True, extract_spans=False, semantic_band=0,
+        filters=InventoryFilters(departments=["BPRD"]),
+    )
+
+    response = make_service(collection).search(request, db)
+
+    # Both c-aml (BPRD) and c-mention (BSD) contain "AML"; only the BPRD one counts.
+    assert response.coverage.candidates_lexical == 1
+
+
+def test_coverage_reports_lexical_and_vector_arms_separately(indexed):
+    """Gap 1: the arms fail independently, so one number cannot describe both."""
+    db, collection = indexed
+    db.execute(text("DELETE FROM circulars_fts WHERE circular_id = 'c-audit'"))
+    db.commit()
+
+    request = InventorySearchRequest(
+        query="AML", generate_terms=False, use_hyde=False, skip_adjudication=True,
+        extract_spans=False,
+    )
+    response = make_service(collection).search(request, db)
+
+    coverage = response.coverage
+    assert coverage.lexical_gaps == 1
+    # The vector arm is untouched: the document is still semantically reachable.
+    assert coverage.stale_or_missing_index == 0
+    assert coverage.is_complete is False
+    assert any("no FTS row" in w for w in coverage.warnings)
+
+
+def test_max_results_truncates_explicitly(indexed):
+    """Gap 3: a capped inventory must say so rather than look complete."""
+    db, collection = indexed
+    request = InventorySearchRequest(
+        query="AML", generate_terms=False, use_hyde=False, skip_adjudication=True,
+        extract_spans=False, max_results=1,
+    )
+
+    response = make_service(collection).search(request, db)
+
+    assert len(response.results) == 1
+    assert response.results_truncated >= 1
+    assert response.truncated is True
+    assert any("max_results" in w for w in response.coverage.warnings)
 
 
 def test_blank_query_is_rejected(indexed):

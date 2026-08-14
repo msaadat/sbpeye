@@ -16,6 +16,7 @@ import numpy as np
 from .schemas import VectorStoreUnavailable
 
 PAGE_SIZE = 5000
+CHUNK_ID_SEPARATOR = "__chunk_"
 
 
 @dataclass
@@ -27,6 +28,9 @@ class CorpusEmbeddingSnapshot:
     matrix: np.ndarray | None = None
     metadatas: list[dict] = field(default_factory=list)
     documents: list[str] = field(default_factory=list)
+    # Chunks present in the store but not vouched for by the ledger. Excluded from the
+    # matrix entirely, and surfaced so coverage can report them.
+    excluded_orphans: int = 0
 
     @property
     def dimension(self) -> int:
@@ -64,16 +68,24 @@ def _normalize(matrix: np.ndarray) -> np.ndarray:
     return matrix / norms
 
 
-def load_snapshot(collection, snapshot_id: str) -> CorpusEmbeddingSnapshot:
+def load_snapshot(
+    collection, snapshot_id: str, valid_source_ids: set[str] | None = None
+) -> CorpusEmbeddingSnapshot:
     """Page the whole collection into a normalized matrix, ordered by chunk id.
 
     Sorting before building the matrix makes repeated runs produce identical scores in
     identical order, which is what lets two runs be compared at all.
+
+    ``valid_source_ids`` is the ledger's set of fully indexed sources. Chunks outside it
+    are dropped before scoring, so a document the database no longer considers current
+    cannot surface as a semantic hit (section 10.2). Passing ``None`` scores everything
+    and is only appropriate when no ledger exists yet.
     """
     chunk_ids: list[str] = []
-    embeddings: list[np.ndarray] = []
+    embeddings: list[list[float]] = []
     metadatas: list[dict] = []
     documents: list[str] = []
+    orphans = 0
 
     offset = 0
     try:
@@ -86,18 +98,29 @@ def load_snapshot(collection, snapshot_id: str) -> CorpusEmbeddingSnapshot:
             ids = page.get("ids") or []
             if not ids:
                 break
-            chunk_ids.extend(ids)
-            metadatas.extend(page.get("metadatas") or [{}] * len(ids))
-            documents.extend(page.get("documents") or [""] * len(ids))
-            embeddings.append(np.asarray(page.get("embeddings"), dtype=np.float32))
+            page_metas = page.get("metadatas") or [{}] * len(ids)
+            page_docs = page.get("documents") or [""] * len(ids)
+            page_embeddings = page.get("embeddings")
+            for position, chunk_id in enumerate(ids):
+                if valid_source_ids is not None:
+                    source_id = chunk_id.rsplit(CHUNK_ID_SEPARATOR, 1)[0]
+                    if source_id not in valid_source_ids:
+                        orphans += 1
+                        continue
+                chunk_ids.append(chunk_id)
+                metadatas.append(page_metas[position])
+                documents.append(page_docs[position])
+                embeddings.append(page_embeddings[position])
             offset += len(ids)
     except Exception as exc:  # noqa: BLE001 - never fall back to top-K search
         raise VectorStoreUnavailable(str(exc)) from exc
 
     if not chunk_ids:
-        return CorpusEmbeddingSnapshot(snapshot_id=snapshot_id)
+        return CorpusEmbeddingSnapshot(
+            snapshot_id=snapshot_id, excluded_orphans=orphans
+        )
 
-    matrix = np.vstack(embeddings)
+    matrix = np.asarray(embeddings, dtype=np.float32)
     order = np.argsort(np.array(chunk_ids, dtype=object), kind="stable")
     return CorpusEmbeddingSnapshot(
         snapshot_id=snapshot_id,
@@ -105,6 +128,7 @@ def load_snapshot(collection, snapshot_id: str) -> CorpusEmbeddingSnapshot:
         matrix=_normalize(matrix[order]),
         metadatas=[metadatas[i] for i in order],
         documents=[documents[i] for i in order],
+        excluded_orphans=orphans,
     )
 
 
@@ -119,14 +143,19 @@ class SnapshotCache:
         self._lock = threading.Lock()
         self._snapshot: CorpusEmbeddingSnapshot | None = None
 
-    def get(self, collection, snapshot_id: str) -> CorpusEmbeddingSnapshot:
+    def get(
+        self,
+        collection,
+        snapshot_id: str,
+        valid_source_ids: set[str] | None = None,
+    ) -> CorpusEmbeddingSnapshot:
         current = self._snapshot
         if current is not None and current.snapshot_id == snapshot_id:
             return current
         with self._lock:
             if self._snapshot is not None and self._snapshot.snapshot_id == snapshot_id:
                 return self._snapshot
-            self._snapshot = load_snapshot(collection, snapshot_id)
+            self._snapshot = load_snapshot(collection, snapshot_id, valid_source_ids)
             return self._snapshot
 
     def clear(self) -> None:

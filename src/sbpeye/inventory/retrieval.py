@@ -85,6 +85,7 @@ def lexical_candidates(
     terms: list[str],
     include_circulars: bool = True,
     include_laws: bool = True,
+    allowed_keys: dict[str, set[str] | None] | None = None,
 ) -> dict[tuple[str, str], list[str]]:
     """Every document matching any term. Returns ``{key: matched terms}``.
 
@@ -117,7 +118,10 @@ def lexical_candidates(
             except Exception:
                 logger.exception("%s lexical arm failed for term %r", table, term)
                 continue
+            allowed = (allowed_keys or {}).get(logical_kind)
             for row in rows:
+                if allowed is not None and row[0] not in allowed:
+                    continue
                 matches.setdefault((logical_kind, row[0]), []).append(term)
     return matches
 
@@ -128,6 +132,7 @@ def dense_band(
     band: int,
     include_circulars: bool = True,
     include_laws: bool = True,
+    allowed_keys: dict[str, set[str] | None] | None = None,
 ) -> dict[tuple[str, str], tuple[float, list[int]]]:
     """Top ``band`` documents by max chunk cosine, scored exactly over every chunk.
 
@@ -154,6 +159,11 @@ def dense_band(
     chunks: dict[tuple[str, str], list[tuple[float, int]]] = {}
     for index, key in enumerate(keys):
         if key[0] not in allowed or not key[1]:
+            continue
+        # Filter before ranking, not after: taking the top `band` and then discarding
+        # filtered documents would silently return a band smaller than requested.
+        permitted = (allowed_keys or {}).get(key[0])
+        if permitted is not None and key[1] not in permitted:
             continue
         score = float(chunk_scores[index])
         if score > best.get(key, -1.0):

@@ -847,7 +847,7 @@ def process_circular(
         circular.attachments_scanned_at = datetime.utcnow()
         db.commit()
 
-    _index_circular(circular, verbose=verbose)
+    _index_circular(circular, verbose=verbose, db=db)
     index_circular_fts(db, circular)
     _link_circular_to_laws(db, circular, verbose=verbose)
     return circular
@@ -979,6 +979,41 @@ def attachment_chunk_metadata(attachment: Attachment, chunk: dict, index: int) -
     }
 
 
+def _record_ledger(
+    db,
+    source_kind: str,
+    source_id: str,
+    logical_kind: str,
+    logical_document_id: str,
+    text: str,
+    indexed_chunks: int,
+    version_id: str | None = None,
+    error: str | None = None,
+) -> None:
+    """Write this source's semantic-index ledger row alongside its Chroma write.
+
+    Import is local because ``sbpeye.inventory`` reads ``sbpeye.search``, which this
+    module also imports; deferring keeps the package import order unconstrained.
+    """
+    if db is None:
+        return
+    from ..inventory.corpus import STATUS_INDEX_ERROR
+    from ..inventory.ledger import record_source
+
+    record_source(
+        db,
+        source_kind=source_kind,
+        source_id=source_id,
+        logical_kind=logical_kind,
+        logical_document_id=logical_document_id,
+        version_id=version_id,
+        text=text,
+        indexed_chunks=indexed_chunks,
+        status=STATUS_INDEX_ERROR if error else None,
+        error=error,
+    )
+
+
 def _replace_document_chunks(document: dict, *, metadata_for, delete_kwargs: dict) -> int:
     """Re-chunk, embed, and atomically swap one document's chunks in the live collection.
 
@@ -1013,20 +1048,35 @@ def _replace_document_chunks(document: dict, *, metadata_for, delete_kwargs: dic
     return len(chunks)
 
 
-def _index_circular(circular: Circular, verbose: bool = False) -> None:
-    """Replace one circular's Chroma chunks without touching attachments."""
+def _index_circular(
+    circular: Circular, verbose: bool = False, db: Session | None = None
+) -> None:
+    """Replace one circular's Chroma chunks without touching attachments.
+
+    ``db`` is optional only so older call sites keep working; pass it wherever a session
+    is in scope so the semantic index ledger stays current. Without it the ledger drifts
+    until the next ``inventory index --audit``.
+    """
+    document = circular_document(circular)
     try:
         count = _replace_document_chunks(
-            circular_document(circular),
+            document,
             metadata_for=lambda chunk, i: circular_chunk_metadata(circular, chunk, i),
             delete_kwargs={"circular_id": circular.id},
         )
         if verbose:
             print(f"  [CHROMA] Indexed ({count} chunk(s))")
+        _record_ledger(
+            db, "circular", circular.id, "circular", circular.id, document["text"], count
+        )
     except Exception as e:
         logging.exception("ChromaDB indexing failed for %s", circular.url)
         if verbose:
             print(f"  [CHROMA] Error: {e}")
+        _record_ledger(
+            db, "circular", circular.id, "circular", circular.id, document["text"], 0,
+            error=str(e),
+        )
 
 
 def vectorize_attachment(
@@ -1046,16 +1096,24 @@ def vectorize_attachment(
         db.commit()
         # Attachment text feeds the circular's aggregated FTS body — refresh it.
         index_circular_fts(db, attachment.circular)
+        _record_ledger(
+            db, "attachment", attachment.id, "circular", attachment.circular_id,
+            attachment.content_text or "", count,
+        )
         if verbose:
             print(
                 f"  [CHROMA] Indexed attachment: {attachment.filename} "
                 f"({count} chunks)"
             )
         return True
-    except Exception:
+    except Exception as exc:
         attachment.is_vectorized = 0
         db.commit()
         logging.exception("ChromaDB indexing failed for attachment %s", attachment.id)
+        _record_ledger(
+            db, "attachment", attachment.id, "circular", attachment.circular_id,
+            attachment.content_text or "", 0, error=str(exc),
+        )
         return False
 
 
@@ -1130,7 +1188,7 @@ def reextract_circular_from_cache(
     db.commit()
 
     if reindex:
-        _index_circular(circular, verbose=verbose)
+        _index_circular(circular, verbose=verbose, db=db)
         for attachment in circular.attachments:
             if (
                 (attachment.file_type or "").lower() == "pdf"

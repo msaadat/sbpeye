@@ -65,6 +65,9 @@ def inventory_index(audit, repair):
         if not repair:
             return
 
+        purged = _purge_orphans(db, collection)
+        if purged:
+            click.echo(f"Purged {purged} orphan chunk(s)")
         repaired, failed = _repair(db, report)
         click.echo(f"Repaired {repaired} source(s), {failed} failure(s)")
         report = reconcile(db, collection, embedding_config, write=True)
@@ -74,6 +77,37 @@ def inventory_index(audit, repair):
         )
     finally:
         db.close()
+
+
+def _purge_orphans(db, collection, batch_size: int = 500) -> int:
+    """Delete stored chunks whose source has no ledger row.
+
+    Gap 0.2.1's fix already stops orphans from scoring, so this is hygiene rather than
+    correctness — but leaving them means the store keeps growing with data no query can
+    ever reach, and it hides real drift behind a permanently non-zero orphan count.
+    """
+    from sbpeye.inventory.ledger import CHUNK_ID_SEPARATOR, PAGE_SIZE
+    from sbpeye.models import SemanticIndexSource
+
+    known = {row[0] for row in db.query(SemanticIndexSource.source_id).all()}
+
+    # One pass over the store collecting doomed ids. Metadata keys differ by source kind,
+    # so match on the chunk-id prefix, which is uniform across all three.
+    doomed: list[str] = []
+    offset = 0
+    while True:
+        ids = collection.get(limit=PAGE_SIZE, offset=offset).get("ids", [])
+        if not ids:
+            break
+        doomed.extend(
+            chunk_id for chunk_id in ids
+            if chunk_id.rsplit(CHUNK_ID_SEPARATOR, 1)[0] not in known
+        )
+        offset += len(ids)
+
+    for start in range(0, len(doomed), batch_size):
+        collection.delete(ids=doomed[start:start + batch_size])
+    return len(doomed)
 
 
 def _repair(db, report) -> tuple[int, int]:
@@ -89,7 +123,7 @@ def _repair(db, report) -> tuple[int, int]:
                 if source.source_kind == "circular":
                     circular = db.query(Circular).get(source.source_id)
                     if circular is not None:
-                        _index_circular(circular)
+                        _index_circular(circular, db=db)
                 elif source.source_kind == "attachment":
                     attachment = db.query(Attachment).get(source.source_id)
                     if attachment is not None:
@@ -112,12 +146,14 @@ def _repair(db, report) -> tuple[int, int]:
 @click.option("--band", type=int, default=300, show_default=True,
               help="Semantic supplement size")
 @click.option("--max-candidates", type=int, default=1200, show_default=True)
+@click.option("--max-results", type=int, default=500, show_default=True)
 @click.option("--no-llm", is_flag=True,
               help="Disable term generation, HyDE, adjudication, and extraction")
 @click.option("--format", "output_format", type=click.Choice(["text", "json"]),
               default="text")
 @click.option("--strict", is_flag=True, help="Fail if index coverage is incomplete")
-def inventory_search(query, source, band, max_candidates, no_llm, output_format, strict):
+def inventory_search(query, source, band, max_candidates, max_results, no_llm,
+                     output_format, strict):
     """Find every regulatory document that discusses QUERY."""
     from sbpeye.database import collection, embedding_backend, embedding_config
     from sbpeye.inventory.schemas import InventoryError, InventorySearchRequest
@@ -129,6 +165,7 @@ def inventory_search(query, source, band, max_candidates, no_llm, output_format,
         sources=sources,
         semantic_band=band,
         max_candidates=max_candidates,
+        max_results=max_results,
         generate_terms=not no_llm,
         use_hyde=not no_llm,
         skip_adjudication=no_llm,
@@ -175,8 +212,11 @@ def _render(response) -> None:
         f"{coverage.adjudicated_included} included"
     )
     click.echo(
-        f"            {coverage.source_units_indexed}/{coverage.source_units_expected} "
-        f"sources indexed, complete={coverage.is_complete}"
+        f"            vector {coverage.source_units_indexed}/"
+        f"{coverage.source_units_expected} sources | "
+        f"lexical {coverage.lexical_documents_indexed}/"
+        f"{coverage.lexical_documents_expected} documents | "
+        f"complete={coverage.is_complete}"
     )
     for warning in coverage.warnings:
         click.echo(f"  [warn] {warning}")
@@ -184,6 +224,7 @@ def _render(response) -> None:
     click.echo(f"{response.matched_documents} matching document(s):")
     click.echo()
 
+    extracted = response.retrieval_policy.spans_extracted
     for result in response.results:
         reference = result.reference or result.title
         click.echo(f"- {reference}")
@@ -192,7 +233,9 @@ def _render(response) -> None:
         for evidence in result.evidence:
             locator = _locator_label(evidence)
             text = (evidence.extracted_text or evidence.passage).strip()
-            mark = "" if evidence.extraction_verified else "  [unverified span]"
+            # Only a span the model actually produced can be "unverified"; with
+            # extraction off the passage is simply the raw chunk.
+            mark = "" if (evidence.extraction_verified or not extracted) else "  [unverified]"
             click.echo(f"  {locator}: {text[:400]}{mark}")
         click.echo()
 

@@ -6,6 +6,7 @@ that is what keeps one set of numbers behind every surface.
 """
 
 import logging
+from datetime import datetime
 
 import numpy as np
 from sqlalchemy.orm import Session
@@ -18,6 +19,9 @@ from .corpus import build_scope
 from .extract import extract_spans, resolve_locator
 from .fingerprint import CHUNKER_VERSION, embedding_fingerprint
 from .index import SNAPSHOT_CACHE
+from .ledger import indexed_source_ids as ledger_indexed_source_ids
+from .ledger import lexical_indexed_documents
+from .ledger import recorded_fingerprints
 from .ledger import snapshot_id as compute_snapshot_id
 from .retrieval import (
     dense_band,
@@ -33,6 +37,7 @@ from .schemas import (
     InventorySearchRequest,
     InventorySearchResponse,
     RetrievalPolicy,
+    EmbeddingFingerprintMismatch,
     SemanticIndexIncomplete,
 )
 from .terms import TERM_PROMPT_VERSION, build_term_set
@@ -60,24 +65,53 @@ class InventorySearchService:
         return vectors / norms
 
     @staticmethod
-    def _passes_filters(record, request: InventorySearchRequest, kind: str) -> bool:
+    def _allowed_documents(
+        db: Session, request: InventorySearchRequest
+    ) -> tuple[set[str] | None, set[str] | None]:
+        """Resolve filters to the id sets that may be searched, before any retrieval.
+
+        Filtering afterwards would leave `candidates_lexical` and `candidates_semantic`
+        describing documents the caller excluded, and would shrink the semantic band
+        below its requested size. Both arms therefore take these sets and never see the
+        rest of the corpus. ``None`` means "no filter on this corpus".
+        """
         filters = request.filters
-        if kind == "circular":
-            if filters.departments and (record.department or "") not in filters.departments:
-                return False
-            if filters.circular_statuses and (record.status or "") not in filters.circular_statuses:
-                return False
-            year = record.date.year if record.date else None
-            if filters.start_year and (year is None or year < filters.start_year):
-                return False
-            if filters.end_year and (year is None or year > filters.end_year):
-                return False
-            return True
-        if filters.law_types and (record.doc_type or "") not in filters.law_types:
-            return False
-        if record.delisted_at is not None and not filters.include_delisted_laws:
-            return False
-        return True
+
+        circular_ids: set[str] | None = None
+        if request.include_circulars:
+            query = db.query(Circular.id)
+            constrained = False
+            if filters.departments:
+                query = query.filter(Circular.department.in_(filters.departments))
+                constrained = True
+            if filters.circular_statuses:
+                query = query.filter(Circular.status.in_(filters.circular_statuses))
+                constrained = True
+            if filters.start_year:
+                query = query.filter(Circular.date >= datetime(filters.start_year, 1, 1))
+                constrained = True
+            if filters.end_year:
+                query = query.filter(
+                    Circular.date <= datetime(filters.end_year, 12, 31, 23, 59, 59)
+                )
+                constrained = True
+            if constrained:
+                circular_ids = {row[0] for row in query.all()}
+
+        law_ids: set[str] | None = None
+        if request.include_laws:
+            query = db.query(RegDocument.id)
+            constrained = False
+            if filters.law_types:
+                query = query.filter(RegDocument.doc_type.in_(filters.law_types))
+                constrained = True
+            if not filters.include_delisted_laws:
+                query = query.filter(RegDocument.delisted_at.is_(None))
+                constrained = True
+            if constrained:
+                law_ids = {row[0] for row in query.all()}
+
+        return circular_ids, law_ids
 
     # ------------------------------------------------------------------ main
 
@@ -87,10 +121,14 @@ class InventorySearchService:
         request.validate()
         warnings: list[str] = []
 
+        allowed_circulars, allowed_laws = self._allowed_documents(db, request)
+        allowed_keys = {"circular": allowed_circulars, "law": allowed_laws}
         scope = build_scope(
             db,
             include_circulars=request.include_circulars,
             include_laws=request.include_laws,
+            circular_ids=allowed_circulars,
+            law_document_ids=allowed_laws,
             include_delisted_laws=request.filters.include_delisted_laws,
         )
         snapshot_key = compute_snapshot_id(db)
@@ -113,12 +151,33 @@ class InventorySearchService:
             status = source.unsearchable_status or "unknown"
             coverage.unsearchable[status] = coverage.unsearchable.get(status, 0) + 1
 
-        coverage.is_complete = stale_or_missing == 0 and not coverage.unsearchable
+        in_scope = scope.logical_documents()
+        lexical_indexed = lexical_indexed_documents(
+            db,
+            include_circulars=request.include_circulars,
+            include_laws=request.include_laws,
+        )
+        coverage.lexical_documents_expected = len(in_scope)
+        coverage.lexical_documents_indexed = len(in_scope & lexical_indexed)
+        coverage.lexical_gaps = len(in_scope - lexical_indexed)
+        if coverage.lexical_gaps:
+            warnings.append(
+                f"{coverage.lexical_gaps} document(s) in scope have no FTS row and are "
+                "unreachable by the lexical arm"
+            )
+
+        coverage.is_complete = (
+            stale_or_missing == 0
+            and coverage.lexical_gaps == 0
+            and not coverage.unsearchable
+        )
         if request.require_complete_coverage and not coverage.is_complete:
             raise SemanticIndexIncomplete(
                 f"{stale_or_missing} source(s) stale or missing, "
                 f"{sum(coverage.unsearchable.values())} unsearchable"
             )
+
+        self._assert_fingerprint_current(db)
 
         # ---- layer 0: term set -------------------------------------------
         term_set, term_warnings = build_term_set(
@@ -135,6 +194,7 @@ class InventorySearchService:
             term_set.all_terms,
             include_circulars=request.include_circulars,
             include_laws=request.include_laws,
+            allowed_keys=allowed_keys,
         )
 
         hyde_passage = ""
@@ -145,13 +205,23 @@ class InventorySearchService:
             if hyde_passage:
                 query_texts.append(hyde_passage)
 
-        snapshot = SNAPSHOT_CACHE.get(self._collection, snapshot_key)
+        query_vectors = self._query_vectors(query_texts)
+        snapshot = SNAPSHOT_CACHE.get(
+            self._collection, snapshot_key, indexed_source_ids
+        )
+        if snapshot.excluded_orphans:
+            warnings.append(
+                f"{snapshot.excluded_orphans} stored chunk(s) had no current ledger "
+                "entry and were excluded from scoring"
+            )
+        self._assert_embeddings_comparable(snapshot, query_vectors)
         dense = dense_band(
             snapshot,
-            self._query_vectors(query_texts),
+            query_vectors,
             request.semantic_band,
             include_circulars=request.include_circulars,
             include_laws=request.include_laws,
+            allowed_keys=allowed_keys,
         )
 
         candidates, truncated = union_candidates(lexical, dense, request.max_candidates)
@@ -165,14 +235,10 @@ class InventorySearchService:
                 "lexical matches were retained ahead of semantic-only candidates"
             )
 
+        # Filters were applied before retrieval, so nothing is discarded here beyond
+        # candidates whose database row has disappeared since the index was written.
         records = self._load_records(db, candidates)
-        candidates = [
-            candidate for candidate in candidates
-            if candidate.key in records
-            and self._passes_filters(
-                records[candidate.key], request, candidate.logical_kind
-            )
-        ]
+        candidates = [c for c in candidates if c.key in records]
 
         # ---- layer 2: adjudication ---------------------------------------
         passages = [self._best_passage(snapshot, c, records) for c in candidates]
@@ -210,6 +276,15 @@ class InventorySearchService:
         coverage.adjudicated_included = len(included)
 
         # ---- layer 3: extraction -----------------------------------------
+        # Cap before extraction, not after: every dropped row would otherwise cost an
+        # LLM call for text nobody sees.
+        results_truncated = max(0, len(included) - request.max_results)
+        if results_truncated:
+            included = included[:request.max_results]
+            warnings.append(
+                f"{results_truncated} matching document(s) beyond max_results were not "
+                "returned; raise max_results to see the complete inventory"
+            )
         results = self._build_results(
             request, snapshot, included, records, warnings
         )
@@ -227,6 +302,7 @@ class InventorySearchService:
                 chunker_version=CHUNKER_VERSION,
                 semantic_band=request.semantic_band,
                 judge_model=getattr(self._llm, "model_name", "") if self._llm else "",
+                spans_extracted=bool(request.extract_spans and self._llm is not None),
                 judge_prompt_version=(
                     f"{TERM_PROMPT_VERSION}/{adjudicate_module.JUDGE_PROMPT_VERSION}/"
                     f"{extract_module.EXTRACT_PROMPT_VERSION}"
@@ -234,24 +310,42 @@ class InventorySearchService:
             ),
             coverage=coverage,
             matched_documents=len(results),
+            results_truncated=results_truncated,
             results=results,
             excluded=excluded,
-            truncated=bool(truncated),
+            truncated=bool(truncated or results_truncated),
         )
 
     # ------------------------------------------------------------- internals
 
+    def _assert_fingerprint_current(self, db: Session) -> None:
+        """Refuse to score a query against vectors built by a different model.
+
+        Cosine between two embedding spaces is a number with no meaning, and a dimension
+        change would instead fail deep inside the matmul. Either way the caller must be
+        told to re-index rather than handed a plausible-looking inventory.
+        """
+        current = embedding_fingerprint(self._embedding_config)
+        recorded = recorded_fingerprints(db)
+        if recorded and current not in recorded:
+            raise EmbeddingFingerprintMismatch(
+                f"index was built with {sorted(recorded)}, "
+                f"but {self._embedding_config.model} fingerprints as {current}; "
+                "re-index before searching"
+            )
+
+    @staticmethod
+    def _assert_embeddings_comparable(snapshot, query_vectors) -> None:
+        if snapshot.size and snapshot.dimension != int(query_vectors.shape[1]):
+            raise EmbeddingFingerprintMismatch(
+                f"stored vectors are {snapshot.dimension}-dimensional but the query "
+                f"embeds to {int(query_vectors.shape[1])}; re-index before searching"
+            )
+
     @staticmethod
     def _indexed_source_ids(db: Session) -> set[str]:
         """Source ids the ledger currently considers fully indexed."""
-        from ..models import SemanticIndexSource
-
-        return {
-            row[0]
-            for row in db.query(SemanticIndexSource.source_id)
-            .filter(SemanticIndexSource.status == "indexed")
-            .all()
-        }
+        return ledger_indexed_source_ids(db)
 
     @staticmethod
     def _label(record, kind: str) -> str:

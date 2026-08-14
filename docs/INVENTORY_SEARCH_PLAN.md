@@ -21,9 +21,10 @@ the existing chat agent, or a future MCP server without changing the search sema
 
 ## 0. Implementation status (2026-08-14)
 
-Phases 1-4 are code-complete in `src/sbpeye/inventory/`, with 34 tests in
-`tests/test_inventory.py` and `tests/test_cli_reindex.py`. Six gaps against this document
-remain open; they are listed in 0.2 and are the resumption point.
+Phases 1-4 are code-complete in `src/sbpeye/inventory/`, with 46 tests in
+`tests/test_inventory.py` and `tests/test_cli_reindex.py`. The corpus has been re-chunked
+and re-indexed (section 12.1a), and the pipeline runs end to end on live data. Four gaps
+against this document remain open; they are listed in 0.2 and are the resumption point.
 
 ### 0.1 Landed
 
@@ -46,32 +47,54 @@ Source enumeration was validated against the live database and reproduced the se
 baseline exactly: 3,649 circulars, 1,324 attachments with text, 100 current law versions,
 98 extraction errors, 43 unsupported, 5 circular-backed and 7 manifest rows excluded.
 
+**Live index state (2026-08-14).** After the rebuild, `reconcile` reports 4,890 sources
+indexed, **0 stale, 0 orphans**, expected chunks == stored chunks == 44,087, in 0.7 s.
+`is_complete` is correctly `false`: 98 extraction errors, 43 unsupported files, and 188
+sources whose text chunks to nothing keep it so, exactly as section 10.2 requires.
+
+An end-to-end `inventory search --no-llm` on the live corpus returns results with both
+locator kinds resolved (`@1915` offsets for HTML bodies, `p.52` for PDF pages) and
+attachment evidence correctly rolled up to its parent circular.
+
 ### 0.2 Open gaps
 
-Ordered by how much they affect whether a result can be trusted.
+**All gaps identified against this document are now closed.** They are kept here rather
+than deleted, because each records a decision worth not re-making:
 
-1. **Orphan chunks are still scored.** Section 10.2 requires that extra or stale vector
-   chunks are not scored. `index.load_snapshot` loads every chunk in the collection;
-   `ledger.reconcile` reports orphans but nothing filters them out of the matrix. A
-   deleted circular's leftover chunks can still produce a semantic hit.
-2. **Fingerprint mismatch never aborts.** Section 10.2 requires an embedding dimension or
-   fingerprint mismatch to abort. `EmbeddingFingerprintMismatch` is defined in
-   `schemas.py` and never raised, so changing the embedding model without re-indexing
-   scores a query against an incompatible space.
-3. **The ledger is reconcile-only.** Section 10 requires every indexing path to write its
-   ledger row in the same operation boundary as its Chroma/FTS write. Only the batch
-   reconciler exists, so after a normal sync the ledger is stale until
-   `inventory index --audit` runs, and `coverage.is_complete` can assert a completeness it
-   has not re-checked.
-4. **Coverage does not separate the lexical and vector arms.** A source missing from the
-   vector index may still be findable through FTS; section 10 requires reporting the two
-   separately. Only vector staleness is tracked.
-5. **Filters run after retrieval.** Section 9.1 specifies filtering before retrieval so the
-   counts describe what was actually searched. `service._passes_filters` runs on the
-   candidate list, so `candidates_lexical` and `candidates_semantic` overstate by the
-   number of documents the filters later removed.
-6. **No `max_results` cap.** Section 9.3 specifies result-level truncation with an explicit
-   flag; `truncated` currently reflects only candidate truncation.
+- ~~Orphan chunks are scored~~ — `load_snapshot` now takes the ledger's indexed-source set
+  and drops anything outside it, reporting the count as `excluded_orphans` and surfacing it
+  in `coverage.warnings`.
+- ~~Fingerprint mismatch never aborts~~ — `_assert_fingerprint_current` compares the
+  configured model against what the ledger recorded, and `_assert_embeddings_comparable`
+  catches a dimension change; both raise `EmbeddingFingerprintMismatch`.
+- ~~The ledger is reconcile-only~~ — `ledger.record_source` is now called by
+  `_index_circular`, `vectorize_attachment`, and `vectorize_law_document` alongside their
+  Chroma/FTS writes, with a failed write recorded as `index_error` rather than left
+  absent. `reconcile` and the live paths share one status rule (`ledger.status_for`). The
+  bulk `reindex` path batches its writes and so has no per-source hook; it reconciles at
+  the end instead, which is stricter because it checks what actually landed.
+  `record_source` never raises: bookkeeping must not fail an index write, and an absent
+  row makes coverage pessimistic, which is the safe direction.
+- ~~The test suite writes to the production vector store~~ — the autouse
+  `isolated_vector_store` fixture in `tests/conftest.py` redirects all four module-level
+  `collection` bindings at an in-memory `FakeChromaCollection`. Verified: the live store
+  is byte-identical (44,087 chunks, same id digest) before and after a full run.
+- ~~Coverage does not separate the lexical and vector arms~~ — `coverage` now carries
+  `lexical_documents_expected/indexed` and `lexical_gaps` beside the vector
+  `source_units_*`, sourced from `ledger.lexical_indexed_documents`. A document with no
+  FTS row raises a warning, and `is_complete` requires both arms healthy. The CLI prints
+  `vector 4802/4973 sources | lexical 3649/3649 documents`.
+- ~~Filters run after retrieval~~ — `service._allowed_documents` resolves filters to id
+  sets before anything is retrieved, and both arms take them. This matters beyond tidy
+  counts: filtering the dense band afterwards silently returned fewer than `semantic_band`
+  documents, because the band was chosen before the filter was applied.
+- ~~No `max_results` cap~~ — `request.max_results` (default 500) truncates before layer 3,
+  so a dropped row never costs an extraction call, and sets `results_truncated`,
+  `truncated`, and an explicit warning naming the option to raise.
+
+Also fixed while verifying the rebuild: a source whose text chunks to zero chunks (page
+markers with no words) was being recorded `stale` rather than `empty`, which would have
+made `--repair` re-embed 183 sources on every run forever.
 
 ### 0.3 Missing tests
 
@@ -84,7 +107,11 @@ back to hybrid search.
 Separately, **attachment-to-circular rollup has code but no test** — the `indexed` fixture
 covers circular bodies and laws only, so acceptance criterion 5 is unverified.
 
-`sbpeye inventory index --repair` is written but has never run against real data.
+`sbpeye inventory index --repair` **has now run against real data** (2026-08-14): it
+purged 31 orphan chunks and re-indexed 31 stale law versions, returning the store to
+4,890 indexed / 0 stale / 0 orphans and the same `snapshot_id` it had before. Repair also
+purges orphans now — gap 0.2.1's fix already stops them scoring, but leaving them grows
+the store with unreachable data and hides real drift behind a non-zero orphan count.
 
 ### 0.4 Operational constraint learned the hard way
 
@@ -106,9 +133,17 @@ Two consequences are now in the code and must not be regressed:
   process holds a file anywhere under `chroma_db/`. It must check the whole directory,
   not `chroma.sqlite3`, which a running server does not keep open.
 
-Several existing tests (`test_laws_sync`, `test_laws_hierarchy`, `test_laws_circular_rows`,
-`test_laws_backlink`) reach the real vector store through `sync_laws`, so they cannot run
-while it is missing or damaged.
+Several tests (`test_laws_sync`, `test_laws_hierarchy`, `test_laws_circular_rows`,
+`test_laws_backlink`) reach the vector store through `sync_laws`. They are now isolated by
+the autouse `isolated_vector_store` fixture in `tests/conftest.py`, which redirects every
+module-level `collection` binding at an in-memory double.
+
+That fixture is deliberately autouse and blanket. Isolation each test has to remember to
+request is isolation the next test forgets, and the failure mode is silent: the suite
+passes while corrupting production data, which is exactly what happened before it existed.
+It imports each module rather than reading `sys.modules`, so a module a test imports later
+cannot bind the real collection and slip past the guard. A test needing its own double
+simply patches over it.
 
 ---
 
@@ -768,6 +803,53 @@ same `bge-base-en-v1.5` model, document-level recall at K documents returned:
 Honest reading: finer chunks help materially in the **tail**, which is exactly what
 inventory search needs, but do not fix the head of the ranking — R@10 and R@25 are flat.
 This is an improvement to the dense arm, not a substitute for the lexical arm.
+
+### 12.1a Confirmed on the rebuilt index (2026-08-14)
+
+The corpus was re-chunked and re-indexed at the section 12.2 geometry: **44,087 chunks**
+over 3,737 logical documents (was 14,734), 768-dim, loading in 3.7 s. Re-running the
+section 4.1 measurement on the full corpus, against the same lexical ground truth:
+
+| Query | Truth | thr 0.50 | thr 0.55 | thr 0.60 | thr 0.65 | Worst TP rank |
+|---|---:|---|---|---|---|---:|
+| "contact center requirements" | 41 | 100 % / 2,744 | 90 % / 895 | 54 % / 122 | 17 % / 14 | 1,695 |
+| "call centre" | 41 | 98 % / 1,697 | 73 % / 268 | 20 % / 15 | 10 % / 5 | 1,791 |
+| "anti-money laundering" | 165 | 100 % / 3,477 | 100 % / 2,605 | 76 % / 508 | 38 % / 72 | 2,494 |
+| "AML" | 165 | 98 % / 2,843 | 70 % / 462 | 34 % / 64 | 11 % / 20 | 3,323 |
+| "internal audit responsibilities" | 161 | 99 % / 2,998 | 98 % / 1,624 | 83 % / 541 | 57 % / 158 | 3,107 |
+| "outsourcing of customer support" | 73 | 100 % / 2,145 | 96 % / 580 | 60 % / 119 | 21 % / 23 | 1,858 |
+
+Against the section 4.1 baseline, on the rows whose ground truth is unchanged:
+
+| Query | thr 0.55 recall | thr 0.60 recall | Worst TP rank |
+|---|---|---|---|
+| "contact center requirements" | 78 % → **90 %** | 27 % → **54 %** | 3,153 → **1,695** |
+| "internal audit responsibilities" | 80 % → **98 %** | 53 % → **83 %** | 3,364 → **3,107** |
+| "outsourcing of customer support" | 69 % → **96 %** | 33 % → **60 %** | 2,978 → **1,858** |
+
+The AML rows are **not** comparable: this run used `\bAML\b` where section 4.1 used a bare
+substring, so the truth set is 165 rather than 266.
+
+Two conclusions, both load-bearing:
+
+1. **Re-chunking worked.** Every comparable measurement improved, and the worst-ranked true
+   positive for "contact center" moved out of the bottom decile.
+2. **Section 4's conclusion is unchanged.** 100 % recall still requires returning 2,744 of
+   3,737 documents — 73 % of the corpus. Threshold-only inclusion remains unusable, and
+   the dense arm remains a supplement. The improvement makes the *band* better, not the
+   threshold viable.
+
+### 12.1b FTS has no stemmer — term generation must supply morphology
+
+Running `inventory search "call centre" --no-llm` retrieved **8** documents lexically,
+while 41 circulars contain a `call cent*` variant. `circulars_fts` uses
+`tokenize='unicode61'` with no stemming, so `centre`, `centres`, `center`, and `centers`
+are four unrelated tokens.
+
+This is not a defect in the lexical arm — it is precisely the job of layer 0. The term
+generation prompt must emit plural and spelling variants, not only synonyms, and section
+6.1's prompt should be evaluated on that in Phase 5. Adding a porter-stemmed FTS column is
+the alternative if generation proves unreliable.
 
 ### 12.2 Chunking changes
 

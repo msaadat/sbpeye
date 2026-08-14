@@ -1061,6 +1061,19 @@ def reindex_cmd(dry_run):
         backfill_laws_fts(db, force=True)
         print("Rebuilt FTS5 lexical indexes (circulars + laws)")
 
+        # The circular/attachment arm writes chunks in batches rather than through
+        # `_replace_document_chunks`, so it has no per-source ledger hook. Reconciling
+        # here is both cheaper and stricter: it checks what actually landed in the store.
+        from sbpeye.database import collection as live_collection
+        from sbpeye.inventory.ledger import reconcile
+
+        ledger_report = reconcile(db, live_collection, embedding_config, write=True)
+        print(
+            f"Ledger: {ledger_report.status_counts.get('indexed', 0)} indexed, "
+            f"{ledger_report.status_counts.get('stale', 0)} stale, "
+            f"{ledger_report.orphan_chunks} orphan chunk(s)"
+        )
+
         print(f"\nRe-indexing complete:")
         print(f"  Circulars indexed: {indexed}")
         print(f"  Attachments indexed: {indexed_attachments}")

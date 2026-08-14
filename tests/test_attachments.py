@@ -606,7 +606,7 @@ def test_reextract_uses_local_cache_and_optionally_reindexes(monkeypatch, tmp_pa
     monkeypatch.setattr(
         scraper,
         "_index_circular",
-        lambda item, verbose=False: indexed.append(item.id),
+        lambda item, verbose=False, db=None: indexed.append(item.id),
     )
     monkeypatch.setattr(scraper, "vectorize_attachment", lambda *args, **kwargs: True)
 

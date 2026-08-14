@@ -34,6 +34,7 @@ from .circulars import (
     HEADERS,
     _content_matches_file_type,
     _get_sbp,
+    _record_ledger,
     _replace_document_chunks,
     extract_document_text,
     fetch_page_cached,
@@ -1084,6 +1085,10 @@ def vectorize_law_document(
         law_document(document, version),
         metadata_for=lambda chunk, i: law_chunk_metadata(document, version, chunk, i),
         delete_kwargs={"law_document_id": document.id},
+    )
+    _record_ledger(
+        db, "law_version", version.id, "law", document.id,
+        version.content_text or "", count, version_id=version.id,
     )
     # Marked done even at zero chunks: a scanned PDF that extracts to nothing has been
     # processed, and leaving it unmarked would re-chunk it on every sync forever.

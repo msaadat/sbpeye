@@ -12,6 +12,7 @@ See docs/INVENTORY_SEARCH_PLAN.md section 10.
 """
 
 import hashlib
+import logging
 import uuid
 from collections import Counter
 from dataclasses import dataclass, field
@@ -22,6 +23,8 @@ from sqlalchemy.orm import Session
 from ..checklist import prepare_index_chunks
 from ..models import SemanticIndexSource
 from .corpus import (
+    STATUS_EMPTY,
+    STATUS_INDEX_ERROR,
     STATUS_INDEXED,
     STATUS_STALE,
     CorpusScope,
@@ -31,6 +34,9 @@ from .corpus import (
 from .fingerprint import CHUNKER_VERSION, content_hash, embedding_fingerprint
 
 CHUNK_ID_SEPARATOR = "__chunk_"
+PAGE_SIZE = 5000
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -87,8 +93,100 @@ def chunk_counts_by_source(collection, batch_size: int = 5000) -> Counter:
         offset += len(ids)
 
 
-def _ledger_row_id(source: SourceRef) -> str:
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, source.ledger_id))
+def _ledger_row_id(ledger_id: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, ledger_id))
+
+
+def expected_chunk_count(text: str) -> int:
+    """How many chunks the canonical chunker produces from this text.
+
+    Chunk count depends only on the text, not the label, so callers do not need to
+    reconstruct a document dict to predict it.
+    """
+    return len(prepare_index_chunks({
+        "doc_id": "", "doc_type": "", "doc_label": "", "text": text, "file_type": "",
+    }))
+
+
+def status_for(expected: int, indexed: int) -> tuple[str, str | None]:
+    """The ledger status implied by expected versus stored chunk counts.
+
+    One rule, shared by the reconciler and the live indexing paths, so a source cannot
+    be described one way by a sync and another way by an audit.
+    """
+    if expected == 0:
+        # Text that survives `.strip()` but chunks to nothing: a scanned file that
+        # extracted to page markers and no words. Nothing was lost by the indexer, so
+        # this is an empty source, not a stale one — calling it stale would make
+        # `--repair` re-embed it forever without effect.
+        return STATUS_EMPTY, "source text produced no chunks"
+    if indexed == expected:
+        return STATUS_INDEXED, None
+    return STATUS_STALE, f"expected {expected} chunk(s), found {indexed}"
+
+
+def record_source(
+    db: Session,
+    *,
+    source_kind: str,
+    source_id: str,
+    logical_kind: str,
+    logical_document_id: str,
+    text: str,
+    indexed_chunks: int,
+    version_id: str | None = None,
+    status: str | None = None,
+    error: str | None = None,
+    embedding_config=None,
+) -> None:
+    """Upsert one ledger row from an indexing path.
+
+    Called by the same functions that write Chroma and FTS, so the ledger describes the
+    index as it is rather than as it was at the last audit. Never raises: a bookkeeping
+    failure must not fail an index write, and an absent or stale row makes coverage
+    pessimistic, which is the safe direction.
+    """
+    try:
+        if embedding_config is None:
+            from ..database import embedding_config as default_config
+
+            embedding_config = default_config
+
+        expected = expected_chunk_count(text)
+        if status is None:
+            status, error = status_for(expected, indexed_chunks)
+
+        ledger_id = f"{source_kind}:{source_id}"
+        row = (
+            db.query(SemanticIndexSource)
+            .filter_by(source_kind=source_kind, source_id=source_id)
+            .one_or_none()
+        )
+        if row is None:
+            row = SemanticIndexSource(
+                id=_ledger_row_id(ledger_id),
+                source_kind=source_kind,
+                source_id=source_id,
+            )
+            db.add(row)
+        row.logical_kind = logical_kind
+        row.logical_document_id = logical_document_id
+        row.version_id = version_id
+        row.content_hash = content_hash(text)
+        row.chunker_version = CHUNKER_VERSION
+        row.embedding_fingerprint = embedding_fingerprint(embedding_config)
+        row.expected_chunks = expected
+        row.indexed_chunks = indexed_chunks
+        row.status = status
+        row.error = error
+        row.indexed_at = datetime.utcnow()
+        db.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception("failed to record ledger row for %s:%s", source_kind, source_id)
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def reconcile(
@@ -125,19 +223,10 @@ def reconcile(
         indexed_chunks = stored_counts.get(source.source_id, 0)
 
         if source.is_searchable:
-            expected = len(prepare_index_chunks({
-                "doc_id": source.source_id,
-                "doc_type": source.source_kind,
-                "doc_label": source.label,
-                "text": source.text,
-                "file_type": "",
-            }))
-            status = (
-                STATUS_INDEXED
-                if expected > 0 and indexed_chunks == expected
-                else STATUS_STALE
-            )
-            error = None
+            expected = expected_chunk_count(source.text)
+            status, error = status_for(expected, indexed_chunks)
+            if status == STATUS_EMPTY:
+                report.unsearchable[status] = report.unsearchable.get(status, 0) + 1
             report.expected_chunks += expected
         else:
             expected = 0
@@ -156,7 +245,7 @@ def reconcile(
         row = existing.get(source.ledger_id)
         if row is None:
             row = SemanticIndexSource(
-                id=_ledger_row_id(source),
+                id=_ledger_row_id(source.ledger_id),
                 source_kind=source.source_kind,
                 source_id=source.source_id,
             )
@@ -192,6 +281,60 @@ def reconcile(
         db.commit()
 
     return report
+
+
+def indexed_source_ids(db: Session) -> set[str]:
+    """Source ids the ledger currently vouches for as fully indexed.
+
+    The scoring layer uses this to decide which stored chunks are allowed to score.
+    Anything else in the vector store is an orphan — a deleted circular, a superseded law
+    version, a half-finished write — and must not be able to produce a hit.
+    """
+    return {
+        row[0]
+        for row in db.query(SemanticIndexSource.source_id)
+        .filter(SemanticIndexSource.status == STATUS_INDEXED)
+        .all()
+    }
+
+
+def lexical_indexed_documents(
+    db: Session, include_circulars: bool = True, include_laws: bool = True
+) -> set[tuple[str, str]]:
+    """Logical documents that currently have an FTS row.
+
+    Reported separately from the vector arm because the two fail independently: a source
+    whose embeddings are stale is still findable lexically, and a caller assessing a
+    completeness claim needs to know which arm has the hole.
+    """
+    from sqlalchemy import text as sql_text
+
+    found: set[tuple[str, str]] = set()
+    targets = []
+    if include_circulars:
+        targets.append(("circular", "circulars_fts", "circular_id"))
+    if include_laws:
+        targets.append(("law", "laws_fts", "document_id"))
+    for logical_kind, table, id_column in targets:
+        try:
+            rows = db.execute(sql_text(f"SELECT DISTINCT {id_column} FROM {table}")).all()
+        except Exception:  # noqa: BLE001 - a missing table is a total gap, not a crash
+            logger.exception("could not read %s for coverage", table)
+            continue
+        found.update((logical_kind, row[0]) for row in rows)
+    return found
+
+
+def recorded_fingerprints(db: Session) -> set[str]:
+    """Embedding fingerprints the current index was actually built with."""
+    return {
+        row[0]
+        for row in db.query(SemanticIndexSource.embedding_fingerprint)
+        .filter(SemanticIndexSource.status == STATUS_INDEXED)
+        .distinct()
+        .all()
+        if row[0]
+    }
 
 
 def snapshot_id(db: Session) -> str:

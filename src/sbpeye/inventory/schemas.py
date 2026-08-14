@@ -14,6 +14,7 @@ LocatorKind = Literal["page", "offset", "chunk"]
 DEFAULT_SEMANTIC_BAND = 300
 DEFAULT_MAX_CANDIDATES = 1200
 DEFAULT_EVIDENCE_PER_RESULT = 3
+DEFAULT_MAX_RESULTS = 500
 
 
 class InventoryError(Exception):
@@ -61,6 +62,7 @@ class InventorySearchRequest:
     sources: list[SourceName] = field(default_factory=lambda: ["circulars", "laws"])
     semantic_band: int = DEFAULT_SEMANTIC_BAND
     max_candidates: int = DEFAULT_MAX_CANDIDATES
+    max_results: int = DEFAULT_MAX_RESULTS
     skip_adjudication: bool = False
     extract_spans: bool = True
     evidence_per_result: int = DEFAULT_EVIDENCE_PER_RESULT
@@ -79,6 +81,8 @@ class InventorySearchRequest:
             raise InvalidQuery("semantic_band must not be negative")
         if self.max_candidates < 1:
             raise InvalidQuery("max_candidates must be at least 1")
+        if self.max_results < 1:
+            raise InvalidQuery("max_results must be at least 1")
         if not 1 <= self.evidence_per_result <= 5:
             raise InvalidQuery("evidence_per_result must be between 1 and 5")
 
@@ -150,8 +154,13 @@ class Coverage:
     adjudicated_included: int = 0
     adjudicated_excluded: int = 0
     adjudicated_undetermined: int = 0
+    # Vector arm, counted in physical sources.
     source_units_expected: int = 0
     source_units_indexed: int = 0
+    # Lexical arm, counted in logical documents — the two fail independently.
+    lexical_documents_expected: int = 0
+    lexical_documents_indexed: int = 0
+    lexical_gaps: int = 0
     excluded_by_design: dict[str, int] = field(default_factory=dict)
     unsearchable: dict[str, int] = field(default_factory=dict)
     stale_or_missing_index: int = 0
@@ -170,6 +179,9 @@ class RetrievalPolicy:
     semantic_band: int = 0
     judge_model: str = ""
     judge_prompt_version: str = ""
+    # False when span extraction was disabled, so a caller can tell "not attempted"
+    # from "attempted and could not be verified".
+    spans_extracted: bool = False
 
 
 @dataclass
@@ -179,6 +191,7 @@ class InventorySearchResponse:
     retrieval_policy: RetrievalPolicy = field(default_factory=RetrievalPolicy)
     coverage: Coverage = field(default_factory=Coverage)
     matched_documents: int = 0
+    results_truncated: int = 0
     results: list[InventoryResult] = field(default_factory=list)
     excluded: list[ExcludedResult] = field(default_factory=list)
     truncated: bool = False

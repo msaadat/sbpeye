@@ -1175,6 +1175,30 @@ export interface CircularRegulationLink {
   confidence?: number | null
 }
 
+/** The five analyses a law can carry. Consolidation is circular-only — laws have no chain. */
+export type LawGenerationFeature =
+  | 'summary'
+  | 'tags'
+  | 'checklist'
+  | 'entities'
+  | 'relationships'
+export type LawGenerationAction = LawGenerationFeature | 'all'
+
+export interface LawRelationship {
+  /** made_under | amends | repeals | references */
+  type: string
+  confidence?: number | null
+  detected_via?: string | null
+  target_reference?: string | null
+  document: {
+    id: string
+    title: string
+    display_title: string
+    doc_type: string | null
+    part_label: string | null
+  } | null
+}
+
 export interface LawDetail extends LawSummary {
   normalized_title?: string | null
   page_slug?: string | null
@@ -1185,6 +1209,11 @@ export interface LawDetail extends LawSummary {
   children: LawChild[]
   circular?: CircularSummary | null
   linked_circulars: LawLinkedCircular[]
+  /** When each analysis last ran on the edition in force; null means never. */
+  generation?: Record<LawGenerationFeature, string | null>
+  checklist_available?: boolean
+  entities?: CircularEntity[]
+  relationships?: { outgoing: LawRelationship[]; incoming: LawRelationship[] }
 }
 
 export interface LawTypeCount {
@@ -1231,6 +1260,40 @@ export async function getLawTypes(): Promise<LawTypeCount[]> {
 
 export async function getLawDetail(id: string, signal?: AbortSignal): Promise<LawDetail> {
   return requestJson<LawDetail>(`/laws/${encodeURIComponent(id)}`, { signal })
+}
+
+export async function startLawGeneration(
+  id: string,
+  feature: LawGenerationAction,
+): Promise<AIGenerationJob> {
+  return requestJson<AIGenerationJob>(`/laws/${encodeURIComponent(id)}/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ feature }),
+  })
+}
+
+export async function downloadLawChecklistExcel(id: string, title?: string | null): Promise<void> {
+  const response = await fetch(`${API_BASE}/laws/${encodeURIComponent(id)}/checklist.xlsx`)
+
+  if (!response.ok) {
+    const payload = await readErrorPayload(response)
+    throw Object.assign(
+      new Error(payload?.error || `Checklist export failed with ${response.status}`),
+      { status: response.status, payload },
+    ) as ApiError
+  }
+
+  const blob = await response.blob()
+  const downloadUrl = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = downloadUrl
+  const stem = (title || id).replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^[._]+|[._]+$/g, '')
+  anchor.download = `${stem || 'document'}_checklist.xlsx`
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  URL.revokeObjectURL(downloadUrl)
 }
 
 /** The archived file, served from our disk — never re-fetched from sbp.org.pk. */

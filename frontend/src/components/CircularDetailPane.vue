@@ -1,27 +1,21 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useToast } from 'primevue/usetoast'
-import { marked } from 'marked'
-import DOMPurify from 'dompurify'
 import Button from 'primevue/button'
 import Dialog from 'primevue/dialog'
 import Message from 'primevue/message'
 import Popover from 'primevue/popover'
 import ProgressSpinner from 'primevue/progressspinner'
 import {
-  getAIGenerationJob,
   buildDocumentContentUrl,
   getCircularDetail,
   getCircularSource,
   downloadChecklistExcel,
   refreshCircular as refreshCircularSource,
   startCircularGeneration,
-  type AIGenerationJob,
-  type ApiError,
   type CircularDetail,
   type CircularAttachment,
-  type CircularEntity,
   type GenerationAction,
   type GenerationFeature,
   type CircularRelationship,
@@ -30,6 +24,12 @@ import {
   type LawSummary,
 } from '@/lib/api'
 import { useResizablePane } from '@/lib/useResizablePane'
+import { useAiGeneration } from '@/lib/useAiGeneration'
+import RelationshipGroups, {
+  type RelationGroup,
+} from '@/components/RelationshipGroups.vue'
+import RegulatoryValueList from '@/components/RegulatoryValueList.vue'
+import SummarySection from '@/components/SummarySection.vue'
 
 const PdfPreviewDialog = defineAsyncComponent(() => import('@/components/PdfPreviewDialog.vue'))
 const CircularGraph = defineAsyncComponent(() => import('@/components/CircularGraph.vue'))
@@ -42,11 +42,6 @@ const emit = defineEmits<{ close: [], 'toggle-pin': [] }>()
 const router = useRouter()
 const toast = useToast()
 
-marked.use({
-  breaks: true,
-  gfm: true,
-})
-
 const circular = ref<CircularDetail | null>(null)
 const source = ref<CircularSourceContent | null>(null)
 const loading = ref(false)
@@ -58,9 +53,7 @@ const exportingChecklist = ref(false)
 const pdfDialogVisible = ref(false)
 const attachmentDialogVisible = ref(false)
 const selectedAttachment = ref<PreviewAttachment | null>(null)
-const summaryExpanded = ref(false)
 const generationPopover = ref<InstanceType<typeof Popover> | null>(null)
-const activeJob = ref<AIGenerationJob | null>(null)
 const graphVisible = ref(false)
 const consolidatedVisible = ref(false)
 const graphFocusLabel = ref<string | null>(null)
@@ -70,8 +63,6 @@ const graphHeader = computed(
 )
 const detailTab = ref<'document' | 'details'>('document')
 const detailRail = useResizablePane('sbp:detailRailWidth', 336, 240, 480, { reverse: true })
-let pollTimer: ReturnType<typeof setTimeout> | null = null
-let pollEpoch = 0
 
 const generationFeatures: Array<{ feature: GenerationFeature; label: string; icon: string }> = [
   { feature: 'summary', label: 'Summary', icon: 'pi pi-align-left' },
@@ -81,60 +72,7 @@ const generationFeatures: Array<{ feature: GenerationFeature; label: string; ico
   { feature: 'entities', label: 'Regulatory Values', icon: 'pi pi-percentage' },
 ]
 
-const ENTITY_TYPE_LABELS: Record<string, string> = {
-  ratio: 'Ratios',
-  monetary_threshold: 'Monetary thresholds',
-  percentage_limit: 'Percentage limits',
-  numeric_limit: 'Numeric limits',
-  deadline: 'Deadlines',
-  effective_date: 'Effective dates',
-}
-
-const ENTITY_TYPE_ORDER = [
-  'ratio',
-  'monetary_threshold',
-  'percentage_limit',
-  'numeric_limit',
-  'deadline',
-  'effective_date',
-]
-
-const COMPARATOR_PREFIX: Record<string, string> = {
-  min: '≥ ',
-  max: '≤ ',
-  exactly: '',
-  range: '',
-}
-
-interface EntityGroup {
-  type: string
-  label: string
-  items: CircularEntity[]
-}
-
-const entityGroups = computed<EntityGroup[]>(() => {
-  const entities = circular.value?.entities ?? []
-  const byType = new Map<string, CircularEntity[]>()
-  for (const entity of entities) {
-    const list = byType.get(entity.entity_type) ?? []
-    list.push(entity)
-    byType.set(entity.entity_type, list)
-  }
-  return ENTITY_TYPE_ORDER.filter((type) => byType.has(type)).map((type) => ({
-    type,
-    label: ENTITY_TYPE_LABELS[type] ?? type,
-    items: byType.get(type) as CircularEntity[],
-  }))
-})
-
-function formatEntityValue(entity: CircularEntity): string {
-  if (entity.value_text) {
-    const prefix = entity.comparator ? COMPARATOR_PREFIX[entity.comparator] ?? '' : ''
-    return `${prefix}${entity.value_text}`.trim()
-  }
-  if (entity.effective_date) return formatDate(entity.effective_date)
-  return entity.value_numeric != null ? String(entity.value_numeric) : '—'
-}
+const entityCount = computed(() => circular.value?.entities?.length ?? 0)
 
 const sourceUrl = computed(() => source.value?.url || circular.value?.url || '')
 const sourceWebsiteUrl = computed(() => source.value?.original_url || circular.value?.url || source.value?.url || '')
@@ -143,13 +81,6 @@ const isPdf = computed(() => source.value?.type === 'pdf' || sourceUrl.value.toL
 function formatDate(value?: string | null): string {
   if (!value) return ''
   return new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short', day: '2-digit' }).format(new Date(value))
-}
-
-function renderMarkdown(content?: string | null): string {
-  if (!content) return ''
-  return DOMPurify.sanitize(marked.parse(content) as string, {
-    USE_PROFILES: { html: true },
-  })
 }
 
 function statusSeverity(status?: string | null): 'success' | 'info' | 'warn' | 'danger' | 'secondary' {
@@ -174,29 +105,6 @@ const INCOMING_LABELS: Record<string, string> = {
 
 const TYPE_ORDER = ['supersedes', 'amends', 'cancels', 'clarifies', 'adds_to']
 const CONSOLIDATION_RELATION_TYPES = new Set(['amends', 'adds_to'])
-const COLLAPSE_THRESHOLD = 12
-
-interface RelationGroupItem {
-  id: string | null
-  label: string
-}
-
-interface RelationGroup {
-  key: string
-  direction: 'outgoing' | 'incoming'
-  type: string
-  label: string
-  items: RelationGroupItem[]
-}
-
-const expandedGroups = ref<Set<string>>(new Set())
-
-function toggleGroup(key: string) {
-  const next = new Set(expandedGroups.value)
-  if (next.has(key)) next.delete(key)
-  else next.add(key)
-  expandedGroups.value = next
-}
 
 function relationTarget(relation: CircularRelationship, direction: 'outgoing' | 'incoming'): CircularRelationshipTarget | null {
   return direction === 'incoming' ? relation.source || null : relation.target || null
@@ -240,8 +148,8 @@ const relationshipGroups = computed<RelationGroup[]>(() => {
     ...buildGroups(relationships.outgoing, 'outgoing'),
     ...buildGroups(relationships.incoming, 'incoming'),
   ]
-  const rank = (type: string) => {
-    const index = TYPE_ORDER.indexOf(type)
+  const rank = (type?: string) => {
+    const index = TYPE_ORDER.indexOf(type || '')
     return index === -1 ? TYPE_ORDER.length : index
   }
   return groups.sort((a, b) => {
@@ -249,11 +157,6 @@ const relationshipGroups = computed<RelationGroup[]>(() => {
     return rank(a.type) - rank(b.type)
   })
 })
-
-function visibleItems(group: RelationGroup): RelationGroupItem[] {
-  if (expandedGroups.value.has(group.key) || group.items.length <= COLLAPSE_THRESHOLD) return group.items
-  return group.items.slice(0, COLLAPSE_THRESHOLD)
-}
 
 function openRelationship(id?: string | null) {
   if (!id) return
@@ -330,7 +233,7 @@ const hasIntelligence = computed(() =>
   Boolean(
     circular.value?.summary ||
       hasRelationships.value ||
-      entityGroups.value.length ||
+      entityCount.value ||
       // Regulations cited are deterministic — URL scans and SBP's own listing, no model
       // involved — so a circular with no AI pass must still show them rather than fall
       // through to "No AI analysis yet". Attachments are in here for the same reason.
@@ -349,74 +252,26 @@ function navigateFromConsolidated(id: string) {
   void router.push({ path: `/circulars/${id}`, query: router.currentRoute.value.query })
 }
 
-function stopPolling() {
-  pollEpoch += 1
-  if (pollTimer) clearTimeout(pollTimer)
-  pollTimer = null
-}
-
 async function refreshCircular() {
   circular.value = await getCircularDetail(props.id)
 }
 
-async function pollGeneration(jobId: string, epoch: number) {
-  if (epoch !== pollEpoch) return
-  try {
-    const job = await getAIGenerationJob(jobId)
-    if (epoch !== pollEpoch) return
-    activeJob.value = job
-    if (job.status === 'succeeded') {
-      await refreshCircular()
-      activeJob.value = null
-      const hasGaps = job.result_status === 'completed_with_gaps'
-      toast.add({
-        severity: hasGaps ? 'warn' : 'success',
-        summary: hasGaps ? 'AI analysis completed with gaps' : 'AI analysis complete',
-        detail: hasGaps ? 'Some PDF attachments could not be analyzed.' : 'The circular intelligence was updated.',
-        life: hasGaps ? 6000 : 3500,
-      })
-      return
-    }
-    if (job.status === 'failed') {
-      activeJob.value = null
-      toast.add({ severity: 'error', summary: 'AI generation failed', detail: job.error || 'The background job failed.', life: 6000 })
-      return
-    }
-    pollTimer = setTimeout(() => void pollGeneration(jobId, epoch), 1000)
-  } catch (error) {
-    activeJob.value = null
-    toast.add({ severity: 'error', summary: 'Job status unavailable', detail: error instanceof Error ? error.message : 'Unable to check generation status.', life: 5000 })
-  }
-}
+const { activeJob, generate: startGeneration, stop: stopPolling } = useAiGeneration({
+  start: (feature) => startCircularGeneration(props.id, feature as GenerationAction),
+  refresh: refreshCircular,
+  subject: 'circular',
+})
 
-async function generate(feature: GenerationAction) {
+function generate(feature: GenerationAction) {
   generationPopover.value?.hide()
-  if (activeJob.value) return
-  stopPolling()
-  const epoch = pollEpoch
-  try {
-    const job = await startCircularGeneration(props.id, feature)
-    activeJob.value = job
-    void pollGeneration(job.id, epoch)
-  } catch (error) {
-    const apiError = error as ApiError
-    const existingJob = apiError.payload?.job as AIGenerationJob | undefined
-    if (apiError.status === 409 && existingJob?.id) {
-      activeJob.value = existingJob
-      void pollGeneration(existingJob.id, epoch)
-      return
-    }
-    toast.add({ severity: 'error', summary: 'Unable to start generation', detail: error instanceof Error ? error.message : 'The request failed.', life: 5000 })
-  }
+  void startGeneration(feature)
 }
 
 async function loadCircular() {
   stopPolling()
   activeJob.value = null
-  summaryExpanded.value = false
   consolidatedVisible.value = false
   detailTab.value = 'document'
-  expandedGroups.value = new Set()
   loading.value = true
   sourceLoading.value = true
   errorMessage.value = ''
@@ -472,7 +327,6 @@ async function exportChecklist() {
 
 onMounted(loadCircular)
 watch(() => props.id, loadCircular)
-onBeforeUnmount(stopPolling)
 </script>
 
 <template>
@@ -675,24 +529,7 @@ onBeforeUnmount(stopPolling)
 
         <aside class="detail-rail" aria-label="Circular intelligence">
           <template v-if="hasIntelligence">
-          <section v-if="circular.summary" class="detail-section summary-section">
-            <h2>
-              <button
-                type="button"
-                class="collapsible-heading"
-                :aria-expanded="summaryExpanded"
-                @click="summaryExpanded = !summaryExpanded"
-              >
-                <span class="section-label"><i class="pi pi-align-left section-icon" />Summary</span>
-                <i :class="summaryExpanded ? 'pi pi-chevron-up' : 'pi pi-chevron-down'" />
-              </button>
-            </h2>
-            <div
-              v-show="summaryExpanded"
-              class="detail-copy markdown-body summary-markdown"
-              v-html="renderMarkdown(circular.summary)"
-            />
-          </section>
+          <SummarySection v-if="circular.summary" :summary="circular.summary" />
 
           <section
             v-if="circular.relationships.outgoing.length || circular.relationships.incoming.length"
@@ -700,36 +537,7 @@ onBeforeUnmount(stopPolling)
           >
             <div class="pill-group">
               <h2><i class="pi pi-sitemap section-icon" />Relationships</h2>
-              <div class="relationship-groups">
-                <div
-                  v-for="group in relationshipGroups"
-                  :key="group.key"
-                  class="relationship-group"
-                  :class="{ incoming: group.direction === 'incoming' }"
-                >
-                  <span class="relationship-group-chip">
-                    {{ group.label }}<span class="relationship-group-count">{{ group.items.length }}</span>
-                  </span>
-                  <button
-                    v-for="(item, index) in visibleItems(group)"
-                    :key="`${group.key}-${index}`"
-                    type="button"
-                    class="intelligence-pill relationship-ref-pill"
-                    :disabled="!item.id"
-                    @click="openRelationship(item.id)"
-                  >
-                    {{ item.label }}
-                  </button>
-                  <button
-                    v-if="group.items.length > COLLAPSE_THRESHOLD"
-                    type="button"
-                    class="relationship-show-more"
-                    @click="toggleGroup(group.key)"
-                  >
-                    {{ expandedGroups.has(group.key) ? 'Show less' : `+${group.items.length - COLLAPSE_THRESHOLD} more` }}
-                  </button>
-                </div>
-              </div>
+              <RelationshipGroups :groups="relationshipGroups" @select="openRelationship" />
             </div>
           </section>
 
@@ -760,37 +568,7 @@ onBeforeUnmount(stopPolling)
             </ul>
           </section>
 
-          <section v-if="entityGroups.length" class="detail-section entities-section">
-            <h2><i class="pi pi-percentage section-icon" />Regulatory Values</h2>
-            <div class="entity-groups">
-              <div v-for="group in entityGroups" :key="group.type" class="entity-group">
-                <span class="entity-group-label">{{ group.label }}</span>
-                <ul class="entity-list">
-                  <li v-for="entity in group.items" :key="entity.id" class="entity-item">
-                    <div class="entity-line">
-                      <span class="entity-metric">{{ entity.metric || '—' }}</span>
-                      <span class="entity-value">
-                        {{ formatEntityValue(entity) }}
-                        <span v-if="entity.unit && entity.unit !== '%' && !entity.value_text?.includes(entity.unit)" class="entity-unit">{{ entity.unit }}</span>
-                      </span>
-                    </div>
-                    <div
-                      v-if="entity.subject || (entity.effective_date && entity.entity_type !== 'deadline' && entity.entity_type !== 'effective_date')"
-                      class="entity-sub"
-                    >
-                      <span v-if="entity.subject" class="entity-subject">{{ entity.subject }}</span>
-                      <span
-                        v-if="entity.effective_date && entity.entity_type !== 'deadline' && entity.entity_type !== 'effective_date'"
-                        class="entity-effective"
-                      >
-                        <i class="pi pi-calendar" /> {{ formatDate(entity.effective_date) }}
-                      </span>
-                    </div>
-                  </li>
-                </ul>
-              </div>
-            </div>
-          </section>
+          <RegulatoryValueList :entities="circular.entities ?? []" />
 
           <section v-if="circular.attachments.length" class="detail-section documents-section">
             <h2><i class="pi pi-paperclip section-icon" />Documents</h2>
@@ -862,11 +640,6 @@ onBeforeUnmount(stopPolling)
 </template>
 
 <style scoped>
-.entity-groups {
-  display: flex;
-  flex-direction: column;
-  gap: 0.85rem;
-}
 
 .regulation-list {
   list-style: none;
@@ -929,76 +702,4 @@ onBeforeUnmount(stopPolling)
   color: var(--sbp-muted);
 }
 
-.entity-group-label {
-  display: block;
-  font-size: var(--sbp-fs-eyebrow);
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--sbp-muted);
-  margin-bottom: 0.25rem;
-}
-
-.entity-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.entity-item {
-  padding: 0.3rem 0;
-  border-top: 1px solid var(--sbp-border);
-}
-
-.entity-line {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.4rem;
-  font-size: var(--sbp-fs-meta);
-  line-height: 1.3;
-}
-
-.entity-metric {
-  font-weight: 600;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.entity-value {
-  flex: 0 1 auto;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-  overflow-wrap: anywhere;
-}
-
-.entity-unit {
-  color: var(--sbp-muted);
-  font-weight: 400;
-  margin-left: 0.2rem;
-}
-
-.entity-sub {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.2rem 0.5rem;
-  margin-top: 0.12rem;
-  font-size: var(--sbp-fs-eyebrow);
-  line-height: 1.3;
-}
-
-.entity-subject {
-  color: var(--sbp-muted);
-  overflow-wrap: anywhere;
-}
-
-.entity-effective {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.2rem;
-  color: var(--sbp-muted);
-  white-space: nowrap;
-}
 </style>

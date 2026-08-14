@@ -1,20 +1,35 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useToast } from 'primevue/usetoast'
+import Button from 'primevue/button'
+import Popover from 'primevue/popover'
 import StateBlock from '@/components/StateBlock.vue'
+import RegulatoryValueList from '@/components/RegulatoryValueList.vue'
+import RelationshipGroups, {
+  type RelationGroup,
+} from '@/components/RelationshipGroups.vue'
+import SummarySection from '@/components/SummarySection.vue'
 import { useResizablePane } from '@/lib/useResizablePane'
+import { useAiGeneration } from '@/lib/useAiGeneration'
 import {
   buildLawFileUrl,
+  downloadLawChecklistExcel,
   getLawDetail,
   getLaws,
   getLawTypes,
+  startLawGeneration,
   type LawDetail,
+  type LawGenerationAction,
+  type LawGenerationFeature,
+  type LawRelationship,
   type LawSummary,
   type LawTypeCount,
 } from '@/lib/api'
 
 const route = useRoute()
 const router = useRouter()
+const toast = useToast()
 
 /** Same drag-to-resize rail as the Circulars results pane. */
 const libraryPane = useResizablePane('sbp:lawsRailWidth', 300, 220, 560)
@@ -417,6 +432,228 @@ function formatDate(value?: string | null): string {
     .format(new Date(value))
 }
 
+/* ---- AI analysis rail ------------------------------------------------------------ */
+
+const analysisRail = useResizablePane('sbp:lawRailWidth', 336, 240, 480, { reverse: true })
+const generationPopover = ref<InstanceType<typeof Popover> | null>(null)
+const exportingChecklist = ref(false)
+
+const { activeJob, generate: startGeneration, stop: stopGeneration } = useAiGeneration({
+  start: (feature) => startLawGeneration(selectedId.value, feature as LawGenerationAction),
+  refresh: async () => {
+    detail.value = await getLawDetail(selectedId.value)
+  },
+  subject: 'document',
+})
+
+/** A collection has no wording of its own, so only these can be built from its parts. */
+const CONTAINER_FEATURES: LawGenerationFeature[] = ['summary', 'tags', 'relationships']
+
+const isCollection = computed(() => (detail.value?.children.length ?? 0) > 0)
+
+const generationFeatures = computed(() => {
+  const all: Array<{ feature: LawGenerationFeature; label: string; icon: string }> = [
+    { feature: 'summary', label: 'Summary', icon: 'pi pi-align-left' },
+    { feature: 'tags', label: 'Tags', icon: 'pi pi-tags' },
+    { feature: 'checklist', label: 'Checklist', icon: 'pi pi-list-check' },
+    { feature: 'relationships', label: 'Relationships', icon: 'pi pi-share-alt' },
+    { feature: 'entities', label: 'Regulatory Values', icon: 'pi pi-percentage' },
+  ]
+  // Offering a checklist on the FE Manual would be offering a button that always fails.
+  return isCollection.value
+    ? all.filter((item) => CONTAINER_FEATURES.includes(item.feature))
+    : all
+})
+
+function hasGenerated(feature: LawGenerationFeature): boolean {
+  return Boolean(detail.value?.generation?.[feature])
+}
+
+function generationLabel(feature: LawGenerationFeature, label: string): string {
+  return `${hasGenerated(feature) ? 'Regenerate' : 'Generate'} ${label}`
+}
+
+const allGenerated = computed(() =>
+  generationFeatures.value.every(({ feature }) => hasGenerated(feature)),
+)
+
+/**
+ * Why this document can never be analysed, or '' when it can.
+ *
+ * The backend says the same thing on a 422, but a button that explains itself only after
+ * being pressed is a button that should not have been offered. 33 of the 133 documents in
+ * the corpus are in this state, for six different reasons.
+ */
+const analysisBlocker = computed(() => {
+  const doc = detail.value
+  if (!doc) return ''
+  if (doc.circular_id) return 'This entry is a circular — its analysis lives with the circular.'
+  if (doc.is_external) return 'Published outside SBP, so we hold no copy to analyse.'
+  if (isCollection.value) return ''
+  if (!doc.current_version) return "SBP's link to this file is broken, so there is nothing to analyse."
+  if (doc.current_version.file_type === 'xls') return 'This document is a spreadsheet, which we cannot read.'
+  return ''
+})
+
+/** A collection can be summarised only once its parts have been. */
+const rollupPending = computed(
+  () => isCollection.value && !detail.value?.children.some((child) => child.has_content),
+)
+
+const LAW_RELATION_LABELS: Record<string, string> = {
+  made_under: 'Made under',
+  amends: 'Amends',
+  repeals: 'Repeals',
+  references: 'References',
+}
+
+/** The same edge read from the other end. "Made under" becomes "Issued under it". */
+const LAW_RELATION_INCOMING: Record<string, string> = {
+  made_under: 'Issued under this',
+  amends: 'Amended by',
+  repeals: 'Repealed by',
+  references: 'Referenced by',
+}
+
+// Authority order: what this instrument sits under matters more than what it mentions.
+const LAW_RELATION_ORDER = ['made_under', 'amends', 'repeals', 'references']
+
+function buildLawGroups(
+  edges: LawRelationship[],
+  direction: 'outgoing' | 'incoming',
+): RelationGroup[] {
+  const groups = new Map<string, RelationGroup>()
+  for (const edge of edges) {
+    const type = edge.type || 'references'
+    const key = `${direction}:${type}`
+    let group = groups.get(key)
+    if (!group) {
+      const labels = direction === 'incoming' ? LAW_RELATION_INCOMING : LAW_RELATION_LABELS
+      group = { key, direction, type, label: labels[type] ?? type, items: [] }
+      groups.set(key, group)
+    }
+    group.items.push({
+      id: edge.document?.id ?? null,
+      label: edge.document?.display_title || edge.target_reference || 'Unresolved',
+      crumb: edge.document?.part_label,
+    })
+  }
+  return [...groups.values()]
+}
+
+const lawRelationshipGroups = computed<RelationGroup[]>(() => {
+  const edges = detail.value?.relationships
+  if (!edges) return []
+  const groups = [
+    ...buildLawGroups(edges.outgoing, 'outgoing'),
+    ...buildLawGroups(edges.incoming, 'incoming'),
+  ]
+  const rank = (type?: string) => {
+    const index = LAW_RELATION_ORDER.indexOf(type || '')
+    return index === -1 ? LAW_RELATION_ORDER.length : index
+  }
+  return groups.sort((a, b) => {
+    if (a.direction !== b.direction) return a.direction === 'outgoing' ? -1 : 1
+    return rank(a.type) - rank(b.type)
+  })
+})
+
+/**
+ * The circulars acting on this law, grouped by what they do to it.
+ *
+ * This is the direction a reader of a regulation asks about, and until the relationships
+ * pass runs they all sit under "References" — the typed groups are what tells the nine
+ * circulars that amend a regulation from the two dozen that merely mention it.
+ */
+const citedByGroups = computed<RelationGroup[]>(() => {
+  const links = detail.value?.linked_circulars ?? []
+  const groups = new Map<string, RelationGroup>()
+  for (const link of links) {
+    const type = link.link_type || 'references'
+    const key = `cited:${type}`
+    let group = groups.get(key)
+    if (!group) {
+      const labels: Record<string, string> = {
+        amends: 'Amended by',
+        implements: 'Implemented by',
+        clarifies: 'Clarified by',
+        annexure_of: 'Annexure of',
+        listing: 'Listed with',
+        references: 'Referenced by',
+      }
+      group = { key, direction: 'incoming', type, label: labels[type] ?? type, items: [] }
+      groups.set(key, group)
+    }
+    group.items.push({
+      id: link.circular.id,
+      label: link.circular.reference || link.circular.title,
+      crumb: link.circular.title,
+    })
+  }
+  const rank = (type?: string) =>
+    ['amends', 'implements', 'clarifies', 'annexure_of', 'listing', 'references']
+      .indexOf(type || '')
+  return [...groups.values()].sort((a, b) => rank(a.type) - rank(b.type))
+})
+
+const hasAnalysis = computed(() =>
+  Boolean(
+    detail.value?.summary ||
+      lawRelationshipGroups.value.length ||
+      citedByGroups.value.length ||
+      detail.value?.entities?.length ||
+      detail.value?.tags?.length,
+  ),
+)
+
+/**
+ * Whether anything in the rail actually came from a model.
+ *
+ * Distinct from `hasAnalysis` because the "Circulars" section is deterministic — 57 of the
+ * 133 documents carry name-matched links and would render a populated-looking rail having
+ * never been analysed. Without this the invitation to analyse would never appear on
+ * exactly the documents most worth analysing.
+ */
+const hasAiAnalysis = computed(() =>
+  Boolean(
+    detail.value?.summary ||
+      detail.value?.tags?.length ||
+      detail.value?.entities?.length ||
+      lawRelationshipGroups.value.length ||
+      Object.values(detail.value?.generation ?? {}).some(Boolean),
+  ),
+)
+
+function generate(feature: LawGenerationAction) {
+  generationPopover.value?.hide()
+  void startGeneration(feature)
+}
+
+function openCircular(id: string) {
+  void router.push(`/circulars/${id}`)
+}
+
+function openLaw(id: string) {
+  void router.push(`/laws/${encodeURIComponent(id)}`)
+}
+
+async function exportChecklist() {
+  if (!detail.value) return
+  exportingChecklist.value = true
+  try {
+    await downloadLawChecklistExcel(detail.value.id, detail.value.display_title)
+  } catch (error) {
+    toast.add({
+      severity: 'error',
+      summary: 'Export failed',
+      detail: error instanceof Error ? error.message : 'Unable to export the checklist.',
+      life: 5000,
+    })
+  } finally {
+    exportingChecklist.value = false
+  }
+}
+
 function capitalize(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1)
 }
@@ -602,6 +839,9 @@ async function loadDetail(id: string) {
   detailLoading.value = true
   detailError.value = ''
   provenanceOpen.value = false
+  // A job polling for the document we just navigated away from must not write its result
+  // onto the one we just opened.
+  stopGeneration()
   try {
     detail.value = await getLawDetail(id)
     // Keep a part's container open so the reader is never shown without its context,
@@ -964,16 +1204,78 @@ onMounted(() => {
               <span class="sbp-badge">{{ typeLabel(detail.doc_type) }}</span>
               <span v-if="currentVersion" class="reader-force">In force</span>
               <span v-if="statusLine">{{ statusLine }}</span>
+              <span v-for="tag in detail.tags" :key="tag" class="intelligence-pill tag-pill">{{ tag }}</span>
             </p>
           </div>
-          <a
-            v-if="fileUrl"
-            class="sbp-ghost-button"
-            :href="fileUrl"
-            target="_blank"
-            rel="noreferrer"
-          >Open in a new tab</a>
+          <div class="reader-actions">
+            <Button
+              v-if="!analysisBlocker"
+              icon="pi pi-sparkles"
+              text
+              rounded
+              severity="help"
+              :loading="Boolean(activeJob)"
+              aria-label="Generate AI analysis"
+              :title="activeJob ? `Generating ${activeJob.feature}` : 'Generate AI analysis'"
+              @click="generationPopover?.toggle($event)"
+            />
+            <Button
+              v-if="detail.checklist_available"
+              icon="pi pi-file-excel"
+              text
+              rounded
+              severity="success"
+              :loading="exportingChecklist"
+              aria-label="Export checklist to Excel"
+              title="Export the obligations checklist"
+              @click="exportChecklist"
+            />
+            <a
+              v-if="fileUrl"
+              class="sbp-ghost-button"
+              :href="fileUrl"
+              target="_blank"
+              rel="noreferrer"
+            >Open in a new tab</a>
+          </div>
         </header>
+
+        <Popover ref="generationPopover" class="generation-popover">
+          <div class="generation-menu">
+            <span class="generation-menu-title">AI analysis</span>
+            <p v-if="isCollection" class="generation-menu-note">
+              A collection is summarised from its parts.
+            </p>
+            <Button
+              v-for="item in generationFeatures"
+              :key="item.feature"
+              :icon="item.icon"
+              :label="generationLabel(item.feature, item.label)"
+              text
+              size="small"
+              :disabled="Boolean(activeJob)"
+              @click="generate(item.feature)"
+            />
+            <div class="generation-menu-divider" />
+            <Button
+              icon="pi pi-sparkles"
+              :label="allGenerated ? 'Regenerate All' : 'Generate All'"
+              size="small"
+              :disabled="Boolean(activeJob)"
+              @click="generate('all')"
+            />
+          </div>
+        </Popover>
+
+        <div v-if="activeJob" class="generation-progress" role="status">
+          <i class="pi pi-sparkles" />
+          Generating {{ activeJob.feature === 'all' ? 'all AI analysis' : activeJob.feature }} in the background
+          <span v-if="activeJob.progress_total">
+            ({{ activeJob.progress_completed }}/{{ activeJob.progress_total }} steps)
+          </span>
+        </div>
+
+        <div class="reader-body" :style="{ '--detail-rail-width': `${analysisRail.size.value}px` }">
 
         <!-- The archived file, straight from our disk. -->
         <iframe
@@ -1013,6 +1315,80 @@ onMounted(() => {
             <h2>SBP's link to this file is broken.</h2>
             <p>The listing points at a file we could not retrieve, so there is nothing archived to show. We retry on every sync.</p>
           </template>
+        </div>
+
+        <div
+          class="pane-resizer detail-resizer"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize the analysis panel"
+          :class="{ resizing: analysisRail.resizing.value }"
+          @pointerdown="analysisRail.startDrag"
+          @dblclick="analysisRail.resetToDefault"
+        />
+
+        <aside class="detail-rail" aria-label="Document analysis">
+          <template v-if="hasAnalysis">
+            <SummarySection v-if="detail.summary" :summary="detail.summary" />
+
+            <section v-if="lawRelationshipGroups.length" class="detail-section intelligence-section">
+              <div class="pill-group">
+                <h2><i class="pi pi-sitemap section-icon" />Related instruments</h2>
+                <RelationshipGroups :groups="lawRelationshipGroups" @select="openLaw" />
+              </div>
+            </section>
+
+            <!-- The mirror of a circular's "Regulations cited", and the direction a
+                 reader of a regulation actually asks about. -->
+            <section v-if="citedByGroups.length" class="detail-section intelligence-section">
+              <div class="pill-group">
+                <h2><i class="pi pi-file section-icon" />Circulars</h2>
+                <RelationshipGroups :groups="citedByGroups" @select="openCircular" />
+              </div>
+            </section>
+
+            <RegulatoryValueList :entities="detail.entities ?? []" />
+          </template>
+
+          <!--
+            Shown whenever nothing in the rail came from a model — including when the
+            deterministic "Circulars" section above has filled it out, which is the common
+            case and the one where the invitation matters most.
+          -->
+          <template v-if="!hasAiAnalysis">
+            <!-- Structural: no re-run changes it, so no button is offered. -->
+            <div v-if="analysisBlocker" class="detail-rail-empty" :class="{ 'is-footer': hasAnalysis }">
+              <i class="pi pi-ban" />
+              <p class="detail-rail-empty-title">Not analysable</p>
+              <p class="detail-rail-empty-text">{{ analysisBlocker }}</p>
+            </div>
+
+            <!-- Recoverable: analyse the parts and this becomes possible. -->
+            <div v-else-if="rollupPending" class="detail-rail-empty" :class="{ 'is-footer': hasAnalysis }">
+              <i class="pi pi-sitemap" />
+              <p class="detail-rail-empty-title">Analyse the parts first</p>
+              <p class="detail-rail-empty-text">
+                A collection is summarised from its parts, and none of this one's parts are held.
+              </p>
+            </div>
+
+            <div v-else class="detail-rail-empty" :class="{ 'is-footer': hasAnalysis }">
+              <i class="pi pi-sparkles" />
+              <p class="detail-rail-empty-title">No AI analysis yet</p>
+              <p class="detail-rail-empty-text">
+                Generate a summary, tags, an obligations checklist and the regulatory values
+                this document states.
+              </p>
+              <Button
+                icon="pi pi-sparkles"
+                label="Generate analysis"
+                size="small"
+                :loading="Boolean(activeJob)"
+                @click="generate('all')"
+              />
+            </div>
+          </template>
+        </aside>
         </div>
 
         <footer class="reader-provenance">
@@ -1217,12 +1593,70 @@ onMounted(() => {
   font-weight: 600;
 }
 
+/* Source left, analysis right — the same split `CircularDetailPane` uses, so the two
+   readers behave identically under a drag. */
+.reader-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 6px minmax(15rem, var(--detail-rail-width, 21rem));
+}
+
+.reader-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+
 .reader-frame {
-  flex: 1;
+  /* An iframe is a replaced element, and grid's default `align-items: normal` stretches
+     normal elements but not replaced ones — so without this it collapses to the 150px
+     intrinsic height and the PDF gets a viewport a few lines tall. In the flex column
+     this replaced, `flex: 1` did the same job. */
+  align-self: stretch;
   width: 100%;
+  height: 100%;
   min-height: 0;
   border: 0;
   background: var(--sbp-subtle);
+}
+
+/* As a footer under real sections it is a prompt, not an empty state: no vertical
+   centring, a rule to separate it, and muted enough not to compete with the content. */
+.detail-rail-empty.is-footer {
+  flex: 0 0 auto;
+  justify-content: flex-start;
+  border-top: 1px solid var(--sbp-border);
+  padding-top: 1rem;
+}
+
+.detail-rail-empty.is-footer i {
+  font-size: 1.1rem;
+  opacity: 0.5;
+}
+
+.generation-menu-note {
+  margin: 0 0 0.25rem;
+  max-width: 15rem;
+  font-size: var(--sbp-fs-meta);
+  line-height: 1.4;
+  color: var(--sbp-muted);
+}
+
+/* The rail is a column of its own; the reader-empty block must not stretch to fill it. */
+.reader-body > .reader-empty {
+  align-self: start;
+}
+
+@media (max-width: 900px) {
+  .reader-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .reader-body .detail-resizer,
+  .reader-body .detail-rail {
+    display: none;
+  }
 }
 
 .reader-empty,

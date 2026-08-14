@@ -142,32 +142,34 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .circular-result-item:hover {
-  background: color-mix(in srgb, var(--sbp-green) 5%, var(--sbp-surface));
+  background: var(--sbp-subtle);
 }
 
 /* Pinned section: drop the heavy gold wash for a quiet surface with a thin
    gold accent. The star + accent bar carry the "pinned" signal. */
 .pinned-results-section {
-  background: var(--sbp-surface);
+  background: var(--sbp-bg);
   border-bottom: 1px solid var(--sbp-border);
   box-shadow: none;
 }
 
 .pinned-results-heading {
-  background: color-mix(in srgb, var(--sbp-surface) 94%, var(--sbp-gold) 6%);
+  background: color-mix(in srgb, var(--sbp-bg) 94%, var(--sbp-gold) 6%);
 }
 
+/* The rows are rounded now, so an inset left bar would render as a curved
+   sliver. The gold tint plus the filled bookmark icon carry "pinned". */
 .pinned-result-item {
-  background: transparent;
-  box-shadow: inset 3px 0 color-mix(in srgb, var(--sbp-gold) 65%, transparent);
+  background: color-mix(in srgb, var(--sbp-gold) 12%, var(--sbp-bg));
+  box-shadow: none;
 }
 
 .pinned-result-item:hover {
-  background: color-mix(in srgb, var(--sbp-gold) 6%, var(--sbp-surface));
+  background: color-mix(in srgb, var(--sbp-gold) 20%, var(--sbp-bg));
 }
 
 .pinned-result-item.active {
-  background: color-mix(in srgb, var(--sbp-green) 8%, var(--sbp-surface));
+  background: color-mix(in srgb, var(--sbp-green) 11%, var(--sbp-surface));
 }
 
 /* Detail header action row was a rainbow of severities (purple/red/green/blue/

@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import StateBlock from '@/components/StateBlock.vue'
+import { useResizablePane } from '@/lib/useResizablePane'
 import {
   buildLawFileUrl,
   getLawDetail,
@@ -14,6 +15,9 @@ import {
 
 const route = useRoute()
 const router = useRouter()
+
+/** Same drag-to-resize rail as the Circulars results pane. */
+const libraryPane = useResizablePane('sbp:lawsRailWidth', 300, 220, 560)
 
 /** The whole corpus, held client-side: 133 documents is small enough to browse, not search. */
 const documents = ref<LawSummary[]>([])
@@ -404,7 +408,10 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="laws-view sbp-pane-view">
+  <div
+    class="laws-view sbp-pane-view is-resizable"
+    :style="{ '--sbp-rail-width': `${libraryPane.size.value}px` }"
+  >
     <aside class="laws-library sbp-rail">
       <header class="sbp-rail-head">
         <span class="sbp-rail-title">Laws &amp; Regulations</span>
@@ -563,6 +570,16 @@ onMounted(() => {
         </template>
       </div>
     </aside>
+
+    <div
+      class="pane-resizer"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize the library panel"
+      :class="{ resizing: libraryPane.resizing.value }"
+      @pointerdown="libraryPane.startDrag"
+      @dblclick="libraryPane.resetToDefault"
+    />
 
     <section class="laws-reader">
       <StateBlock

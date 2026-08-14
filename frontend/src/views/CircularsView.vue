@@ -522,26 +522,22 @@ onBeforeUnmount(() => searchController?.abort())
 
     <section class="search-controls-bar" aria-label="Search controls">
       <form class="search-controls-form" @submit.prevent="loadCirculars(true)">
-        <span class="search-input-wrap">
-          <i class="pi pi-search search-icon" />
-          <InputText
+        <span class="sbp-search-field search-input-wrap">
+          <i class="pi pi-search" />
+          <input
             v-model="query"
-            size="small"
+            type="search"
             placeholder="Reference, title, policy..."
-            class="search-main-input"
-          />
-          <Button
+            aria-label="Search circulars"
+          >
+          <button
             v-if="query"
-            icon="pi pi-times"
-            text
-            rounded
-            size="small"
+            type="button"
+            class="sbp-search-clear"
             aria-label="Clear search"
             title="Clear search"
-            type="button"
-            class="search-clear-btn"
             @click="query = ''; loadCirculars(true)"
-          />
+          ><i class="pi pi-times" /></button>
         </span>
 
         <Select
@@ -642,7 +638,7 @@ onBeforeUnmount(() => searchController?.abort())
       :class="{ 'has-detail': selectedCircularId }"
       :style="{ '--results-pane-width': `${resultsPane.size.value}px` }"
     >
-      <main class="circular-results-pane glass-panel">
+      <main class="circular-results-pane">
         <Message v-if="errorMessage" severity="error" :closable="false">{{ errorMessage }}</Message>
         <div ref="resultsListRef" class="circular-result-list" :class="{ loading }">
           <section v-if="pinnedCirculars.length" class="pinned-results-section" aria-label="Pinned circulars">

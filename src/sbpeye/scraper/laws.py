@@ -25,7 +25,7 @@ from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
 
 from ..database import PROJECT_ROOT
-from ..laws_links import link_document_to_circular
+from ..laws_links import law_label, link_document_to_circular
 from ..link_routing import DOCUMENT_EXTENSIONS, find_circular_by_url, is_allowed_sbp_url
 from ..models import RegDocument, RegDocumentVersion
 from .circulars import (
@@ -1014,17 +1014,28 @@ def sync_subpage(
 
 
 def law_document(document: RegDocument, version: RegDocumentVersion) -> dict:
-    """The text document fed to the chunker for one law/regulation version."""
-    label = document.title or ""
-    if document.part_label and document.parent is not None:
-        label = f"{document.parent.title} - {document.part_label}: {label}"
-    return {
+    """The document fed to the chunker and to checklist/entity segmentation.
+
+    `local_path` is set only for PDFs, and it changes which parser runs downstream:
+    `checklist._convert_document` prefers the file and puts Docling over the original —
+    layout, tables, list nesting, real page numbers — where the text fallback re-serialises
+    extracted text as Markdown and every citation loses its page. Laws are almost entirely
+    table-heavy PDFs, so this is the difference between a citable checklist and a vague one.
+    Nothing else reads the key: the chunker takes `text`.
+    """
+    payload = {
         "doc_id": version.id,
         "doc_type": "law",
-        "doc_label": label,
+        "doc_label": law_label(document),
         "text": version.content_text or "",
         "file_type": version.file_type or "",
     }
+    if version.local_path and (version.file_type or "").lower() == "pdf":
+        path = Path(version.local_path)
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        payload["local_path"] = str(path)
+    return payload
 
 
 def law_chunk_metadata(

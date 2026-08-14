@@ -1945,6 +1945,170 @@ def _show_laws_status():
         db.close()
 
 
+# --------------------------------------------------------------- laws AI enrichment
+
+
+def _law_feature_done_at(document, feature: str):
+    """When `feature` was last generated for this document, or None.
+
+    Reads through the same rule the API does: a container's summary and tags are its
+    rollup on the document row, everything else belongs to the edition in force. A new
+    capture therefore reads as ungenerated, which is exactly what should trigger a rerun.
+    """
+    from sbpeye.laws_ai import is_container
+
+    if feature in ("summary", "tags") and is_container(document):
+        return getattr(document, f"{feature}_generated_at", None)
+    version = document.current_version
+    if version is None:
+        return None
+    return getattr(version, f"{feature}_generated_at", None)
+
+
+def _run_laws_feature(
+    feature: str, doc_type, document_id, limit, force, delay, verbose
+) -> None:
+    """Batch one analysis feature over the laws corpus.
+
+    Deliberately sequential and resumable: each document is committed on its own, so an
+    interrupted run keeps everything it finished, and a rerun without `--force` picks up
+    where it stopped. Docling parses are cached on content hash, so the expensive half of
+    a repeat run costs nothing.
+    """
+    import time as _time
+
+    from sbpeye.laws_ai import (
+        CONTAINER_FEATURES,
+        _compute_container_outputs,
+        _compute_outputs,
+        _persist_outputs,
+        gap_message,
+        is_container,
+        law_corpus,
+        rollup_sources,
+    )
+    from sbpeye.models import RegDocument
+
+    db = SessionLocal()
+    try:
+        query = db.query(RegDocument)
+        if document_id:
+            query = query.filter(RegDocument.id == document_id)
+        if doc_type:
+            query = query.filter(RegDocument.doc_type == doc_type)
+        documents = query.order_by(RegDocument.title).all()
+        # Containers last, so a rollup sees the part summaries this same run produced.
+        # In title order the Draft White Label ATM Guidelines sort before their only
+        # chapter, and the collection was skipped as "no part summaries yet" on a run
+        # that went on to summarise the very part it needed.
+        documents.sort(key=lambda document: (bool(document.children), document.title or ""))
+
+        client = get_ai_client(db)
+        processed = skipped = failed = 0
+        reasons: dict[str, int] = {}
+
+        def note(reason: str) -> None:
+            reasons[reason] = reasons.get(reason, 0) + 1
+
+        for document in documents:
+            if limit and processed >= limit:
+                break
+            label = document.title[:60]
+
+            if not force and _law_feature_done_at(document, feature) is not None:
+                skipped += 1
+                note("already generated")
+                continue
+
+            container = is_container(document)
+            if container and feature not in CONTAINER_FEATURES:
+                skipped += 1
+                note("collection has no text of its own")
+                continue
+            if container and feature == "summary" and not rollup_sources(document):
+                skipped += 1
+                note("no part summaries to roll up yet")
+                continue
+            if not container:
+                corpus, gaps = law_corpus(document)
+                if not corpus:
+                    skipped += 1
+                    note(gap_message(gaps))
+                    continue
+
+            try:
+                if container:
+                    outputs = _compute_container_outputs(client, db, document, feature)
+                else:
+                    outputs = _compute_outputs(
+                        client, db, document, document.current_version,
+                        corpus, gaps, feature,
+                    )
+                _persist_outputs(db, document, document.current_version, outputs)
+                db.commit()
+                processed += 1
+                if verbose:
+                    print(f"  [OK] {label}")
+            except Exception as exc:
+                db.rollback()
+                failed += 1
+                print(f"  [FAIL] {label}: {exc}")
+
+            if delay > 0:
+                _time.sleep(delay)
+
+        print(f"\n{feature}: {processed} generated, {skipped} skipped, {failed} failed")
+        for reason, count in sorted(reasons.items(), key=lambda row: -row[1]):
+            print(f"  {count:>4} skipped — {reason}")
+    finally:
+        db.close()
+
+
+def _laws_feature_command(name: str, feature: str, help_text: str):
+    """Register one `sbpeye laws <name>` batch command running `feature`.
+
+    The five features take identical options and differ only in which one they run, so
+    the command surface is generated rather than copied five times. Name and feature are
+    separate arguments because they are not always the same word — the command is
+    `summarize` to match `sbpeye circulars summarize`, while the feature is `summary`.
+    """
+
+    # `help=` rather than a docstring: Click reads the docstring at decoration time, so
+    # assigning `__doc__` afterwards leaves every generated command unhelped.
+    @laws.command(name, help=help_text)
+    @click.option("--id", "document_id", help="Process a single document by id")
+    @click.option("--doc-type", help="Only process this doc_type (law/regulation/guideline)")
+    @click.option("--limit", "-l", type=int, default=0, help="Max documents to process (0=unlimited)")
+    @click.option("--force", is_flag=True, help="Regenerate documents that already have output")
+    @click.option("--delay", type=float, default=1.0, help="Delay between documents in seconds")
+    @click.option("--verbose", "-v", is_flag=True, help="Print each document processed")
+    def command(document_id, doc_type, limit, force, delay, verbose):
+        _run_laws_feature(feature, doc_type, document_id, limit, force, delay, verbose)
+
+    return command
+
+
+laws_summarize = _laws_feature_command(
+    "summarize", "summary",
+    "Generate AI summaries for laws & regulations (collections roll up their parts).",
+)
+laws_tags = _laws_feature_command(
+    "tags", "tags", "Assign taxonomy tags to laws & regulations."
+)
+laws_checklist = _laws_feature_command(
+    "checklist", "checklist",
+    "Extract cited compliance checklists from laws & regulations.",
+)
+laws_entities = _laws_feature_command(
+    "entities", "entities",
+    "Extract structured regulatory values from laws & regulations.",
+)
+laws_relationships = _laws_feature_command(
+    "relationships", "relationships",
+    "Type law-to-law edges and the circulars that act on each law.",
+)
+
+
 from sbpeye.cli.inventory_cmd import inventory  # noqa: E402  (command registration)
 
 cli.add_command(inventory)

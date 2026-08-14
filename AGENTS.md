@@ -117,6 +117,15 @@ sbpeye laws backlink [--rescan]         # Link circulars to the regulations they
 sbpeye laws reindex [--force]           # Rebuild the laws FTS5 + ChromaDB indexes
 sbpeye laws status                      # Counts by type, versions, pending extractions
 
+# AI analysis of laws & regulations (docs/LAWS_AI_PLAN.md). Same options as the circular
+# commands: --id/--doc-type/--limit/--force/--delay/-v. Results are stored against the
+# *version* in force, so a new edition reads as un-analysed rather than showing stale text.
+sbpeye laws summarize                   # Summaries; collections roll up their parts
+sbpeye laws tags                        # Taxonomy tags (drawn from the summary)
+sbpeye laws checklist                   # Cited obligations, page-anchored via Docling
+sbpeye laws entities                    # Structured regulatory values (CAR, MCR, limits)
+sbpeye laws relationships               # Type law↔law edges and the circulars acting on each law
+
 # Other commands
 sbpeye stats                        # Show DB statistics
 sbpeye dry-run --dept bprd --year 2025  # Preview what would be scraped
@@ -141,7 +150,9 @@ sbpeye dry-run --dept bprd --year 2025  # Preview what would be scraped
 | GET | `/api/circulars/search` | Hybrid search. Query: `q`, `tag`, `department`, `start_year`, `end_year`, `sort_by`, `source` (circulars/laws/all, default circulars), `doc_type` |
 | GET | `/api/laws` | List or search laws & regulations. Query: `q`, `doc_type`, `parent_id`, `top_level`, `include_delisted` |
 | GET | `/api/laws/types` | Document-type facets with counts |
-| GET | `/api/laws/{id}` | Detail: current version, version timeline, parts, linked circulars |
+| GET | `/api/laws/{id}` | Detail: current version, version timeline, parts, linked circulars, AI analysis (`generation`, `entities`, `relationships`) |
+| POST | `/api/laws/{id}/generate` | Queue AI analysis for a law. Body `{feature}`; 422 names the reason and whether it is structural |
+| GET | `/api/laws/{id}/checklist.xlsx` | Export the in-force edition's obligations checklist as a workbook |
 | GET | `/api/laws/{id}/versions/{vid}` | Version detail incl. extracted text and archive reference |
 | GET | `/api/laws/{id}/file` | Serve a version's archived file from disk |
 | GET | `/api/circulars/departments` | List departments with circular counts |

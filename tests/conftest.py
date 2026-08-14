@@ -137,6 +137,21 @@ def isolated_vector_store(monkeypatch):
     return fake
 
 
+@pytest.fixture(autouse=True)
+def isolated_parse_cache(monkeypatch, tmp_path):
+    """Point `checklist.segment_document`'s Docling cache at a per-test directory.
+
+    Autouse for the same reason as `isolated_vector_store`, and with a sharper failure
+    mode: the cache is keyed on the input bytes, not on the code that parsed them, so a
+    suite sharing the developer's real `cache/parses/` would serve segmentation results
+    produced by an *older build* of `reference_units_from_docling` and pass while the
+    change under test never ran.
+    """
+    import sbpeye.checklist as checklist_module
+
+    monkeypatch.setattr(checklist_module, "PARSE_CACHE_DIR", tmp_path / "parses")
+
+
 class FakeAIConfig:
     max_context_tokens = 4000
 

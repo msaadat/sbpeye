@@ -294,7 +294,10 @@ export type EntityType =
 
 export interface CircularEntity {
   id: number
-  circular_id: string
+  /** Which corpus stated the value. Absent on payloads from before laws were analysed. */
+  subject_kind?: 'circular' | 'law'
+  circular_id: string | null
+  document_id?: string | null
   entity_type: EntityType
   metric: string | null
   comparator: 'min' | 'max' | 'exactly' | 'range' | null
@@ -315,6 +318,17 @@ export interface CircularEntity {
     date: string | null
     status: string
   }
+  /** Present instead of `circular` when the value was stated by a law or regulation. */
+  document?: {
+    id: string
+    title: string
+    display_title: string
+    doc_type: string | null
+    part_label: string | null
+    parent_title: string | null
+    /** Whether the edition this value was read from is still the one in force. */
+    in_force: boolean
+  }
 }
 
 export interface EntityQueryParams {
@@ -327,6 +341,7 @@ export interface EntityQueryParams {
   min_value?: number
   max_value?: number
   current_only?: boolean
+  source?: 'circulars' | 'laws' | 'all'
   page?: number
   per_page?: number
 }

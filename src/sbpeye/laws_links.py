@@ -18,6 +18,7 @@ the circular scraper can depend on it without an import cycle.
 """
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -52,6 +53,20 @@ def _canon(text: str | None) -> str:
     "Credit Bureau Rules, 2016" and "Credit Bureau Rules 2016" are the same name.
     """
     return " ".join(re.findall(r"[a-z0-9]+", (text or "").lower()))
+
+
+def law_label(document: RegDocument) -> str:
+    """How a law/regulation names itself to a reader, an index, or a model.
+
+    A part never appears without its container: "EXPORTS" is Chapter 12 of the Foreign
+    Exchange Manual or it is nothing. Lives here rather than beside any one caller because
+    the chunk text, the inventory ledger and the analysis prompts must agree on what a
+    document is called — three places that had grown three copies of these three lines.
+    """
+    label = document.title or document.id
+    if document.part_label and document.parent is not None:
+        return f"{document.parent.title} - {document.part_label}: {label}"
+    return label
 
 
 def normalize_link(url: str | None) -> str:
@@ -219,6 +234,106 @@ def _resolve_parts(canonical: str, name: str, parts: dict[str, str]) -> set[str]
             if child_id:
                 resolved.add(child_id)
     return resolved
+
+
+# ------------------------------------------------------------- law → law candidates
+
+
+# Enough of the sentence for a model to tell "made under the SBP Act" from "a bank as
+# defined in the Banking Companies Ordinance", which is the whole classification problem.
+MENTION_WINDOW = 260
+MAX_MENTION_SNIPPETS = 3
+
+# `[[SBPEYE_PAGE:3]]` is our own bookkeeping, injected during PDF extraction — 62 of the
+# 213 snippets the live corpus produces contained one, and in a prompt they read as part
+# of the instrument's wording. Not anchored to a line like `checklist.PAGE_MARKER_RE`,
+# because extraction is not the only thing that concatenates these.
+_PAGE_MARKER_RE = re.compile(r"\[\[SBPEYE_PAGE:\d+\]\]")
+
+
+def mention_snippets(
+    text: str | None,
+    name: str,
+    limit: int = MAX_MENTION_SNIPPETS,
+    window: int = MENTION_WINDOW,
+) -> list[str]:
+    """Readable excerpts of `text` around each mention of `name`.
+
+    Matching runs against the original text, not the canonical form `match_by_name` uses:
+    the canonical form has had punctuation and case stripped, so its offsets cannot be
+    mapped back, and the evidence a classifier needs is the sentence as written.
+    """
+    if not text or not name:
+        return []
+    # Strip markers from the whole text *before* slicing, not from each excerpt after.
+    # A window is cut at a character offset and will eventually land inside a marker;
+    # cleaning the excerpt leaves fragments like "PEYE_PAGE:12]]" that no pattern short of
+    # guessing can remove. Cleaning first makes that case impossible rather than handled.
+    text = _PAGE_MARKER_RE.sub(" ", text)
+    pattern = re.compile(r"\W+".join(re.escape(word) for word in name.split()), re.I)
+    snippets: list[str] = []
+    for match in pattern.finditer(text):
+        excerpt = text[max(0, match.start() - window):match.end() + window]
+        snippets.append(re.sub(r"\s+", " ", excerpt).strip())
+        if len(snippets) >= limit:
+            break
+    return snippets
+
+
+@dataclass(frozen=True)
+class LawReference:
+    """One law naming another, with the wording that says so."""
+
+    target_id: str
+    target_title: str
+    snippets: list[str]
+
+
+def find_law_references(db: Session, document: RegDocument) -> list[LawReference]:
+    """Other laws named in this law's in-force text, with evidence for each.
+
+    Deterministic: the same name index the circular backlink pass uses. What the mention
+    *means* is a separate judgement, reserved for the AI pass — asserting that one Act is
+    made under another because its name appears would be a claim the text may not support.
+
+    A document's own parts, its container, and itself are excluded: those relationships
+    are already modelled by `parent_id` and would be noise here.
+    """
+    version = document.current_version
+    text = version.content_text if version is not None else None
+    if not text or not text.strip():
+        return []
+
+    name_index = build_name_index(db)
+    part_index = build_part_index(db)
+    matched = match_by_name(text, name_index, part_index)
+
+    excluded = {document.id, document.parent_id} | {
+        child.id for child in document.children
+    }
+    names_by_document: dict[str, list[str]] = {}
+    for name, document_id in name_index:
+        names_by_document.setdefault(document_id, []).append(name)
+
+    references: list[LawReference] = []
+    for target_id in sorted(matched - {value for value in excluded if value}):
+        target = db.query(RegDocument).filter(RegDocument.id == target_id).first()
+        if target is None:
+            continue
+        # A part resolves through its container's name, so look the snippet up under
+        # whichever row actually carries a matchable name.
+        lookup_id = target.parent_id if target.parent_id in names_by_document else target_id
+        snippets: list[str] = []
+        for name in names_by_document.get(lookup_id, []):
+            snippets.extend(mention_snippets(text, name))
+            if len(snippets) >= MAX_MENTION_SNIPPETS:
+                break
+        references.append(LawReference(
+            target_id=target_id,
+            target_title=law_label(target),
+            snippets=snippets[:MAX_MENTION_SNIPPETS],
+        ))
+    return references
 
 
 # ------------------------------------------------------------------------ link writing

@@ -1177,15 +1177,39 @@ class AIClient:
             limit = self.config.max_context_tokens
         return content_text[:limit] if len(content_text) > limit else content_text
 
-    def summarize(self, title: str, content_text: str) -> str:
-        system = "You are a concise financial regulations analyst. Summarize the following SBP circular in 3-5 sentences, focusing on the key regulatory changes, requirements, and impact on banks/DFIs/MFBs. Be factual and specific."
+    def summarize(self, title: str, content_text: str, *, subject: str = "circular") -> str:
+        system = f"You are a concise financial regulations analyst. Summarize the following SBP {subject} in 3-5 sentences, focusing on the key regulatory changes, requirements, and impact on banks/DFIs/MFBs. Be factual and specific."
         truncated = self._truncate_context(content_text)
         user = f"Title: {title}\n\nContent:\n{truncated}"
         result = self._complete(system, user, temperature=0.2)
         return result.strip()
 
-    def generate_tags(self, title: str, content_text: str) -> list[str]:
-        system = f"You are a financial regulations classifier. Select the most relevant tags from the following taxonomy that apply to the given SBP circular.\n\nTaxonomy: {json.dumps(TAG_TAXONOMY)}\n\nReturn ONLY a JSON object with a 'tags' key containing a list of 1-5 selected tag strings from the taxonomy."
+    def reduce_summaries(
+        self, title: str, summaries: list[str], *, subject: str = "document"
+    ) -> str:
+        """Fold per-section summaries of one long document into a single summary.
+
+        The map half of summarising something too long to read in one call. A law runs to
+        382k characters, where a circular is a two-page letter — sending the head of it and
+        calling the result a summary would describe the title page.
+        """
+        system = (
+            f"You are a concise financial regulations analyst. You are given ordered "
+            f"section summaries of a single SBP {subject}. Write one 3-5 sentence summary "
+            "of the whole document, focusing on the obligations it imposes and who they "
+            "apply to. Do not mention sections, summaries, or that the document was split. "
+            "Be factual and specific."
+        )
+        sections = "\n\n".join(
+            f"[Section {index}]\n{summary}" for index, summary in enumerate(summaries, 1)
+        )
+        user = f"Title: {title}\n\nSection summaries:\n{sections}"
+        return self._complete(system, user, temperature=0.2).strip()
+
+    def generate_tags(
+        self, title: str, content_text: str, *, subject: str = "circular"
+    ) -> list[str]:
+        system = f"You are a financial regulations classifier. Select the most relevant tags from the following taxonomy that apply to the given SBP {subject}.\n\nTaxonomy: {json.dumps(TAG_TAXONOMY)}\n\nReturn ONLY a JSON object with a 'tags' key containing a list of 1-5 selected tag strings from the taxonomy."
         truncated = self._truncate_context(content_text)
         user = f"Title: {title}\n\nContent:\n{truncated}"
         result = self._complete(
@@ -1387,10 +1411,24 @@ class AIClient:
         "actionable requirement, return {\"items\":[]}."
     )
 
+    @staticmethod
+    def _subject_label(circular, label: str | None) -> str:
+        """Name the instrument under analysis, however the caller identified it.
+
+        An explicit `label` wins, so a caller holding a law rather than a circular does not
+        have to fake one. Neither is a programming error worth raising over — the label is
+        prompt context, and an empty one degrades the extraction rather than breaking it.
+        """
+        if label:
+            return label
+        if circular is None:
+            return ""
+        return circular.reference or circular.title
+
     def _extract_checklist_batch(
         self,
         *,
-        circular_label: str,
+        label: str,
         blocks: list,
         trace_callback=None,
     ) -> list[dict[str, Any]]:
@@ -1410,7 +1448,11 @@ class AIClient:
             for block in blocks
         )
         system = self._CHECKLIST_SYSTEM_PROMPT
-        user = f"""Circular: {circular_label}
+        # "Subject" rather than "Circular": the same extractor now runs over laws and
+        # regulations, and telling the model a 200-page Act is a circular is a claim about
+        # the document it is reading. `Document` below stays the file within the subject —
+        # the circular's body, an attachment PDF, or a law's archived edition.
+        user = f"""Subject: {label}
 Document: {doc_label}
 Sections: {len(blocks)} ({page_span})
 
@@ -1593,7 +1635,7 @@ SOURCE BLOCKS:
     def _run_checklist_batch(
         self,
         *,
-        circular_label: str,
+        label: str,
         batch: list,
         units_by_id: dict[str, Any],
         gaps: list[dict[str, Any]],
@@ -1607,7 +1649,7 @@ SOURCE BLOCKS:
         """
         try:
             extracted = self._extract_checklist_batch(
-                circular_label=circular_label,
+                label=label,
                 blocks=batch,
                 trace_callback=trace_callback,
             )
@@ -1629,7 +1671,7 @@ SOURCE BLOCKS:
         for block in batch:
             try:
                 extracted = self._extract_checklist_batch(
-                    circular_label=circular_label,
+                    label=label,
                     blocks=[block],
                     trace_callback=trace_callback,
                 )
@@ -1645,14 +1687,21 @@ SOURCE BLOCKS:
 
     def generate_checklist(
         self,
-        circular,
+        circular=None,
         *,
+        label: str | None = None,
         delay: float = 0.0,
         progress_callback=None,
         trace_callback=None,
         documents: list[dict[str, Any]] | None = None,
         gaps: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        """Extract a cited obligations checklist from a circular, or from any prepared corpus.
+
+        Two ways in. Pass a `circular` and the corpus is built from it. Pass `documents`
+        and `label` and the subject can be anything the segmenter can read — which is how
+        the laws arm reaches this without a `Circular` to hand (see `laws_ai.law_corpus`).
+        """
         from .checklist import (
             build_analysis_blocks,
             build_checklist_corpus,
@@ -1660,6 +1709,7 @@ SOURCE BLOCKS:
             segment_document,
         )
 
+        label = self._subject_label(circular, label)
         if documents is None:
             documents, discovered_gaps = build_checklist_corpus(circular)
             gaps = discovered_gaps if gaps is None else list(gaps)
@@ -1716,14 +1766,13 @@ SOURCE BLOCKS:
         checklist_items: list[dict[str, Any]] = []
         all_units = [unit for _, units in document_units for unit in units]
         units_by_id = {unit.unit_id: unit for unit in all_units}
-        circular_label = circular.reference or circular.title
         if progress_callback:
             progress_callback(0, total_batches)
 
         for _, batches in document_batches:
             for batch in batches:
                 materialized = self._run_checklist_batch(
-                    circular_label=circular_label,
+                    label=label,
                     batch=batch,
                     units_by_id=units_by_id,
                     gaps=gaps,
@@ -1827,7 +1876,7 @@ SOURCE BLOCKS:
 
     @staticmethod
     def _entity_system_prompt() -> str:
-        return """You are a meticulous SBP regulatory data analyst. From exactly one SOURCE BLOCK, extract every specific regulatory VALUE that a bank/DFI/MFB must comply with. Capture:
+        return """You are a meticulous SBP regulatory data analyst. From the SOURCE BLOCKS supplied, extract every specific regulatory VALUE that a bank/DFI/MFB must comply with. Capture:
 - ratios named in the text (e.g. CAR/Capital Adequacy Ratio, LCR, NSFR, Leverage Ratio, CCB);
 - monetary thresholds (minimum paid-up capital, MCR, exposure/finance limits) in PKR or USD;
 - percentage limits (caps, floors, weights, rates);
@@ -1848,7 +1897,7 @@ For each value output:
 - source_unit_ids: one or more SOURCE_ID values cited exactly as supplied.
 - confidence: 0.0-1.0.
 
-Emit one entry per distinct (metric, subject, value) tuple — phased schedules produce multiple entries. Do NOT extract values from definitions, examples, or narrative that impose no requirement. If the block contains no regulatory value, return {"entities": []}. Return only the JSON object."""
+Emit one entry per distinct (metric, subject, value) tuple — phased schedules produce multiple entries. Do NOT extract values from definitions, examples, or narrative that impose no requirement. If the blocks contain no regulatory value, return {"entities": []}. Return only the JSON object."""
 
     def _parse_entities(self, result: str, valid_source_ids: set[str]) -> list[dict[str, Any]]:
         parsed = self._parse_json_object(result)
@@ -1929,19 +1978,36 @@ Emit one entry per distinct (metric, subject, value) tuple — phased schedules 
         except ValueError:
             return None
 
-    def _extract_entities_block(self, *, circular_label: str, block) -> list[dict[str, Any]]:
+    def _extract_entities_batch(
+        self, *, label: str, blocks: list
+    ) -> list[dict[str, Any]]:
         system = self._entity_system_prompt()
-        user = f"""Circular: {circular_label}
-Document: {block.doc_label}
-Block reference: {block.ref}
-Pages: {block.page_start or 'HTML'}-{block.page_end or block.page_start or 'HTML'}
+        doc_label = blocks[0].doc_label
+        pages = [
+            page
+            for block in blocks
+            for page in (block.page_start, block.page_end)
+            if page is not None
+        ]
+        page_span = f"pages {min(pages)}-{max(pages)}" if pages else "HTML"
+        sections = "\n\n".join(
+            f"--- Section: {block.ref} (pages "
+            f"{block.page_start or 'HTML'}-{block.page_end or block.page_start or 'HTML'}) ---\n"
+            f"{block.source_text}"
+            for block in blocks
+        )
+        user = f"""Subject: {label}
+Document: {doc_label}
+Sections: {len(blocks)} ({page_span})
 
-SOURCE BLOCK:
-{block.source_text}"""
+SOURCE BLOCKS:
+{sections}"""
         result = self._complete(
             system, user, temperature=0.0, json_schema=self._entity_extraction_schema()
         )
-        valid_source_ids = set(block.source_unit_ids)
+        valid_source_ids = {
+            source_id for block in blocks for source_id in block.source_unit_ids
+        }
         try:
             return self._parse_entities(result, valid_source_ids)
         except ValueError:
@@ -1954,22 +2020,64 @@ SOURCE BLOCK:
             )
             return self._parse_entities(retry_result, valid_source_ids)
 
+    def _run_entities_batch(self, *, label: str, batch: list) -> list[dict[str, Any]]:
+        """Extract one batch, degrading to per-block calls when the batch fails.
+
+        The same recovery the checklist arm uses, and it matters more here: before
+        batching, a malformed response cost one block's values, and now it would cost
+        every block packed alongside it.
+        """
+        try:
+            return self._extract_entities_batch(
+                label=label, blocks=batch
+            )
+        except Exception as exc:
+            if is_rate_limit_error(exc):
+                raise
+            if not isinstance(exc, ValueError) and not _is_context_size_error(exc):
+                raise
+            if len(batch) == 1:
+                return []
+
+        extracted: list[dict[str, Any]] = []
+        for block in batch:
+            try:
+                extracted.extend(
+                    self._extract_entities_batch(
+                        label=label, blocks=[block]
+                    )
+                )
+            except Exception as block_exc:
+                if is_rate_limit_error(block_exc):
+                    raise
+                if not isinstance(block_exc, ValueError) and not _is_context_size_error(block_exc):
+                    raise
+        return extracted
+
     def extract_entities(
         self,
-        circular,
+        circular=None,
         *,
+        label: str | None = None,
         delay: float = 0.0,
         progress_callback=None,
         documents: list[dict[str, Any]] | None = None,
         gaps: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        """Extract structured regulatory values from a circular and its PDF attachments.
+        """Extract structured regulatory values from a circular, or from any prepared corpus.
 
-        Returns one dict per value, with keys matching the CircularEntity columns
-        (entity_type, metric, comparator, value_numeric, value_high, unit, value_text,
-        subject, effective_date, context_snippet, source_unit_id, page_start, confidence)."""
-        from .checklist import build_analysis_blocks, build_checklist_corpus, segment_document
+        Takes the same two ways in as `generate_checklist`. Returns one dict per value,
+        with keys matching the CircularEntity columns (entity_type, metric, comparator,
+        value_numeric, value_high, unit, value_text, subject, effective_date,
+        context_snippet, source_unit_id, page_start, confidence)."""
+        from .checklist import (
+            build_analysis_blocks,
+            build_checklist_corpus,
+            build_extraction_batches,
+            segment_document,
+        )
 
+        label = self._subject_label(circular, label)
         if documents is None:
             documents, _ = build_checklist_corpus(circular)
         document_units: list[tuple[dict[str, Any], list]] = []
@@ -1980,9 +2088,6 @@ SOURCE BLOCK:
                 units = []
             document_units.append((document, units))
 
-        document_blocks = [
-            (units, build_analysis_blocks(units)) for _, units in document_units
-        ]
         units_by_id = {
             unit.unit_id: unit for _, units in document_units for unit in units
         }
@@ -1991,43 +2096,180 @@ SOURCE BLOCK:
         suffix_to_id: dict[str, str] = {}
         for uid in units_by_id:
             suffix_to_id.setdefault(uid.rsplit(":", 1)[-1], uid)
-        total_blocks = sum(len(blocks) for _, blocks in document_blocks)
+        # Pack blocks into the fewest calls that fit the context window, exactly as the
+        # checklist arm does. One call per block was affordable on a two-page circular
+        # and is not on a 200-page regulation, where the same document is 80-150 blocks.
+        budget = self.resolve_context_budget()
+        document_batches = [
+            (
+                units,
+                build_extraction_batches(
+                    build_analysis_blocks(units), budget, self._estimate_tokens
+                ),
+            )
+            for _, units in document_units
+        ]
+        total_batches = sum(len(batches) for _, batches in document_batches)
         completed = 0
-        circular_label = circular.reference or circular.title
         if progress_callback:
-            progress_callback(0, total_blocks)
+            progress_callback(0, total_batches)
 
         entities: list[dict[str, Any]] = []
-        for _, blocks in document_blocks:
-            for block in blocks:
-                try:
-                    extracted = self._extract_entities_block(
-                        circular_label=circular_label, block=block
-                    )
-                    for entry in extracted:
-                        resolved_ids = []
-                        for sid in entry["source_unit_ids"]:
-                            uid = sid if sid in units_by_id else suffix_to_id.get(sid)
-                            if uid:
-                                resolved_ids.append(uid)
-                        source_units = [units_by_id[uid] for uid in resolved_ids]
-                        pages = [
-                            unit.page_start
-                            for unit in source_units
-                            if unit.page_start is not None
-                        ]
-                        entry["source_unit_id"] = resolved_ids[0] if resolved_ids else None
-                        entry["page_start"] = min(pages) if pages else None
-                        del entry["source_unit_ids"]
-                        entities.append(entry)
-                except ValueError:
-                    pass
+        for _, batches in document_batches:
+            for batch in batches:
+                for entry in self._run_entities_batch(
+                    label=label, batch=batch
+                ):
+                    resolved_ids = []
+                    for sid in entry["source_unit_ids"]:
+                        uid = sid if sid in units_by_id else suffix_to_id.get(sid)
+                        if uid:
+                            resolved_ids.append(uid)
+                    source_units = [units_by_id[uid] for uid in resolved_ids]
+                    pages = [
+                        unit.page_start
+                        for unit in source_units
+                        if unit.page_start is not None
+                    ]
+                    entry["source_unit_id"] = resolved_ids[0] if resolved_ids else None
+                    entry["page_start"] = min(pages) if pages else None
+                    del entry["source_unit_ids"]
+                    entities.append(entry)
                 completed += 1
                 if progress_callback:
-                    progress_callback(completed, total_blocks)
-                if delay > 0 and completed < total_blocks:
+                    progress_callback(completed, total_batches)
+                if delay > 0 and completed < total_batches:
                     time.sleep(delay)
         return entities
+
+    # Fixed from the corpus, not guessed — see `RegDocumentRelationship`.
+    LAW_RELATION_TYPES = ("made_under", "amends", "repeals", "references")
+    # What a circular does to a regulation it names. `listing` and `annexure_of` are
+    # written by the deterministic passes and are not judgements a model should make.
+    CIRCULAR_LAW_ACTIONS = ("amends", "implements", "clarifies", "references")
+
+    @staticmethod
+    def _relation_schema(key: str, types: tuple[str, ...]) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                key: {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "type": {"type": "string", "enum": list(types)},
+                            "confidence": {"type": ["number", "null"]},
+                        },
+                        "required": ["id", "type", "confidence"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": [key],
+            "additionalProperties": False,
+        }
+
+    def _parse_relations(
+        self, result: str, key: str, valid_ids: set[str], types: tuple[str, ...]
+    ) -> dict[str, dict[str, Any]]:
+        parsed = self._parse_json_object(result)
+        rows = parsed.get(key)
+        if not isinstance(rows, list):
+            raise ValueError(f"The model returned an invalid {key} payload.")
+        classified: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            identifier = str(row.get("id") or "").strip()
+            relation = str(row.get("type") or "").strip()
+            # An id the model invented cannot be written as an edge, and a type outside
+            # the vocabulary is not a weaker claim — it is an unusable one.
+            if identifier not in valid_ids or relation not in types:
+                continue
+            classified[identifier] = {
+                "type": relation,
+                "confidence": self._coerce_number(row.get("confidence")),
+            }
+        return classified
+
+    def classify_law_references(
+        self, source_title: str, candidates: list[dict[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
+        """Decide what one law's mention of another actually asserts.
+
+        The candidates are already known to be named in the text; the only question is
+        meaning. Most mentions are definitional, so the prompt has to make `references`
+        the comfortable answer rather than a failure to find something stronger.
+        """
+        if not candidates:
+            return {}
+        system = (
+            "You are a financial regulations analyst. A source SBP instrument names other "
+            "instruments in its text. For each candidate, classify the relationship the "
+            "SOURCE has to that candidate, using the quoted excerpts as your only evidence.\n"
+            "- 'made_under': the source is subordinate legislation issued under the "
+            "candidate's authority (\"in exercise of the powers conferred by section X of "
+            "the candidate\", \"made under\", \"framed under\").\n"
+            "- 'amends': the source alters the candidate's text (substitutes, inserts or "
+            "omits words, or is an Amendment Act of it).\n"
+            "- 'repeals': the source repeals or withdraws the candidate.\n"
+            "- 'references': any other mention — a definition borrowed from it, a "
+            "cross-reference, a list of related laws. THIS IS THE MOST COMMON ANSWER; use "
+            "it whenever the excerpts do not clearly show one of the three above.\n"
+            "Return only {\"relations\":[{\"id\":..., \"type\":..., \"confidence\":0.0-1.0}]}, "
+            "one entry per candidate, copying each id exactly."
+        )
+        blocks = "\n\n".join(
+            f"[id: {candidate['id']}] {candidate['title']}\n"
+            + "\n".join(f"  \"…{snippet}…\"" for snippet in candidate["snippets"][:3])
+            for candidate in candidates
+        )
+        user = f"SOURCE: {source_title}\n\nCANDIDATES:\n{blocks}"
+        schema = self._relation_schema("relations", self.LAW_RELATION_TYPES)
+        result = self._complete(system, user, temperature=0.0, json_schema=schema)
+        valid_ids = {str(candidate["id"]) for candidate in candidates}
+        return self._parse_relations(
+            result, "relations", valid_ids, self.LAW_RELATION_TYPES
+        )
+
+    def classify_circular_law_actions(
+        self, law_title: str, circulars: list[dict[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
+        """Decide what each circular does to a regulation it names.
+
+        Phase 6b of the laws plan. The deterministic pass can prove a circular *names* a
+        regulation; only the wording says whether it amends it, implements it, explains
+        it, or merely mentions it in passing.
+        """
+        if not circulars:
+            return {}
+        system = (
+            "You are a financial regulations analyst. Each candidate is an SBP circular "
+            "that names the TARGET regulation. Using the quoted excerpts as your only "
+            "evidence, classify what the circular does to the target.\n"
+            "- 'amends': changes the target's text or the substance of its requirements.\n"
+            "- 'implements': gives effect to it — operating instructions, formats, "
+            "timelines, or reporting required by the target.\n"
+            "- 'clarifies': explains or interprets the target without changing it.\n"
+            "- 'references': mentions it in passing, as background or a cross-reference. "
+            "Use this whenever the excerpts do not clearly show one of the three above.\n"
+            "Return only {\"actions\":[{\"id\":..., \"type\":..., \"confidence\":0.0-1.0}]}, "
+            "one entry per candidate, copying each id exactly."
+        )
+        blocks = "\n\n".join(
+            f"[id: {circular['id']}] {circular['label']}\n"
+            + "\n".join(f"  \"…{snippet}…\"" for snippet in circular["snippets"][:2])
+            for circular in circulars
+        )
+        user = f"TARGET REGULATION: {law_title}\n\nCANDIDATE CIRCULARS:\n{blocks}"
+        schema = self._relation_schema("actions", self.CIRCULAR_LAW_ACTIONS)
+        result = self._complete(system, user, temperature=0.0, json_schema=schema)
+        valid_ids = {str(circular["id"]) for circular in circulars}
+        return self._parse_relations(
+            result, "actions", valid_ids, self.CIRCULAR_LAW_ACTIONS
+        )
 
     def extract_relationships(self, title: str, reference: str, content_text: str) -> dict:
         system = (
@@ -2575,9 +2817,22 @@ SOURCE BLOCK:
                 return json.dumps({"results": out, "count": len(out)})
 
             elif name == "query_regulatory_values":
-                from .models import Circular, CircularEntity
-                query = db.query(CircularEntity).join(
-                    Circular, CircularEntity.circular_id == Circular.id
+                from sqlalchemy import and_ as _and, func as _func, or_ as _or
+
+                from .laws_links import law_label
+                from .models import (
+                    Circular, CircularEntity, RegDocument, RegDocumentVersion,
+                )
+                # Outer joins: a law-sourced value has no circular, and an inner join
+                # would drop exactly the values most worth answering with.
+                query = (
+                    db.query(CircularEntity)
+                    .outerjoin(Circular, CircularEntity.circular_id == Circular.id)
+                    .outerjoin(RegDocument, CircularEntity.document_id == RegDocument.id)
+                    .outerjoin(
+                        RegDocumentVersion,
+                        CircularEntity.version_id == RegDocumentVersion.id,
+                    )
                 )
                 metric = str(arguments.get("metric", "")).strip()
                 subject = str(arguments.get("subject", "")).strip()
@@ -2607,11 +2862,22 @@ SOURCE BLOCK:
                 if arguments.get("max_value") is not None:
                     query = query.filter(CircularEntity.value_numeric <= float(arguments["max_value"]))
                 if arguments.get("current_only"):
-                    query = query.filter(~Circular.status.in_(("superseded", "cancelled")))
+                    query = query.filter(_or(
+                        _and(
+                            CircularEntity.subject_kind == "circular",
+                            ~Circular.status.in_(("superseded", "cancelled")),
+                        ),
+                        _and(
+                            CircularEntity.subject_kind == "law",
+                            RegDocumentVersion.is_current == 1,
+                        ),
+                    ))
                 limit = max(1, min(int(arguments.get("limit", 20)), 50))
                 rows = query.order_by(
                     CircularEntity.effective_date.desc().nullslast(),
-                    Circular.date.desc().nullslast(),
+                    _func.coalesce(
+                        Circular.date, RegDocumentVersion.first_seen_at
+                    ).desc().nullslast(),
                 ).limit(200).all()
                 if arguments.get("current_only"):
                     seen: set[tuple] = set()
@@ -2627,7 +2893,8 @@ SOURCE BLOCK:
                 out = []
                 for entity in rows:
                     c = entity.circular
-                    out.append({
+                    d = entity.document
+                    row = {
                         "metric": entity.metric,
                         "entity_type": entity.entity_type,
                         "comparator": entity.comparator,
@@ -2638,10 +2905,20 @@ SOURCE BLOCK:
                         "subject": entity.subject,
                         "effective_date": entity.effective_date.strftime("%Y-%m-%d") if entity.effective_date else None,
                         "context": entity.context_snippet,
+                        "source_kind": entity.subject_kind or "circular",
                         "circular_status": (c.status or "active") if c else None,
                         "circular_date": c.date.strftime("%Y-%m-%d") if c and c.date else None,
                         "citation": f"[[circular:{c.id}|{c.display_name}]]" if c else None,
-                    })
+                    }
+                    if d is not None:
+                        # The instrument that states the value, and whether the edition it
+                        # was read from is still the one in force.
+                        row["document"] = d.title
+                        row["in_force"] = bool(
+                            entity.version is not None and entity.version.is_current
+                        )
+                        row["citation"] = f"[[law:{d.id}|{law_label(d)}]]"
+                    out.append(row)
                 return json.dumps({"results": out, "count": len(out)})
 
             elif name == "search_regulatory_inventory":
@@ -2793,6 +3070,7 @@ but you also have tools to search the database if the user asks about circulars 
 
 IMPORTANT RULES:
 1. Cite a circular only with the exact [[circular:ID|label]] token supplied in context or tool results.
+1a. Cite a law or regulation only with the exact [[law:ID|label]] token returned by a tool.
 2. Cite an attachment only with the exact [[attachment:ID|label]] token supplied in context or tool results.
 Never expose IDs outside those tokens, alter a token, invent a token, or turn plain-text references into links.
 3. Be precise and highlight regulatory differences when comparing circulars.
@@ -2809,6 +3087,7 @@ Use your tools to search and retrieve relevant circulars from the database befor
 IMPORTANT RULES:
 1. Cite a circular only with an exact [[circular:ID|label]] token returned by a tool.
 2. Cite an attachment only with an exact [[attachment:ID|label]] token returned by a tool.
+2a. Cite a law or regulation only with an exact [[law:ID|label]] token returned by a tool.
 Never expose IDs outside those tokens, alter a token, invent a token, or turn plain-text references into links.
 3. If you need more details on a circular found in a search, use the get_circular_details tool with the circular reference or title."""
 

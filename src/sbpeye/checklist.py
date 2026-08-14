@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import html
+import json
+import os
 import re
 import threading
 from dataclasses import asdict, dataclass, replace
@@ -587,8 +589,100 @@ def reference_units_from_docling(
     return units
 
 
-def segment_document(document: dict[str, Any]) -> list[ReferenceUnit]:
-    return reference_units_from_docling(document, _convert_document(document))
+# --------------------------------------------------------------------- parse cache
+#
+# Docling with OCR is minutes of CPU on a large PDF, and every conversion in the process
+# queues behind `_CONVERSION_LOCK`. The same document is parsed once per feature — twice
+# for a single "generate all" run, which does checklist and entities back to back — and a
+# regeneration after a prompt change pays the whole bill again for a parse that cannot
+# have changed.
+#
+# The parse is a pure function of (segmentation code, doc_id, input bytes), so it is
+# cached on exactly that and never needs invalidating: a re-scraped file whose bytes
+# differ hashes differently and simply misses. `doc_id` is in the key because unit ids
+# are derived from it — the same bytes under a different id are a different parse.
+#
+# On disk rather than in SQLite: nothing ever queries these, they are only ever fetched
+# whole by exact key, and keeping them out of `sbpeye.db` means a stale cache is fixed
+# with `rm -rf cache/parses`. Entries are content-keyed, so the directory is bounded by
+# the corpus rather than by how often analysis is re-run — superseded editions leave an
+# orphan each, which is the cost of never having to reason about invalidation.
+PARSE_CACHE_DIR = Path(__file__).resolve().parents[2] / "cache" / "parses"
+# Bump when a change to `reference_units_from_docling` would produce different units for
+# the same bytes. Every cached entry then misses and is rebuilt on next use.
+PARSE_CACHE_VERSION = 1
+
+
+def _parse_cache_key(document: dict[str, Any]) -> str | None:
+    """Content-derived cache key, or None when the document should not be cached."""
+    local_path = document.get("local_path")
+    if local_path:
+        try:
+            payload = Path(local_path).read_bytes()
+        except OSError:
+            # Missing or unreadable file: let the real parse raise the honest error.
+            return None
+    else:
+        payload = str(document.get("text") or "").strip().encode("utf-8")
+        if not payload:
+            return None
+
+    digest = hashlib.sha256()
+    for part in (str(PARSE_CACHE_VERSION).encode(), str(document.get("doc_id") or "").encode()):
+        digest.update(part)
+        digest.update(b"\0")
+    digest.update(payload)
+    return digest.hexdigest()
+
+
+def _parse_cache_path(key: str) -> Path:
+    # Sharded: a flat directory holding one entry per circular, attachment and law
+    # version is tens of thousands of files.
+    return PARSE_CACHE_DIR / key[:2] / f"{key}.json"
+
+
+def _load_cached_units(key: str) -> list[ReferenceUnit] | None:
+    path = _parse_cache_path(key)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return [ReferenceUnit(**entry) for entry in raw]
+    except FileNotFoundError:
+        return None
+    except Exception:
+        # Truncated or written by an incompatible build: treat as a miss and let the
+        # rebuild overwrite it, rather than failing the analysis over a cache artifact.
+        return None
+
+
+def _store_cached_units(key: str, units: list[ReferenceUnit]) -> None:
+    path = _parse_cache_path(key)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Write-then-rename: a parse takes minutes and can be interrupted, and a
+        # half-written entry that later parses as valid JSON would be silent corruption.
+        temporary = path.with_suffix(f".{os.getpid()}.tmp")
+        temporary.write_text(
+            json.dumps([unit.payload() for unit in units]), encoding="utf-8"
+        )
+        temporary.replace(path)
+    except OSError:
+        # A cache that cannot be written is a slow pipeline, not a broken one.
+        pass
+
+
+def segment_document(
+    document: dict[str, Any], *, use_cache: bool = True
+) -> list[ReferenceUnit]:
+    key = _parse_cache_key(document) if use_cache else None
+    if key is not None:
+        cached = _load_cached_units(key)
+        if cached is not None:
+            return cached
+
+    units = reference_units_from_docling(document, _convert_document(document))
+    if key is not None:
+        _store_cached_units(key, units)
+    return units
 
 
 def build_checklist_corpus(circular) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -891,8 +985,6 @@ def compact_required_checklist(value: str | dict[str, Any] | None) -> list[dict[
         return []
     if isinstance(value, str):
         try:
-            import json
-
             value = json.loads(value)
         except (TypeError, ValueError):
             return []

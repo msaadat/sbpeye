@@ -122,7 +122,10 @@ def test_docling_parsing_preserves_heading_reference_and_source_text():
     assert all(unit.page_start is None for unit in units)
     assert units[0].heading_path == ["CAPITAL REQUIREMENTS"]
     assert units[0].source_text == "Banks shall maintain capital."
-    assert units[0].unit_id == segment_document(document)[0].unit_id
+    # Bypassing the cache on purpose: served from it this would assert nothing beyond
+    # "the same file was read twice", where the claim is that Docling segments the same
+    # bytes into the same unit ids.
+    assert units[0].unit_id == segment_document(document, use_cache=False)[0].unit_id
 
     chunks = prepare_reference_chunks(document)
     assert chunks[0]["ref"] == "Chunk 1"
@@ -527,6 +530,66 @@ def test_build_extraction_batches_isolates_oversized_block():
     ]
 
 
+# --- Docling parse cache ------------------------------------------------------------
+
+
+def _md_document(doc_id="attachment-1", text="# CAPITAL\n\n1. Banks shall hold capital."):
+    return {
+        "doc_id": doc_id,
+        "doc_type": "attachment",
+        "doc_label": "rules.pdf",
+        "file_type": "html",
+        "text": text,
+    }
+
+
+def test_second_parse_of_the_same_document_is_served_from_cache(monkeypatch):
+    document = _md_document()
+    first = segment_document(document)
+
+    monkeypatch.setattr(
+        "sbpeye.checklist._convert_document",
+        lambda *args, **kwargs: pytest.fail("Docling ran on a cache hit"),
+    )
+    cached = segment_document(document)
+
+    assert [unit.payload() for unit in cached] == [unit.payload() for unit in first]
+
+
+def test_parse_cache_misses_when_the_content_changes():
+    document = _md_document()
+    segment_document(document)
+
+    changed = _md_document(text="# LIQUIDITY\n\n1. Banks shall hold liquid assets.")
+    units = segment_document(changed)
+
+    assert units[0].source_text == "Banks shall hold liquid assets."
+
+
+def test_parse_cache_keys_on_doc_id_because_unit_ids_derive_from_it():
+    """Same bytes under a different doc_id is a different parse, not a cache hit."""
+    first = segment_document(_md_document(doc_id="attachment-1"))
+    second = segment_document(_md_document(doc_id="attachment-2"))
+
+    assert first[0].unit_id != second[0].unit_id
+    assert second[0].unit_id.startswith("attachment-2:")
+
+
+def test_a_corrupt_cache_entry_is_treated_as_a_miss(monkeypatch):
+    from sbpeye import checklist as checklist_module
+
+    document = _md_document()
+    expected = segment_document(document)
+
+    key = checklist_module._parse_cache_key(document)
+    checklist_module._parse_cache_path(key).write_text("{ truncated", encoding="utf-8")
+
+    # A cache artifact must never be the reason an analysis fails.
+    assert [unit.payload() for unit in segment_document(document)] == [
+        unit.payload() for unit in expected
+    ]
+
+
 class _FakeBadRequest(Exception):
     status_code = 400
 
@@ -743,7 +806,7 @@ def test_connection_test_reports_an_empty_response_as_failure():
 def test_run_checklist_batch_recovers_by_splitting_failed_batch(monkeypatch):
     client = AIClient(AIConfig())
 
-    def fake_extract(*, circular_label, blocks, trace_callback=None):
+    def fake_extract(*, label, blocks, trace_callback=None):
         if len(blocks) > 1:
             raise ValueError("batch too large for one call")
         unit_id = blocks[0].source_unit_ids[0]
@@ -761,7 +824,7 @@ def test_run_checklist_batch_recovers_by_splitting_failed_batch(monkeypatch):
     gaps = []
 
     items = client._run_checklist_batch(
-        circular_label="C",
+        label="C",
         batch=batch,
         units_by_id=units_by_id,
         gaps=gaps,
@@ -775,14 +838,14 @@ def test_run_checklist_batch_recovers_by_splitting_failed_batch(monkeypatch):
 def test_run_checklist_batch_records_gap_when_single_block_fails(monkeypatch):
     client = AIClient(AIConfig())
 
-    def fake_extract(*, circular_label, blocks, trace_callback=None):
+    def fake_extract(*, label, blocks, trace_callback=None):
         raise ValueError("still malformed")
 
     monkeypatch.setattr(client, "_extract_checklist_batch", fake_extract)
     gaps = []
 
     items = client._run_checklist_batch(
-        circular_label="C",
+        label="C",
         batch=[_make_block("u1")],
         units_by_id={"u1": _make_unit("u1")},
         gaps=gaps,
@@ -799,15 +862,123 @@ def test_run_checklist_batch_propagates_rate_limit(monkeypatch):
     class _RateLimited(Exception):
         status_code = 429
 
-    def fake_extract(*, circular_label, blocks, trace_callback=None):
+    def fake_extract(*, label, blocks, trace_callback=None):
         raise _RateLimited("rate limit exceeded")
 
     monkeypatch.setattr(client, "_extract_checklist_batch", fake_extract)
 
     with pytest.raises(_RateLimited):
         client._run_checklist_batch(
-            circular_label="C",
+            label="C",
             batch=[_make_block("u1"), _make_block("u2")],
             units_by_id={"u1": _make_unit("u1"), "u2": _make_unit("u2")},
             gaps=[],
+        )
+
+
+# --- Regulatory value extraction ----------------------------------------------------
+
+
+def test_extract_entities_packs_blocks_into_batches(monkeypatch):
+    """One call per block was affordable on a circular and is not on a regulation."""
+    client = AIClient(AIConfig())
+    calls = []
+
+    def complete(system, user, **kwargs):
+        calls.append(user)
+        source_ids = re.findall(r"\[SOURCE_ID: ([^]]+)]", user)
+        return json.dumps({"entities": [{
+            "entity_type": "ratio",
+            "metric": "CAR",
+            "comparator": "min",
+            "value_numeric": 11.5,
+            "value_high": None,
+            "unit": "%",
+            "value_text": "11.5%",
+            "subject": "banks",
+            "effective_date": None,
+            "context_snippet": "CAR of 11.5%",
+            "source_unit_ids": [source_ids[0]],
+            "confidence": 0.9,
+        }]})
+
+    monkeypatch.setattr(client, "_complete", complete)
+    monkeypatch.setattr(client, "resolve_context_budget", lambda: 100_000)
+    progress = []
+    circular = make_circular(
+        "# CAPITAL\n\n1. Banks shall maintain a CAR of 11.5%.\n\n"
+        "# LIQUIDITY\n\n2. Banks shall maintain an LCR of 100%."
+    )
+
+    entities = client.extract_entities(
+        circular,
+        progress_callback=lambda completed, total: progress.append((completed, total)),
+    )
+
+    # Both sections fit one context budget, so they travel in a single call.
+    assert len(calls) == 1
+    assert progress == [(0, 1), (1, 1)]
+    assert entities[0]["metric"] == "CAR"
+    assert entities[0]["source_unit_id"] is not None
+
+
+def test_extract_entities_reports_progress_per_batch_not_per_block(monkeypatch):
+    client = AIClient(AIConfig())
+    monkeypatch.setattr(client, "resolve_context_budget", lambda: 60)
+    monkeypatch.setattr(
+        client, "_complete", lambda system, user, **kwargs: json.dumps({"entities": []})
+    )
+
+    circular = make_circular(
+        "# CAPITAL\n\n1. Banks shall maintain adequate regulatory capital at all times.\n\n"
+        "# LIQUIDITY\n\n2. Banks shall maintain a liquidity coverage ratio at all times."
+    )
+    progress = []
+    client.extract_entities(
+        circular,
+        progress_callback=lambda completed, total: progress.append((completed, total)),
+    )
+
+    # A tight budget splits the document; totals count calls, and the run reaches it.
+    assert progress[0] == (0, progress[-1][1])
+    assert progress[-1][0] == progress[-1][1] > 1
+
+
+def test_run_entities_batch_salvages_blocks_when_the_batch_response_is_malformed(monkeypatch):
+    """A malformed batch response must not cost every block packed alongside it."""
+    client = AIClient(AIConfig())
+    seen = []
+
+    def fake_extract(*, label, blocks):
+        seen.append([block.block_id for block in blocks])
+        if len(blocks) > 1:
+            raise ValueError("malformed batch response")
+        if blocks[0].block_id == "u2":
+            raise ValueError("still malformed")
+        return [{"metric": "CAR", "source_unit_ids": ["u1"]}]
+
+    monkeypatch.setattr(client, "_extract_entities_batch", fake_extract)
+
+    extracted = client._run_entities_batch(
+        label="C", batch=[_make_block("u1"), _make_block("u2")]
+    )
+
+    assert seen == [["u1", "u2"], ["u1"], ["u2"]]
+    assert [entry["metric"] for entry in extracted] == ["CAR"]
+
+
+def test_run_entities_batch_propagates_rate_limit(monkeypatch):
+    client = AIClient(AIConfig())
+
+    class _RateLimited(Exception):
+        status_code = 429
+
+    def fake_extract(*, label, blocks):
+        raise _RateLimited("rate limit exceeded")
+
+    monkeypatch.setattr(client, "_extract_entities_batch", fake_extract)
+
+    with pytest.raises(_RateLimited):
+        client._run_entities_batch(
+            label="C", batch=[_make_block("u1"), _make_block("u2")]
         )

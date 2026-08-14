@@ -145,6 +145,27 @@ def _law_version_payload(version: RegDocumentVersion | None, include_text: bool 
     return payload
 
 
+class _EmptyAnalysis:
+    """Stands in for a document that has no row to carry analysis."""
+
+    summary = None
+    tags = None
+    summary_generated_at = None
+    tags_generated_at = None
+
+
+def _analysis_row(document: RegDocument):
+    """The row carrying this document's summary and tags.
+
+    A container's rollup is on the `RegDocument`; everything else reads from the edition
+    in force. Chosen by document shape rather than by falling back from an empty value,
+    so a superseded edition's analysis can never surface as the document's own.
+    """
+    if document.children:
+        return document
+    return document.current_version or _EmptyAnalysis
+
+
 def _law_summary(document: RegDocument, snippet: str | None = None) -> dict:
     """List-shaped payload. `result_kind` lets a caller badge mixed search results."""
     current = document.current_version
@@ -175,8 +196,17 @@ def _law_summary(document: RegDocument, snippet: str | None = None) -> dict:
         "delisted_at": _isoformat(document.delisted_at),
         "version_count": len(document.versions),
         "current_version": _law_version_payload(current),
-        "summary": _summary_preview(document.summary),
-        "tags": _safe_json_list(document.tags),
+        # Analysis of the edition in force, never of an older one (LAWS_AI_PLAN.md §4).
+        # A document whose current edition has not been analysed is un-analysed, even
+        # when a superseded version carries a summary — showing that one would describe
+        # wording SBP no longer publishes.
+        #
+        # A container is the exception and is selected on explicitly, not by falling back:
+        # it *has* a current version (a manifest), so a fallback would never fire, and its
+        # rollup lives on the document because the manifest's hash changes whenever any
+        # part does.
+        "summary": _summary_preview(_analysis_row(document).summary),
+        "tags": _safe_json_list(_analysis_row(document).tags),
         "snippet": snippet or "",
     }
 
@@ -243,10 +273,90 @@ def _regulation_sort_key(link: RegDocumentLink) -> tuple:
     )
 
 
+def _law_entity_payload(entity) -> dict:
+    """One regulatory value, shaped exactly like `CircularDetail.entities` entries.
+
+    Field-for-field with the circular arm on purpose: the detail rail that renders these
+    is meant to be one shared component, not two that drift.
+    """
+    return {
+        "id": entity.id,
+        "entity_type": entity.entity_type,
+        "metric": entity.metric,
+        "comparator": entity.comparator,
+        "value_numeric": entity.value_numeric,
+        "value_high": entity.value_high,
+        "unit": entity.unit,
+        "value_text": entity.value_text,
+        "subject": entity.subject,
+        "effective_date": _isoformat(entity.effective_date),
+        "context_snippet": entity.context_snippet,
+        "page_start": entity.page_start,
+        "confidence": entity.confidence,
+    }
+
+
+def _law_relationship_payload(edge, other) -> dict:
+    """One law → law edge, from the perspective of the document being viewed."""
+    return {
+        "type": edge.type or "references",
+        "confidence": edge.confidence,
+        "detected_via": edge.detected_via,
+        "target_reference": edge.target_reference,
+        "document": (
+            {
+                "id": other.id,
+                "title": other.title,
+                "display_title": split_law_title(other.title)[0],
+                "doc_type": other.doc_type,
+                "part_label": other.part_label,
+            }
+            if other is not None else None
+        ),
+    }
+
+
 def _law_detail(document: RegDocument) -> dict:
     """Detail payload: what is in force, the whole timeline, parts, and linked circulars."""
     payload = _law_summary(document)
+    current = document.current_version
     payload.update({
+        # Field-for-field with `CircularDetail.generation`, so the detail rail can be one
+        # component rather than two. A null means "not analysed", which for a freshly
+        # captured edition is the honest answer even when the previous one was analysed.
+        "generation": {
+            # Summary and tags follow the rollup rule; the rest are version-only, and a
+            # container legitimately reports null for them — it can never produce one.
+            "summary": _isoformat(_analysis_row(document).summary_generated_at),
+            "tags": _isoformat(_analysis_row(document).tags_generated_at),
+            "checklist": _isoformat(current.checklist_generated_at) if current else None,
+            "entities": _isoformat(current.entities_generated_at) if current else None,
+            "relationships": (
+                _isoformat(current.relationships_generated_at) if current else None
+            ),
+        },
+        "checklist_available": bool(current and current.compliance_checklist),
+        # Only the edition in force states values that are true today; an earlier
+        # edition's rows stay in the table for version comparison, not for the reader.
+        "entities": [
+            _law_entity_payload(entity)
+            for entity in sorted(
+                (e for e in document.entities if current and e.version_id == current.id),
+                key=lambda e: (e.entity_type or "", e.metric or ""),
+            )
+        ],
+        # Law → law edges, both ways. Shaped like `CircularDetail.relationships` so the
+        # same grouped-pills rail renders either corpus.
+        "relationships": {
+            "outgoing": [
+                _law_relationship_payload(edge, edge.target)
+                for edge in document.outgoing_relationships
+            ],
+            "incoming": [
+                _law_relationship_payload(edge, edge.source)
+                for edge in document.incoming_relationships
+            ],
+        },
         "normalized_title": document.normalized_title,
         "page_slug": document.page_slug,
         "first_seen_at": _isoformat(document.first_seen_at),

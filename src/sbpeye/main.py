@@ -2,7 +2,7 @@ from fastapi import FastAPI, Depends, Request, BackgroundTasks, Form, Body
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session, aliased
-from sqlalchemy import func, extract, and_
+from sqlalchemy import func, extract, and_, or_
 from urllib.parse import urljoin, urlparse, urlencode
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -19,7 +19,18 @@ from .models import AIGenerationJob, Attachment, CachedDocument, SyncStatus, cir
 from .search import backfill_fts, backfill_laws_fts, index_circular_fts, resolve_metric_terms, search_engine
 from .ai import AIClient, AIConfig, classify_provider_state, friendly_chat_error, get_ai_client, get_provider_api_key, get_provider_definition, normalize_provider
 from .circular_ai import GENERATION_ACTIONS, generation_job_payload, run_generation_job
-from .checklist_export import build_checklist_workbook
+from .laws_ai import (
+    CONTAINER_FEATURES,
+    GAP_MANIFEST,
+    LAW_GENERATION_ACTIONS,
+    STRUCTURAL_GAPS,
+    gap_message,
+    is_container,
+    law_corpus,
+    rollup_sources,
+    run_law_generation_job,
+)
+from .checklist_export import build_checklist_workbook, circular_subject, law_subject
 from .embeddings import EmbeddingConfig, create_embedding_backend
 from .env import managed_env_path, set_managed_env_value, unset_managed_env_value
 from .link_routing import (
@@ -65,6 +76,7 @@ from .api.serializers import (
     _law_detail,
     _law_summary,
     _law_version_payload,
+    split_law_title,
     _normalize_circular_ids,
     _parse_year,
     _safe_json_list,
@@ -1099,19 +1111,22 @@ async def export_circular_checklist(circular_id: str, db: Session = Depends(get_
     if not checklist:
         return JSONResponse({"error": "This circular does not have a generated checklist"}, status_code=404)
 
-    safe_reference = _re.sub(r"[^A-Za-z0-9._-]+", "_", circular.reference or circular.id).strip("._")
-    filename = f"{safe_reference or 'circular'}_checklist.xlsx"
+    subject = circular_subject(circular)
     return StreamingResponse(
-        build_checklist_workbook(circular, checklist),
+        build_checklist_workbook(subject, checklist),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{subject.safe_filename()}"'
+        },
     )
 
 
 def _entity_dict(e: CircularEntity, *, include_circular: bool = False) -> dict:
     payload = {
         "id": e.id,
+        "subject_kind": e.subject_kind or "circular",
         "circular_id": e.circular_id,
+        "document_id": e.document_id,
         "entity_type": e.entity_type,
         "metric": e.metric,
         "comparator": e.comparator,
@@ -1135,6 +1150,22 @@ def _entity_dict(e: CircularEntity, *, include_circular: bool = False) -> dict:
             "date": c.date.strftime("%Y-%m-%d") if c.date else None,
             "status": c.status or "active",
         }
+    # The law arm's equivalent. Named `document` rather than folded into `circular` so a
+    # consumer cannot mistake a regulation for a circular by reading one field.
+    if include_circular and e.document is not None:
+        d = e.document
+        payload["document"] = {
+            "id": d.id,
+            "title": d.title,
+            "display_title": split_law_title(d.title)[0],
+            "doc_type": d.doc_type,
+            "part_label": d.part_label,
+            "parent_title": (
+                split_law_title(d.parent.title)[0] if d.parent is not None else None
+            ),
+            # Whether the edition this value came from is still the one in force.
+            "in_force": bool(e.version is not None and e.version.is_current),
+        }
     return payload
 
 
@@ -1149,14 +1180,33 @@ async def query_circular_entities(
     min_value: float | None = None,
     max_value: float | None = None,
     current_only: bool = False,
+    source: str = "all",
     page: int = 1,
     per_page: int = 50,
     db: Session = Depends(get_db),
 ):
     """Structured query over extracted regulatory values. Examples:
     ?unit=%&comparator=min&min_value=10 -> thresholds above 10%;
-    ?metric=Paid-up Capital&subject=MFB&current_only=true -> the current MFB minimum capital."""
-    query = db.query(CircularEntity).join(Circular, CircularEntity.circular_id == Circular.id)
+    ?metric=Paid-up Capital&subject=MFB&current_only=true -> the current MFB minimum capital.
+
+    `source` selects the corpus: circulars | laws | all (default). It defaults to `all`
+    because the values people look for — CAR, MCR, LTV ceilings — are stated in the
+    Prudential Regulations and only moved by circulars.
+    """
+    # Outer joins, not inner: a law-sourced value has no circular, and the inner join this
+    # replaced would have silently dropped every one of them from the browser.
+    query = (
+        db.query(CircularEntity)
+        .outerjoin(Circular, CircularEntity.circular_id == Circular.id)
+        .outerjoin(RegDocument, CircularEntity.document_id == RegDocument.id)
+        .outerjoin(
+            RegDocumentVersion, CircularEntity.version_id == RegDocumentVersion.id
+        )
+    )
+    if source == "circulars":
+        query = query.filter(CircularEntity.subject_kind == "circular")
+    elif source == "laws":
+        query = query.filter(CircularEntity.subject_kind == "law")
     if metric:
         distinct_metrics = [m[0] for m in db.query(CircularEntity.metric).distinct() if m[0]]
         matched = resolve_metric_terms(metric, distinct_metrics)
@@ -1173,18 +1223,34 @@ async def query_circular_entities(
     if subject:
         query = query.filter(CircularEntity.subject.ilike(f"%{subject}%"))
     if department:
+        # A department is a circular's attribute, so this narrows to circulars by nature.
         query = query.filter(Circular.department.ilike(f"%{department}%"))
     if min_value is not None:
         query = query.filter(CircularEntity.value_numeric >= min_value)
     if max_value is not None:
         query = query.filter(CircularEntity.value_numeric <= max_value)
     if current_only:
-        query = query.filter(~Circular.status.in_(("superseded", "cancelled")))
+        # "Current" means something different per corpus: a circular is superseded by
+        # another circular, while a law's value ages out when SBP replaces the edition
+        # that stated it. Both arms have to be expressed or one corpus filters to nothing.
+        query = query.filter(
+            or_(
+                and_(
+                    CircularEntity.subject_kind == "circular",
+                    ~Circular.status.in_(("superseded", "cancelled")),
+                ),
+                and_(
+                    CircularEntity.subject_kind == "law",
+                    RegDocumentVersion.is_current == 1,
+                ),
+            )
+        )
 
-    # Most recent first, by the value's effective date then the circular's date.
+    # Most recent first, by the value's effective date, then by the date of whatever
+    # stated it — a circular's publication date, or when we first captured the edition.
     rows = query.order_by(
         CircularEntity.effective_date.desc().nullslast(),
-        Circular.date.desc().nullslast(),
+        func.coalesce(Circular.date, RegDocumentVersion.first_seen_at).desc().nullslast(),
     ).all()
 
     if current_only:
@@ -1260,6 +1326,7 @@ async def generate_circular_intelligence(
 
     job = AIGenerationJob(
         id=str(uuid.uuid4()),
+        target_kind="circular",
         circular_id=circular_id,
         feature=feature,
         status="queued",
@@ -1536,6 +1603,102 @@ def get_law(document_id: str, db: Session = Depends(get_db)):
     return _law_detail(document)
 
 
+@app.post("/api/laws/{document_id}/generate")
+async def generate_law_intelligence(
+    document_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Queue AI analysis for one law/regulation. Mirrors the circular endpoint."""
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "A JSON request body is required."}, status_code=400)
+    if not isinstance(data, dict):
+        return JSONResponse({"error": "The request body must be a JSON object."}, status_code=400)
+
+    feature = str(data.get("feature", "")).lower().strip()
+    if feature not in LAW_GENERATION_ACTIONS:
+        return JSONResponse(
+            {"error": f"Feature must be one of: {', '.join(LAW_GENERATION_ACTIONS)}."},
+            status_code=400,
+        )
+
+    document = db.query(RegDocument).filter(RegDocument.id == document_id).first()
+    if not document:
+        return JSONResponse({"error": "Document not found"}, status_code=404)
+
+    # A container holds no wording, but it is not un-analysable: its summary is a rollup
+    # over its parts. Only the features that can be built that way are offered.
+    if is_container(document):
+        if feature != "all" and feature not in CONTAINER_FEATURES:
+            return JSONResponse(
+                {
+                    "error": (
+                        f"This is a collection with no text of its own, so it cannot "
+                        f"produce a {feature}. Analyse its parts individually."
+                    ),
+                    "reason": GAP_MANIFEST,
+                    "structural": True,
+                },
+                status_code=422,
+            )
+        if feature in ("summary", "all") and not rollup_sources(document):
+            return JSONResponse(
+                {
+                    "error": (
+                        "None of this collection's parts have been summarised yet. "
+                        "Analyse the parts first, then roll them up."
+                    ),
+                    "reason": GAP_MANIFEST,
+                    # Recoverable: summarise the parts and this becomes possible.
+                    "structural": False,
+                },
+                status_code=422,
+            )
+    else:
+        # 33 of the 133 documents in the corpus have nothing analysable, for six different
+        # reasons. `law_corpus` knows which, and `gap_message` turns that into a sentence —
+        # "this is a collection, analyse its parts" is actionable where "no content" is not.
+        documents, gaps = law_corpus(document)
+        if not documents:
+            return JSONResponse(
+                {
+                    "error": gap_message(gaps),
+                    "reason": gaps[0]["reason"] if gaps else None,
+                    "structural": bool(gaps and gaps[0]["reason"] in STRUCTURAL_GAPS),
+                },
+                status_code=422,
+            )
+
+    active_job = db.query(AIGenerationJob).filter(
+        AIGenerationJob.document_id == document_id,
+        AIGenerationJob.status.in_(("queued", "running")),
+    ).order_by(AIGenerationJob.created_at.desc()).first()
+    if active_job:
+        return JSONResponse(
+            {
+                "error": "Generation is already in progress for this document.",
+                "job": generation_job_payload(active_job),
+            },
+            status_code=409,
+        )
+
+    job = AIGenerationJob(
+        id=str(uuid.uuid4()),
+        target_kind="law",
+        document_id=document_id,
+        feature=feature,
+        status="queued",
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    background_tasks.add_task(run_law_generation_job, job.id)
+    return JSONResponse(generation_job_payload(job), status_code=202)
+
+
 @app.get("/api/laws/{document_id}/versions/{version_id}")
 def get_law_version(document_id: str, version_id: str, db: Session = Depends(get_db)):
     """One captured version, including its extracted text and archived-file reference.
@@ -1569,6 +1732,36 @@ def get_law_version(document_id: str, version_id: str, db: Session = Depends(get
             payload["archive_path"] = version.local_path
             payload["archive_size"] = candidate.stat().st_size
     return payload
+
+
+@app.get("/api/laws/{document_id}/checklist.xlsx")
+def export_law_checklist(document_id: str, db: Session = Depends(get_db)):
+    """The obligations checklist for a regulation, as a workbook.
+
+    Exports the edition in force. A checklist stored against a superseded edition is
+    still on disk but is not what this document requires today, so it is never served —
+    the same rule the detail payload follows.
+    """
+    document = db.query(RegDocument).filter(RegDocument.id == document_id).first()
+    if document is None:
+        return JSONResponse({"error": "Document not found"}, status_code=404)
+
+    version = document.current_version
+    checklist = _safe_json_object(version.compliance_checklist) if version else None
+    if not checklist:
+        return JSONResponse(
+            {"error": "This document does not have a generated checklist"},
+            status_code=404,
+        )
+
+    subject = law_subject(document, version)
+    return StreamingResponse(
+        build_checklist_workbook(subject, checklist),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{subject.safe_filename()}"'
+        },
+    )
 
 
 @app.get("/api/laws/{document_id}/file")

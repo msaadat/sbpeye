@@ -69,13 +69,31 @@ class CircularRelationship(Base):
 
 class CircularEntity(Base):
     """A structured regulatory value (ratio, threshold, limit, or date) extracted
-    from a circular. Stored normalized so the corpus is queryable by numeric range,
-    metric, unit, and subject — e.g. "thresholds above 10%" or the current MCR for MFBs."""
+    from a circular *or* from a law/regulation. Stored normalized so the corpus is
+    queryable by numeric range, metric, unit, and subject — e.g. "thresholds above 10%"
+    or the current MCR for MFBs.
+
+    One table with a `subject_kind` discriminator rather than a parallel law table: a CAR
+    requirement is a CAR requirement whichever instrument states it, and forking the table
+    would fork `/api/circulars/entities/query`, the values browser, the Excel export and
+    the chat tool into permanent unions. The name is historical — it predates the laws
+    corpus — and the columns, not the table name, carry the meaning.
+
+    A law-sourced value carries `version_id`, because a ratio extracted from the Oct 2024
+    edition of the SME PRs is not a claim about the 2026 edition (LAWS_AI_PLAN.md §4.2).
+    """
 
     __tablename__ = "circular_entities"
 
     id = Column(Integer, primary_key=True, index=True)
-    circular_id = Column(String, ForeignKey("circulars.id"), nullable=False, index=True)
+    # circular | law. Says which of the two subject columns below is populated.
+    subject_kind = Column(String, nullable=False, default="circular", index=True)
+    circular_id = Column(String, ForeignKey("circulars.id"), nullable=True, index=True)
+    document_id = Column(String, ForeignKey("reg_documents.id"), nullable=True, index=True)
+    # The edition the value was read out of; NULL for circulars, which are immutable.
+    version_id = Column(
+        String, ForeignKey("reg_document_versions.id"), nullable=True, index=True
+    )
     # ratio | monetary_threshold | percentage_limit | numeric_limit | deadline | effective_date
     entity_type = Column(String, nullable=False, index=True)
     # canonical metric name, e.g. CAR, LCR, NSFR, MCR, Paid-up Capital, Leverage Ratio
@@ -97,6 +115,8 @@ class CircularEntity(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     circular = relationship("Circular", back_populates="entities")
+    document = relationship("RegDocument", back_populates="entities")
+    version = relationship("RegDocumentVersion")
 
 
 class Attachment(Base):
@@ -184,6 +204,22 @@ class RegDocument(Base):
         back_populates="document",
         cascade="all, delete-orphan",
     )
+    entities = relationship(
+        "CircularEntity",
+        back_populates="document",
+        cascade="all, delete-orphan",
+    )
+    outgoing_relationships = relationship(
+        "RegDocumentRelationship",
+        foreign_keys="[RegDocumentRelationship.source_document_id]",
+        back_populates="source",
+        cascade="all, delete-orphan",
+    )
+    incoming_relationships = relationship(
+        "RegDocumentRelationship",
+        foreign_keys="[RegDocumentRelationship.target_document_id]",
+        back_populates="target",
+    )
 
     @property
     def current_version(self):
@@ -227,6 +263,20 @@ class RegDocumentVersion(Base):
     extraction_error = Column(Text, nullable=True)
     is_vectorized = Column(Integer, nullable=False, default=0)
     is_current = Column(Integer, nullable=False, default=1, index=True)
+    # AI analysis of *this edition*, not of the document (docs/LAWS_AI_PLAN.md §4). SBP
+    # replaces the PDF in place, so analysis hung off `RegDocument` would silently survive
+    # the replacement and describe wording no longer in force. A version's bytes never
+    # change, so its analysis never needs invalidating — and a new capture correctly reads
+    # as "not analysed yet" rather than as a stale answer. Containers are the exception:
+    # a manifest has no text, so their rollup stays on `RegDocument.summary`.
+    summary = Column(Text, nullable=True)
+    tags = Column(Text, nullable=True)
+    compliance_checklist = Column(Text, nullable=True)
+    summary_generated_at = Column(DateTime, nullable=True)
+    tags_generated_at = Column(DateTime, nullable=True)
+    checklist_generated_at = Column(DateTime, nullable=True)
+    entities_generated_at = Column(DateTime, nullable=True)
+    relationships_generated_at = Column(DateTime, nullable=True)
     # Parsed from suffixes like "(to be applicable from January 1, 2026)"; drives
     # currency selection between parallel editions.
     effective_from = Column(DateTime, nullable=True)
@@ -264,6 +314,59 @@ class RegDocumentLink(Base):
     document = relationship("RegDocument", back_populates="circular_links")
 
 
+class RegDocumentRelationship(Base):
+    """An edge from one law/regulation to another.
+
+    Separate from `RegDocumentLink` — that table is circular ↔ document and its
+    `circular_id` is NOT NULL — and shaped like `CircularRelationship`, including the
+    unresolved `target_reference` arm.
+
+    The vocabulary was fixed from the corpus rather than guessed (LAWS_AI_PLAN.md §10):
+    running the deterministic name pass over all 133 documents produced 121 candidate
+    edges, of which the great majority are definitional cross-references ("a bank as
+    defined in the Banking Companies Ordinance"). 36 documents carry "in exercise of the
+    powers conferred"-style language, 4 carry amendment language and 2 repeal language.
+
+    - `made_under`  subordinate legislation issued under a parent Act — the relation with
+                    real authority, and the most common non-incidental one
+    - `amends`      an amendment Act altering its principal Act
+    - `repeals`     one instrument repealing another
+    - `references`  a definitional or incidental mention, which is most of them
+
+    There is deliberately no `supersedes`: between two *laws* supersession is an edition
+    change, and `RegDocumentVersion.is_current` already models that. Recording it here
+    too would create a second, driftable answer to the same question.
+    """
+
+    __tablename__ = "reg_document_relationships"
+
+    id = Column(Integer, primary_key=True, index=True)
+    source_document_id = Column(
+        String, ForeignKey("reg_documents.id"), nullable=False, index=True
+    )
+    target_document_id = Column(
+        String, ForeignKey("reg_documents.id"), nullable=True, index=True
+    )
+    # The raw name when it could not be resolved to a row we hold.
+    target_reference = Column(String, nullable=True)
+    type = Column(String, index=True)
+    confidence = Column(Float, nullable=True)
+    # name_match | ai
+    detected_via = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    source = relationship(
+        "RegDocument",
+        foreign_keys=[source_document_id],
+        back_populates="outgoing_relationships",
+    )
+    target = relationship(
+        "RegDocument",
+        foreign_keys=[target_document_id],
+        back_populates="incoming_relationships",
+    )
+
+
 class CircularConsolidation(Base):
     """The consolidated requirement state of an amendment chain.
 
@@ -297,10 +400,20 @@ class CachedDocument(Base):
 
 
 class AIGenerationJob(Base):
+    """One background AI analysis run, over a circular or over a law/regulation.
+
+    One table with a discriminator rather than a sibling per corpus: the poll endpoint,
+    the frontend's polling loop and `fail_interrupted_ai_jobs()` are all target-agnostic
+    already, and a second table would fork three generic things to no benefit.
+    """
+
     __tablename__ = "ai_generation_jobs"
 
     id = Column(String, primary_key=True)
-    circular_id = Column(String, ForeignKey("circulars.id"), nullable=False, index=True)
+    # circular | law. Says which of the two id columns below carries the target.
+    target_kind = Column(String, nullable=False, default="circular", index=True)
+    circular_id = Column(String, ForeignKey("circulars.id"), nullable=True, index=True)
+    document_id = Column(String, ForeignKey("reg_documents.id"), nullable=True, index=True)
     feature = Column(String, nullable=False)
     status = Column(String, nullable=False, default="queued", index=True)
     error = Column(Text, nullable=True)

@@ -37,6 +37,15 @@ const UNIT_OPTIONS = [
   { label: 'months', value: 'months' },
 ]
 
+// The corpus a value came from. "All" is the default because the values people look for
+// — CAR, MCR, LTV ceilings — are stated in the Prudential Regulations and only moved by
+// circulars; defaulting to circulars would hide the authoritative statement of each.
+const SOURCE_OPTIONS: Array<{ label: string; value: 'all' | 'circulars' | 'laws' }> = [
+  { label: 'All sources', value: 'all' },
+  { label: 'Circulars', value: 'circulars' },
+  { label: 'Laws & regulations', value: 'laws' },
+]
+
 const COMPARATOR_OPTIONS = [
   { label: 'Any', value: '' },
   { label: 'Minimum (≥)', value: 'min' },
@@ -54,6 +63,7 @@ const comparator = ref('')
 const minValue = ref<number | null>(null)
 const maxValue = ref<number | null>(null)
 const currentOnly = ref(false)
+const sourceFilter = ref<'all' | 'circulars' | 'laws'>('all')
 
 const results = ref<CircularEntity[]>([])
 const total = ref(0)
@@ -87,6 +97,7 @@ async function runQuery() {
     min_value: minValue.value ?? undefined,
     max_value: maxValue.value ?? undefined,
     current_only: currentOnly.value || undefined,
+    source: sourceFilter.value,
     per_page: 100,
   }
   try {
@@ -112,11 +123,40 @@ function resetFilters() {
   minValue.value = null
   maxValue.value = null
   currentOnly.value = false
+  sourceFilter.value = 'all'
 }
 
 function openCircular(id?: string) {
   if (!id) return
   void router.push({ path: `/circulars/${id}` })
+}
+
+/** A value stated by a regulation opens the regulation, not a circular. */
+function openSource(entity: CircularEntity) {
+  if (entity.document) {
+    void router.push({ path: `/laws/${encodeURIComponent(entity.document.id)}` })
+    return
+  }
+  openCircular(entity.circular?.id)
+}
+
+function sourceLabel(entity: CircularEntity): string {
+  if (entity.document) {
+    // A part never appears without its container.
+    const part = entity.document.part_label
+    const name = entity.document.display_title
+    return entity.document.parent_title
+      ? `${entity.document.parent_title} — ${part || name}`
+      : name
+  }
+  return entity.circular?.reference || entity.circular?.title || 'Open'
+}
+
+/** The one-word caveat next to a source: superseded circular, or superseded edition. */
+function sourceFlag(entity: CircularEntity): string {
+  if (entity.document) return entity.document.in_force ? '' : 'superseded edition'
+  const status = entity.circular?.status
+  return status && status !== 'active' ? status : ''
 }
 </script>
 
@@ -124,7 +164,7 @@ function openCircular(id?: string) {
   <section class="values-screen">
     <header class="values-header">
       <h1><i class="pi pi-percentage" /> Regulatory Values</h1>
-      <p>Query the structured database of ratios, thresholds, limits, and deadlines extracted from circulars.</p>
+      <p>Query the structured database of ratios, thresholds, limits, and deadlines extracted from circulars and regulations.</p>
     </header>
 
     <form class="values-filters" @submit.prevent="runQuery">
@@ -160,6 +200,10 @@ function openCircular(id?: string) {
         <label>Department</label>
         <InputText v-model="department" placeholder="BPRD, Exchange Policy…" />
       </div>
+      <div class="filter-field">
+        <label>Source</label>
+        <Select v-model="sourceFilter" :options="SOURCE_OPTIONS" option-label="label" option-value="value" />
+      </div>
       <div class="filter-field filter-checkbox">
         <Checkbox v-model="currentOnly" input-id="current-only" binary />
         <label for="current-only">Current only (exclude superseded; latest per metric)</label>
@@ -183,7 +227,7 @@ function openCircular(id?: string) {
             <th>Value</th>
             <th>Applies to</th>
             <th>Effective</th>
-            <th>Circular</th>
+            <th>Source</th>
           </tr>
         </thead>
         <tbody>
@@ -196,19 +240,19 @@ function openCircular(id?: string) {
             <td>{{ entity.subject || '' }}</td>
             <td class="col-date">{{ entity.effective_date ? formatDate(entity.effective_date) : '' }}</td>
             <td>
-              <button type="button" class="circular-link" @click="openCircular(entity.circular?.id)">
-                {{ entity.circular?.reference || entity.circular?.title || 'Open' }}
+              <button type="button" class="circular-link" @click="openSource(entity)">
+                {{ sourceLabel(entity) }}
               </button>
-              <span
-                v-if="entity.circular && entity.circular.status !== 'active'"
-                class="status-flag"
-              >{{ entity.circular.status }}</span>
+              <!-- Which corpus stated it: a Prudential Regulation and a circular that
+                   moved it by a point are different kinds of authority. -->
+              <span v-if="entity.document" class="source-kind">{{ entity.document.doc_type || 'regulation' }}</span>
+              <span v-if="sourceFlag(entity)" class="status-flag">{{ sourceFlag(entity) }}</span>
             </td>
           </tr>
         </tbody>
       </table>
       <Message v-else severity="info" :closable="false">
-        No values matched. Try broadening the filters, or generate "Regulatory Values" on more circulars.
+        No values matched. Try broadening the filters, or generate "Regulatory Values" on more circulars and regulations.
       </Message>
     </template>
 
@@ -347,6 +391,14 @@ function openCircular(id?: string) {
   font-size: var(--sbp-fs-meta);
   text-transform: uppercase;
   color: #b45309;
+}
+
+.source-kind {
+  margin-left: 0.4rem;
+  font-size: var(--sbp-fs-eyebrow);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--sbp-muted);
 }
 
 @media (max-width: 820px) {

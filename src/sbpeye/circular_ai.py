@@ -165,7 +165,12 @@ def _persist_outputs(db: Session, circular: Circular, outputs: dict, client=None
             CircularEntity.circular_id == circular.id
         ).delete(synchronize_session=False)
         for entity in outputs["entities"]:
-            db.add(CircularEntity(circular_id=circular.id, **entity))
+            # Explicit rather than leaning on the column default: `subject_kind` is the
+            # discriminator the values browser and the chat tool filter on, and the law
+            # arm sets its own, so both writers should read the same way.
+            db.add(CircularEntity(
+                subject_kind="circular", circular_id=circular.id, **entity
+            ))
         circular.entities_generated_at = generated_at
 
 
@@ -230,7 +235,9 @@ def run_generation_job(job_id: str) -> None:
 def generation_job_payload(job: AIGenerationJob) -> dict:
     return {
         "id": job.id,
+        "target_kind": job.target_kind or "circular",
         "circular_id": job.circular_id,
+        "document_id": job.document_id,
         "feature": job.feature,
         "status": job.status,
         "error": job.error,

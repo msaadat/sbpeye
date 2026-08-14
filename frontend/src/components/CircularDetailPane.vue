@@ -581,8 +581,10 @@ onBeforeUnmount(stopPolling)
           <i class="pi pi-sparkles" />
           Generating {{ activeJob.feature === 'all' ? 'all AI analysis' : activeJob.feature }} in the background
           <span v-if="activeJob.progress_total">
+            <!-- Checklist and entity progress both count LLM calls, not units of text:
+                 blocks are packed into as few calls as the context window allows. -->
             ({{ activeJob.progress_completed }}/{{ activeJob.progress_total }}
-            {{ activeJob.feature === 'consolidation' ? 'circulars' : 'source units' }})
+            {{ activeJob.feature === 'consolidation' ? 'circulars' : 'steps' }})
           </span>
         </div>
       </header>

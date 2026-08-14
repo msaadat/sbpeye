@@ -64,7 +64,7 @@ let searchTimer: number | undefined
 let streamController: AbortController | null = null
 const circularCitationLoads = new Set<string>()
 const uuidPattern = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi
-const citationTokenPattern = /\[{1,2}\s*(circular|attachment)\s*:\s*([a-zA-Z0-9-]+)\s*\|\s*([^\]\n]+?)\s*\]{1,2}/gi
+const citationTokenPattern = /\[{1,2}\s*(circular|attachment|law)\s*:\s*([a-zA-Z0-9-]+)\s*\|\s*([^\]\n]+?)\s*\]{1,2}/gi
 
 marked.use({
   breaks: true,
@@ -133,6 +133,13 @@ function citationHtml(kind: string, id: string, label: string): string {
     return circularCitationHtml(id, label.trim() || circularCitationLabel(id))
   }
 
+  // A regulation opens in the laws reader. Unlike a circular there is no id-to-label
+  // cache to fall back on, so an unlabelled token degrades to the corpus's own word.
+  if (kind === 'law') {
+    const href = `/laws/${encodeURIComponent(id)}`
+    return `<a href="${href}" class="document-pill chat-citation-pill" data-document-link="true"><i class="pi pi-book"></i><span>${escapeHtml(label.trim() || 'Regulation')}</span></a>`
+  }
+
   const href = `/documents/open?id=${encodeURIComponent(id)}`
   return `<a href="${href}" class="document-pill chat-citation-pill" data-document-link="true"><i class="pi pi-paperclip"></i><span>${escapeHtml(label.trim() || 'Attachment')}</span></a>`
 }
@@ -140,7 +147,7 @@ function citationHtml(kind: string, id: string, label: string): string {
 function normalizeCitationTokens(content: string): string {
   return content
     .replace(
-      /\[\[\s*(circular|attachment)\s*:\s*([a-zA-Z0-9-]+)\s*\|\s*([\s\S]*?)\s*\]\]/g,
+      /\[\[\s*(circular|attachment|law)\s*:\s*([a-zA-Z0-9-]+)\s*\|\s*([\s\S]*?)\s*\]\]/g,
       (_match, kind: string, id: string, label: string) => citationHtml(kind, id, label),
     )
     .replace(

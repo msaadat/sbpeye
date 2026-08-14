@@ -16,6 +16,7 @@ from typing import Iterator, Literal
 
 from sqlalchemy.orm import Session, joinedload
 
+from ..laws_links import law_label
 from ..models import Attachment, Circular, RegDocument
 from ..search import NON_TEXT_LAW_FILE_TYPES
 
@@ -204,17 +205,13 @@ def iter_law_sources(
             else:
                 status = STATUS_EMPTY
 
-        label = document.title or document.id
-        if document.part_label and document.parent is not None:
-            label = f"{document.parent.title} - {document.part_label}: {label}"
-
         yield SourceRef(
             source_kind="law_version",
             source_id=version.id,
             logical_kind="law",
             logical_document_id=document.id,
             version_id=version.id,
-            label=label,
+            label=law_label(document),
             text=text,
             unsearchable_status=status,
             unsearchable_detail=detail,

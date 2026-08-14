@@ -75,6 +75,26 @@ def reset_collection():
     return collection
 
 
+def _rebuild_table(conn, table: str, columns_sql: str, carried: str) -> None:
+    """Recreate `table` with a new definition, carrying `carried` columns across.
+
+    SQLite cannot drop a NOT NULL constraint in place, and two tables here had to lose one
+    when laws joined circulars as an analysis subject: `ai_generation_jobs.circular_id` and
+    `circular_entities.circular_id`, both of which a law-sourced row leaves empty. This is
+    the only shape of migration in this module that is not an ALTER, so it is written once.
+
+    Rows are preserved. The insert names its columns explicitly rather than relying on
+    positional order, so adding a column to the new definition can never silently shift
+    existing data into the wrong field.
+    """
+    conn.execute(text(f"CREATE TABLE {table}_migrated ({columns_sql})"))
+    conn.execute(text(
+        f"INSERT INTO {table}_migrated ({carried}) SELECT {carried} FROM {table}"
+    ))
+    conn.execute(text(f"DROP TABLE {table}"))
+    conn.execute(text(f"ALTER TABLE {table}_migrated RENAME TO {table}"))
+
+
 def _ensure_columns(bind=None):
     with (bind or engine).begin() as conn:
         insp = inspect(conn)
@@ -168,17 +188,92 @@ def _ensure_columns(bind=None):
                 ))
 
         if "ai_generation_jobs" in table_names:
-            existing = {c["name"] for c in insp.get_columns("ai_generation_jobs")}
+            columns = {c["name"]: c for c in insp.get_columns("ai_generation_jobs")}
             new_columns = [
                 ("progress_total", "INTEGER DEFAULT 0"),
                 ("progress_completed", "INTEGER DEFAULT 0"),
                 ("result_status", "VARCHAR"),
+                ("target_kind", "VARCHAR DEFAULT 'circular'"),
+                ("document_id", "VARCHAR"),
             ]
             for col_name, col_type in new_columns:
-                if col_name not in existing:
+                if col_name not in columns:
                     conn.execute(text(
                         f"ALTER TABLE ai_generation_jobs ADD COLUMN {col_name} {col_type}"
                     ))
+            # A law job has no circular, and the original table declared `circular_id
+            # NOT NULL`. SQLite cannot drop a constraint in place, so the table is rebuilt
+            # — the one migration here that is not an ALTER. Rows are carried across: they
+            # are a work log, and 35 of them existed when this shipped.
+            if "circular_id" in columns and not columns["circular_id"]["nullable"]:
+                _rebuild_table(
+                    conn,
+                    "ai_generation_jobs",
+                    "id VARCHAR NOT NULL PRIMARY KEY, "
+                    "target_kind VARCHAR NOT NULL DEFAULT 'circular', "
+                    "circular_id VARCHAR REFERENCES circulars (id), "
+                    "document_id VARCHAR REFERENCES reg_documents (id), "
+                    "feature VARCHAR NOT NULL, "
+                    "status VARCHAR NOT NULL, "
+                    "error TEXT, "
+                    "progress_total INTEGER DEFAULT 0, "
+                    "progress_completed INTEGER DEFAULT 0, "
+                    "result_status VARCHAR, "
+                    "created_at DATETIME NOT NULL, "
+                    "started_at DATETIME, "
+                    "completed_at DATETIME",
+                    "id, target_kind, circular_id, document_id, feature, status, error, "
+                    "progress_total, progress_completed, result_status, created_at, "
+                    "started_at, completed_at",
+                )
+            conn.execute(text(
+                "UPDATE ai_generation_jobs SET target_kind = 'circular' "
+                "WHERE target_kind IS NULL"
+            ))
+
+        if "circular_entities" in table_names:
+            columns = {c["name"]: c for c in insp.get_columns("circular_entities")}
+            for col_name, col_type in (
+                ("subject_kind", "VARCHAR DEFAULT 'circular'"),
+                ("document_id", "VARCHAR"),
+                ("version_id", "VARCHAR"),
+            ):
+                if col_name not in columns:
+                    conn.execute(text(
+                        f"ALTER TABLE circular_entities ADD COLUMN {col_name} {col_type}"
+                    ))
+            # A law-sourced value has no circular (LAWS_AI_PLAN.md §4.2).
+            if "circular_id" in columns and not columns["circular_id"]["nullable"]:
+                _rebuild_table(
+                    conn,
+                    "circular_entities",
+                    "id INTEGER NOT NULL PRIMARY KEY, "
+                    "subject_kind VARCHAR NOT NULL DEFAULT 'circular', "
+                    "circular_id VARCHAR REFERENCES circulars (id), "
+                    "document_id VARCHAR REFERENCES reg_documents (id), "
+                    "version_id VARCHAR REFERENCES reg_document_versions (id), "
+                    "entity_type VARCHAR NOT NULL, "
+                    "metric VARCHAR, comparator VARCHAR, value_numeric FLOAT, "
+                    "value_high FLOAT, unit VARCHAR, value_text VARCHAR, subject VARCHAR, "
+                    "effective_date DATETIME, context_snippet TEXT, "
+                    "source_unit_id VARCHAR, page_start INTEGER, confidence FLOAT, "
+                    "created_at DATETIME NOT NULL",
+                    "id, subject_kind, circular_id, document_id, version_id, entity_type, "
+                    "metric, comparator, value_numeric, value_high, unit, value_text, "
+                    "subject, effective_date, context_snippet, source_unit_id, "
+                    "page_start, confidence, created_at",
+                )
+            conn.execute(text(
+                "UPDATE circular_entities SET subject_kind = 'circular' "
+                "WHERE subject_kind IS NULL"
+            ))
+            for statement in (
+                "CREATE INDEX IF NOT EXISTS ix_entities_subject_kind "
+                "ON circular_entities (subject_kind)",
+                "CREATE INDEX IF NOT EXISTS ix_entities_document "
+                "ON circular_entities (document_id)",
+            ):
+                conn.execute(text(statement))
 
         if "sync_status" in table_names:
             existing = {c["name"] for c in insp.get_columns("sync_status")}
@@ -247,6 +342,16 @@ def _ensure_columns(bind=None):
                 ("first_seen_at", "DATETIME"),
                 ("last_seen_at", "DATETIME"),
                 ("source", "VARCHAR DEFAULT 'live'"),
+                # AI analysis of this edition — see LAWS_AI_PLAN.md §4 for why it hangs
+                # off the version rather than the document.
+                ("summary", "TEXT"),
+                ("tags", "TEXT"),
+                ("compliance_checklist", "TEXT"),
+                ("summary_generated_at", "DATETIME"),
+                ("tags_generated_at", "DATETIME"),
+                ("checklist_generated_at", "DATETIME"),
+                ("entities_generated_at", "DATETIME"),
+                ("relationships_generated_at", "DATETIME"),
             ],
             "reg_document_links": [
                 ("circular_id", "VARCHAR"),
@@ -266,6 +371,28 @@ def _ensure_columns(bind=None):
                     conn.execute(text(
                         f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}"
                     ))
+
+        # Law → law edges (LAWS_AI_PLAN.md phase E). Created here rather than left to
+        # create_all for the same reason as the ledger below: a CLI-only process runs
+        # create_all before models.py has registered anything.
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS reg_document_relationships ("
+            "id INTEGER PRIMARY KEY, "
+            "source_document_id VARCHAR NOT NULL REFERENCES reg_documents (id), "
+            "target_document_id VARCHAR REFERENCES reg_documents (id), "
+            "target_reference VARCHAR, "
+            "type VARCHAR, "
+            "confidence FLOAT, "
+            "detected_via VARCHAR, "
+            "created_at DATETIME NOT NULL)"
+        ))
+        for statement in (
+            "CREATE INDEX IF NOT EXISTS ix_reg_rel_source "
+            "ON reg_document_relationships (source_document_id)",
+            "CREATE INDEX IF NOT EXISTS ix_reg_rel_target "
+            "ON reg_document_relationships (target_document_id)",
+        ):
+            conn.execute(text(statement))
 
         # Persistent FTS5 lexical index for keyword search (see search.py). Rows are
         # maintained application-side (cells hold tokenize() output); this just ensures

@@ -38,6 +38,14 @@ const router = createRouter({
       component: () => import('@/views/ChatView.vue'),
     },
     {
+      // Conversations are addressable so a thread can be bookmarked, shared and
+      // survive a reload. Workspace sessions carry a "workspace:" prefix, which
+      // the router encodes into the single param.
+      path: '/chat/:sessionId',
+      name: 'chat-session',
+      component: () => import('@/views/ChatView.vue'),
+    },
+    {
       path: '/documents/open',
       name: 'document-open',
       component: () => import('@/views/DocumentView.vue'),

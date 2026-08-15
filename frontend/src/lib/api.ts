@@ -1010,9 +1010,9 @@ export async function streamChatMessage(
   handlers: {
     onSession?: (sessionId: string) => void
     onToken: (content: string) => void
-    onStatus?: (status: { phase: string; tools?: string[] }) => void
-    onError?: (message: string) => void
-    onDone?: (sessionId?: string) => void
+    onStatus?: (status: { phase: string; tools?: string[]; note?: string }) => void
+    onError?: (message: string, meta?: { partial?: boolean }) => void
+    onDone?: (sessionId?: string, messageId?: string | null) => void
   },
   signal?: AbortSignal,
 ): Promise<void> {
@@ -1061,9 +1061,12 @@ export async function streamChatMessage(
     const data = JSON.parse(dataLines.join('\n')) as {
       content?: string
       session_id?: string
+      message_id?: string | null
       error?: string
       phase?: string
       tools?: string[]
+      note?: string
+      partial?: boolean
     }
 
     if (event === 'meta' && data.session_id) {
@@ -1072,7 +1075,7 @@ export async function streamChatMessage(
     }
 
     if (event === 'status' && data.phase) {
-      handlers.onStatus?.({ phase: data.phase, tools: data.tools })
+      handlers.onStatus?.({ phase: data.phase, tools: data.tools, note: data.note })
       return
     }
 
@@ -1082,12 +1085,12 @@ export async function streamChatMessage(
     }
 
     if (event === 'done') {
-      handlers.onDone?.(data.session_id)
+      handlers.onDone?.(data.session_id, data.message_id)
       return
     }
 
     if (event === 'error') {
-      handlers.onError?.(data.error || 'Chat stream failed.')
+      handlers.onError?.(data.error || 'Chat stream failed.', { partial: data.partial })
     }
   }
 

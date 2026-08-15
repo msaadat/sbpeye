@@ -2187,6 +2187,13 @@ async def chat_page():
     return spa_index_response()
 
 
+@app.get("/chat/{path:path}")
+async def chat_spa_fallback(path: str):
+    """Conversations are addressable (/chat/<session id>), so a reload or a
+    pasted link has to land on the SPA rather than a 404."""
+    return spa_index_response()
+
+
 @app.get("/api/chat/sessions")
 async def list_chat_sessions(db: Session = Depends(get_db)):
     _ensure_default_workspace(db)
@@ -2569,7 +2576,37 @@ async def chat_message_stream(request: Request, db: Session = Depends(get_db)):
 
     def stream_response():
         stream_db = SessionLocal()
-        response_parts: list[str] = []
+        # Text streamed since the last tool call. A model that is about to call a
+        # tool narrates first ("Let me search the corpus…"); that narration is
+        # progress reporting, not part of the answer. It is flushed into the tool
+        # status event when the call arrives, so only the final segment — the text
+        # written after the last tool returned — survives as the saved answer.
+        answer_parts: list[str] = []
+        persisted = False
+
+        def persist(text: str, partial: bool) -> str | None:
+            """Save the assistant turn. Returns the new message id, or None."""
+            nonlocal persisted
+            if persisted or not text.strip():
+                return None
+            assistant_msg = ChatMessage(
+                id=str(uuid.uuid4()), session_id=session_id,
+                role="assistant", content=text,
+            )
+            stream_db.add(assistant_msg)
+            stream_session = stream_db.query(ChatSession).filter(
+                ChatSession.id == session_id
+            ).first()
+            if stream_session:
+                stream_session.updated_at = datetime.utcnow()
+            stream_db.commit()
+            persisted = True
+            emit_event("persisted_result", {
+                "persisted": True, "message_id": assistant_msg.id,
+                "chat_session_id": session_id, "partial": partial,
+            }, stage="chat.persist")
+            return assistant_msg.id
+
         try:
             with trace_operation(
                 "chat.turn", "web_chat", chat_session_id=session_id,
@@ -2601,36 +2638,47 @@ async def chat_message_stream(request: Request, db: Session = Depends(get_db)):
                     selected_circular_ids=turn_circular_ids,
                 ):
                     if isinstance(chunk, dict):
+                        if chunk.get("phase") == "tools":
+                            chunk = {**chunk, "note": "".join(answer_parts).strip()}
+                            answer_parts.clear()
                         yield sse("status", chunk)
                         continue
-                    response_parts.append(chunk)
+                    answer_parts.append(chunk)
                     yield sse("token", {"content": chunk})
 
-                response_text = "".join(response_parts)
+                response_text = "".join(answer_parts)
                 emit_event("normalized_result", {"response": response_text}, stage="chat.result")
-                assistant_msg = ChatMessage(
-                    id=str(uuid.uuid4()), session_id=session_id,
-                    role="assistant", content=response_text,
-                )
-                stream_db.add(assistant_msg)
-                stream_session = stream_db.query(ChatSession).filter(
-                    ChatSession.id == session_id
-                ).first()
-                if stream_session:
-                    stream_session.updated_at = datetime.utcnow()
-                stream_db.commit()
-                emit_event("persisted_result", {
-                    "persisted": True, "message_id": assistant_msg.id,
-                    "chat_session_id": session_id,
-                }, stage="chat.persist")
-                yield sse("done", {"session_id": session_id, "message_id": assistant_msg.id})
+                message_id = persist(response_text, partial=False)
+                yield sse("done", {
+                    "session_id": session_id, "message_id": message_id,
+                })
         except Exception as e:
             stream_db.rollback()
-            yield sse(
-                "error",
-                {"error": friendly_chat_error(e), "session_id": session_id},
-            )
+            # A stream that dies mid-answer used to discard everything the model had
+            # already written — the user watched text appear, then lose it on the
+            # next reload. Keep the partial so the turn survives in history and the
+            # UI can offer to continue it.
+            partial_text = "".join(answer_parts)
+            persist(partial_text, partial=True)
+            yield sse("error", {
+                "error": friendly_chat_error(e),
+                "session_id": session_id,
+                "partial": bool(partial_text.strip()),
+            })
         finally:
+            # A closed generator means the client hit Stop, and this is the only
+            # hook that runs on disconnect. Unlike the error path — where the
+            # fragment is the whole of what the model managed to say, however
+            # short — a stop usually lands mid tool-loop, where the buffer holds
+            # the model's narration ("Let me pull the circular…") rather than an
+            # answer. Keeping those turned history into a list of stubs, so only a
+            # substantive fragment is worth a row.
+            leftover = "".join(answer_parts)
+            if not persisted and (len(leftover.strip()) >= 160 or "\n" in leftover):
+                try:
+                    persist(leftover, partial=True)
+                except Exception:
+                    stream_db.rollback()
             stream_db.close()
 
     return StreamingResponse(

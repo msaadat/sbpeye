@@ -321,6 +321,9 @@ def _law_detail(document: RegDocument) -> dict:
     payload = _law_summary(document)
     current = document.current_version
     payload.update({
+        # The list payload clips to a 200-char preview for result cards; the detail rail
+        # renders the summary in full, as the circular detail endpoint already does.
+        "summary": _analysis_row(document).summary,
         # Field-for-field with `CircularDetail.generation`, so the detail rail can be one
         # component rather than two. A null means "not analysed", which for a freshly
         # captured edition is the honest answer even when the previous one was analysed.

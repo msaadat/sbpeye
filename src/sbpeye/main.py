@@ -15,7 +15,9 @@ import uuid
 import threading
 
 from .database import PROJECT_ROOT, engine, Base, get_db, SessionLocal, has_vector_store_data
-from .models import AIGenerationJob, Attachment, CachedDocument, SyncStatus, circular_sync_only, Circular, CircularEntity, CircularRelationship, EcoDataSeries, EcoDataEntry, RegDocument, RegDocumentVersion, Settings, ChatSession, ChatMessage, ResearchWorkspace, WorkspaceCircular
+from .models import AIGenerationJob, Attachment, CachedDocument, SyncStatus, circular_sync_only, Circular, CircularEntity, CircularRelationship, EcoDataSeries, EcoDataEntry, RegDocument, RegDocumentVersion, Settings, ChatSession, ChatMessage, ResearchWorkspace, WorkspaceCircular, upsert_settings
+from .api.debug import router as debug_router
+from .llm_debug import emit_event, fail_interrupted_traces, trace_operation
 from .search import backfill_fts, backfill_laws_fts, index_circular_fts, resolve_metric_terms, search_engine
 from .ai import AIClient, AIConfig, classify_provider_state, friendly_chat_error, get_ai_client, get_provider_api_key, get_provider_definition, normalize_provider
 from .circular_ai import GENERATION_ACTIONS, generation_job_payload, run_generation_job
@@ -218,6 +220,7 @@ def _ensure_document_cached(
 
 @asynccontextmanager
 async def app_lifespan(_app: FastAPI):
+    fail_interrupted_traces()
     fail_interrupted_ai_jobs()
     fail_interrupted_sync_jobs()
     threading.Thread(target=_warm_up_search_index, daemon=True).start()
@@ -232,6 +235,11 @@ app = FastAPI(
     description="Independent SBP Circulars & EcoData Indexer",
     lifespan=app_lifespan,
 )
+# Keep routes flat in the application router. The FastAPI version used by this
+# project defers ``app.include_router`` behind an internal placeholder, which would
+# make literal-route shadow checks see the placeholder instead of the API routes.
+app.router.routes.extend(debug_router.routes)
+app.router._mark_routes_changed()
 
 # Setup SPA static files
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -1864,11 +1872,16 @@ async def settings_page():
     return spa_index_response()
 
 
+@app.get("/debug")
+async def debug_page():
+    return spa_index_response()
+
+
 @app.get("/api/settings")
 async def get_settings(db: Session = Depends(get_db)):
     config = AIConfig.from_db(db) or AIConfig.from_env()
     embedding = EmbeddingConfig.from_db(db)
-    return _settings_payload(config, embedding)
+    return _settings_payload(config, embedding, db)
 
 
 @app.post("/api/settings")
@@ -1904,6 +1917,12 @@ def save_settings(data: dict = Body(...), db: Session = Depends(get_db)):
         api_key="",
     )
     embedding.save_to_db(db)
+    if "llm_debug_enabled" in data:
+        upsert_settings(db, {
+            "llm_debug_enabled": (
+                "true" if bool(data.get("llm_debug_enabled")) else "false"
+            )
+        })
     _save_embedding_secret(
         api_key=data.get("embedding_api_key"),
         clear_secret=bool(data.get("clear_embedding_api_key")),
@@ -1920,7 +1939,7 @@ def save_settings(data: dict = Body(...), db: Session = Depends(get_db)):
             "Settings saved. LLM provider changes apply immediately."
             f"{context_message} Run sbpeye reindex after changing the embedding provider or model."
         ),
-        "settings": _settings_payload(config, embedding),
+        "settings": _settings_payload(config, embedding, db),
         "context_window_detected": detected_context_window is not None,
     }
 
@@ -1976,8 +1995,12 @@ def test_embedding_connection(db: Session = Depends(get_db)):
 def test_ai_connection(db: Session = Depends(get_db)):
     try:
         client = get_ai_client(db)
-        result = client.test_connection()
-        return result
+        with trace_operation(
+            "settings.connection_test", "connection_test",
+            provider=client.config.provider, model=client.config.model,
+        ):
+            result = client.test_connection()
+            return result
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -2446,32 +2469,53 @@ async def chat_message(request: Request, db: Session = Depends(get_db)):
     db.add(user_msg)
     db.commit()
 
-    messages = _ordered_chat_messages(db, session_id)
-    chat_messages = [{"role": m.role, "content": m.content} for m in messages]
-
+    trace_kwargs = {
+        "chat_session_id": session_id,
+        "target_kind": "chat_session",
+        "target_id": session_id,
+        "metadata": {
+            "user_message_id": user_msg.id,
+            "selected_circular_ids": turn_circular_ids,
+            "workspace_id": workspace.id if workspace else None,
+        },
+    }
     try:
-        client = get_ai_client(db)
-        circulars_context = _build_chat_circulars_context(
-            db, turn_circular_ids, message, client.config.max_context_tokens
+        with trace_operation("chat.turn", "web_chat", **trace_kwargs):
+            emit_event("context", {
+                "user_message": message,
+                "selected_circular_ids": turn_circular_ids,
+            }, stage="chat.context")
+            messages = _ordered_chat_messages(db, session_id)
+            chat_messages = [{"role": m.role, "content": m.content} for m in messages]
+            client = get_ai_client(db)
+            circulars_context = _build_chat_circulars_context(
+                db, turn_circular_ids, message, client.config.max_context_tokens
+            )
+            response_text = client.chat(
+                chat_messages, db, circulars_context=circulars_context,
+                selected_circular_ids=turn_circular_ids,
+            )
+            emit_event("normalized_result", {"response": response_text}, stage="chat.result")
+            assistant_msg = ChatMessage(
+                id=str(uuid.uuid4()), session_id=session_id,
+                role="assistant", content=response_text,
+            )
+            db.add(assistant_msg)
+            session.updated_at = datetime.utcnow()
+            db.commit()
+            emit_event("persisted_result", {
+                "persisted": True, "message_id": assistant_msg.id,
+                "chat_session_id": session_id,
+            }, stage="chat.persist")
+    except Exception as exc:
+        response_text = friendly_chat_error(exc)
+        assistant_msg = ChatMessage(
+            id=str(uuid.uuid4()), session_id=session_id,
+            role="assistant", content=response_text,
         )
-        response_text = client.chat(
-            chat_messages,
-            db,
-            circulars_context=circulars_context,
-            selected_circular_ids=turn_circular_ids,
-        )
-    except Exception as e:
-        response_text = friendly_chat_error(e)
-
-    assistant_msg = ChatMessage(
-        id=str(uuid.uuid4()),
-        session_id=session_id,
-        role="assistant",
-        content=response_text,
-    )
-    db.add(assistant_msg)
-    session.updated_at = datetime.utcnow()
-    db.commit()
+        db.add(assistant_msg)
+        session.updated_at = datetime.utcnow()
+        db.commit()
 
     return {"response": response_text, "session_id": session_id}
 
@@ -2527,45 +2571,59 @@ async def chat_message_stream(request: Request, db: Session = Depends(get_db)):
         stream_db = SessionLocal()
         response_parts: list[str] = []
         try:
-            yield sse("meta", {"session_id": session_id})
-
-            rows = _ordered_chat_messages(stream_db, session_id)
-            chat_messages = [{"role": m.role, "content": m.content} for m in rows]
-            client = get_ai_client(stream_db)
-            circulars_context = _build_chat_circulars_context(
-                stream_db,
-                turn_circular_ids,
-                message,
-                client.config.max_context_tokens,
-            )
-
-            for chunk in client.stream_chat(
-                chat_messages,
-                stream_db,
-                circulars_context=circulars_context,
-                selected_circular_ids=turn_circular_ids,
+            with trace_operation(
+                "chat.turn", "web_chat", chat_session_id=session_id,
+                target_kind="chat_session", target_id=session_id,
+                metadata={
+                    "user_message_id": user_msg.id,
+                    "selected_circular_ids": turn_circular_ids,
+                    "workspace_id": workspace.id if workspace else None,
+                    "stream": True,
+                },
             ):
-                if isinstance(chunk, dict):
-                    yield sse("status", chunk)
-                    continue
-                response_parts.append(chunk)
-                yield sse("token", {"content": chunk})
+                emit_event("context", {
+                    "user_message": message,
+                    "selected_circular_ids": turn_circular_ids,
+                }, stage="chat.context")
+                yield sse("meta", {"session_id": session_id})
 
-            response_text = "".join(response_parts)
-            assistant_msg = ChatMessage(
-                id=str(uuid.uuid4()),
-                session_id=session_id,
-                role="assistant",
-                content=response_text,
-            )
-            stream_db.add(assistant_msg)
-            stream_session = stream_db.query(ChatSession).filter(
-                ChatSession.id == session_id
-            ).first()
-            if stream_session:
-                stream_session.updated_at = datetime.utcnow()
-            stream_db.commit()
-            yield sse("done", {"session_id": session_id, "message_id": assistant_msg.id})
+                rows = _ordered_chat_messages(stream_db, session_id)
+                chat_messages = [{"role": m.role, "content": m.content} for m in rows]
+                client = get_ai_client(stream_db)
+                circulars_context = _build_chat_circulars_context(
+                    stream_db, turn_circular_ids, message,
+                    client.config.max_context_tokens,
+                )
+
+                for chunk in client.stream_chat(
+                    chat_messages, stream_db,
+                    circulars_context=circulars_context,
+                    selected_circular_ids=turn_circular_ids,
+                ):
+                    if isinstance(chunk, dict):
+                        yield sse("status", chunk)
+                        continue
+                    response_parts.append(chunk)
+                    yield sse("token", {"content": chunk})
+
+                response_text = "".join(response_parts)
+                emit_event("normalized_result", {"response": response_text}, stage="chat.result")
+                assistant_msg = ChatMessage(
+                    id=str(uuid.uuid4()), session_id=session_id,
+                    role="assistant", content=response_text,
+                )
+                stream_db.add(assistant_msg)
+                stream_session = stream_db.query(ChatSession).filter(
+                    ChatSession.id == session_id
+                ).first()
+                if stream_session:
+                    stream_session.updated_at = datetime.utcnow()
+                stream_db.commit()
+                emit_event("persisted_result", {
+                    "persisted": True, "message_id": assistant_msg.id,
+                    "chat_session_id": session_id,
+                }, stage="chat.persist")
+                yield sse("done", {"session_id": session_id, "message_id": assistant_msg.id})
         except Exception as e:
             stream_db.rollback()
             yield sse(

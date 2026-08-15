@@ -3,6 +3,7 @@ import json
 import os
 import re
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -15,6 +16,15 @@ from sqlalchemy.orm import Session
 
 from .checklist import compact_required_checklist
 from .env import load_app_env, resolve_env_value
+from .llm_debug import (
+    close_implicit_trace,
+    emit_event,
+    ensure_implicit_trace,
+    exception_payload,
+    finish_trace,
+    to_jsonable,
+    trace_operation,
+)
 
 
 load_app_env()
@@ -594,8 +604,13 @@ class OllamaCloudClient:
         )
 
     @classmethod
-    def _chunk_to_namespace(cls, message: dict[str, Any]) -> SimpleNamespace:
+    def _chunk_to_namespace(cls, body: dict[str, Any]) -> SimpleNamespace:
+        message = body.get("message") or {}
         return SimpleNamespace(
+            id=body.get("id"),
+            model=body.get("model"),
+            usage=body.get("usage"),
+            raw_provider_json=body,
             choices=[
                 SimpleNamespace(
                     delta=cls._message_to_namespace(message),
@@ -662,14 +677,21 @@ class OllamaCloudClient:
             return self._stream_chat(response)
         body = response.json()
         message = self._message_to_namespace(body.get("message") or {})
-        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+        return SimpleNamespace(
+            id=body.get("id"), model=body.get("model") or payload.get("model"),
+            usage=body.get("usage"), raw_provider_json=body,
+            choices=[SimpleNamespace(
+                message=message,
+                finish_reason=body.get("done_reason") or ("stop" if body.get("done") else None),
+            )],
+        )
 
     def _stream_chat(self, response: requests.Response):
         for line in response.iter_lines(decode_unicode=True):
             if not line:
                 continue
             body = json.loads(line)
-            yield self._chunk_to_namespace(body.get("message") or {})
+            yield self._chunk_to_namespace(body)
 
     def _models_list(self) -> SimpleNamespace:
         response = self._request("GET", "/tags")
@@ -1028,7 +1050,177 @@ class AIClient:
         ]
         return kwargs
 
+    @staticmethod
+    def _normalized_completion_response(response: Any) -> dict[str, Any]:
+        """Return a stable view plus the provider's complete JSON when available."""
+        raw = to_jsonable(response)
+        choices = getattr(response, "choices", None) or []
+        choice = choices[0] if choices else None
+        message = getattr(choice, "message", None) if choice is not None else None
+        tool_calls = getattr(message, "tool_calls", None) or [] if message else []
+        usage = getattr(response, "usage", None)
+        usage_data = to_jsonable(usage) if usage is not None else {}
+        if not isinstance(usage_data, dict):
+            usage_data = {}
+        return {
+            "id": getattr(response, "id", None),
+            "model": getattr(response, "model", None),
+            "content": getattr(message, "content", None) if message else None,
+            "role": getattr(message, "role", None) if message else None,
+            "tool_calls": to_jsonable(tool_calls),
+            "finish_reason": getattr(choice, "finish_reason", None) if choice else None,
+            "usage": usage_data,
+            "raw": raw,
+        }
+
+    def _trace_stream(
+        self,
+        stream: Any,
+        *,
+        handle: Any,
+        owns_trace: bool,
+        context_token: Any,
+        attempt_id: str,
+        attempt_number: int | None,
+        stage: str,
+        started: float,
+    ):
+        content_parts: list[str] = []
+        tool_calls: dict[int, dict[str, Any]] = {}
+        role: str | None = None
+        finish_reason: str | None = None
+        response_id: str | None = None
+        response_model: str | None = None
+        usage: dict[str, Any] = {}
+        first_delta_ms: int | None = None
+        try:
+            for chunk in stream:
+                response_id = getattr(chunk, "id", None) or response_id
+                response_model = getattr(chunk, "model", None) or response_model
+                chunk_usage = getattr(chunk, "usage", None)
+                if chunk_usage is not None:
+                    converted = to_jsonable(chunk_usage)
+                    if isinstance(converted, dict):
+                        usage = converted
+                choices = getattr(chunk, "choices", None) or []
+                for choice in choices:
+                    finish_reason = getattr(choice, "finish_reason", None) or finish_reason
+                    delta = getattr(choice, "delta", None)
+                    if delta is None:
+                        continue
+                    role = getattr(delta, "role", None) or role
+                    content = getattr(delta, "content", None)
+                    if content:
+                        content_parts.append(content)
+                        if first_delta_ms is None:
+                            first_delta_ms = round((time.monotonic() - started) * 1000)
+                    for tc in getattr(delta, "tool_calls", None) or []:
+                        index = int(getattr(tc, "index", 0) or 0)
+                        item = tool_calls.setdefault(index, {
+                            "id": "", "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        })
+                        item["id"] = getattr(tc, "id", None) or item["id"]
+                        item["type"] = getattr(tc, "type", None) or item["type"]
+                        function = getattr(tc, "function", None)
+                        if function:
+                            item["function"]["name"] += getattr(function, "name", None) or ""
+                            item["function"]["arguments"] += getattr(function, "arguments", None) or ""
+                            if first_delta_ms is None:
+                                first_delta_ms = round((time.monotonic() - started) * 1000)
+                yield chunk
+            elapsed = round((time.monotonic() - started) * 1000)
+            emit_event("provider_response", {
+                "id": response_id, "model": response_model, "role": role,
+                "content": "".join(content_parts),
+                "tool_calls": [tool_calls[key] for key in sorted(tool_calls)],
+                "finish_reason": finish_reason, "usage": usage,
+                "stream": True, "first_token_ms": first_delta_ms,
+                "duration_ms": elapsed,
+            }, stage=stage, attempt_id=attempt_id, attempt_number=attempt_number,
+               elapsed_ms=elapsed, handle=handle)
+            close_implicit_trace(handle, owns_trace, context_token)
+        except GeneratorExit as exc:
+            elapsed = round((time.monotonic() - started) * 1000)
+            emit_event("provider_response", {
+                "content": "".join(content_parts), "stream": True,
+                "abandoned": True, "duration_ms": elapsed,
+            }, stage=stage, attempt_id=attempt_id, attempt_number=attempt_number,
+               elapsed_ms=elapsed, handle=handle)
+            close_implicit_trace(handle, owns_trace, context_token, error=exc, cancelled=True)
+            raise
+        except BaseException as exc:
+            elapsed = round((time.monotonic() - started) * 1000)
+            emit_event("provider_error", {
+                **exception_payload(exc), "duration_ms": elapsed,
+            }, stage=stage, attempt_id=attempt_id, attempt_number=attempt_number,
+               elapsed_ms=elapsed, handle=handle)
+            close_implicit_trace(handle, owns_trace, context_token, error=exc)
+            raise
+
+    def _create_traced_completion(
+        self,
+        *,
+        stage: str,
+        structured_mode: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """The sole text-generation provider boundary in SBPEye."""
+        handle, owns_trace, context_token = ensure_implicit_trace(
+            self.config.provider, str(kwargs.get("model") or "") or None
+        )
+        attempt_id = str(uuid.uuid4())
+        attempt_number = emit_event("provider_request", {
+            "provider": self.config.provider,
+            "base_url": self.config.base_url,
+            "structured_mode": structured_mode or "text",
+            "kwargs": kwargs,
+        }, stage=stage, attempt_id=attempt_id, handle=handle)
+        started = time.monotonic()
+        try:
+            response = self._client.chat.completions.create(**kwargs)
+        except BaseException as exc:
+            elapsed = round((time.monotonic() - started) * 1000)
+            emit_event("provider_error", {
+                **exception_payload(exc), "duration_ms": elapsed,
+            }, stage=stage, attempt_id=attempt_id, attempt_number=attempt_number,
+               elapsed_ms=elapsed, handle=handle)
+            close_implicit_trace(handle, owns_trace, context_token, error=exc)
+            raise
+        if kwargs.get("stream"):
+            return self._trace_stream(
+                response, handle=handle, owns_trace=owns_trace,
+                context_token=context_token, attempt_id=attempt_id,
+                attempt_number=attempt_number, stage=stage, started=started,
+            )
+        elapsed = round((time.monotonic() - started) * 1000)
+        normalized = self._normalized_completion_response(response)
+        normalized["duration_ms"] = elapsed
+        normalized["stream"] = False
+        emit_event("provider_response", normalized, stage=stage,
+                   attempt_id=attempt_id, attempt_number=attempt_number,
+                   elapsed_ms=elapsed, handle=handle)
+        close_implicit_trace(handle, owns_trace, context_token)
+        return response
+
     def _complete(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        model: str = "",
+        temperature: float = 0.0,
+        json_schema: dict[str, Any] | None = None,
+    ) -> str:
+        with trace_operation(
+            "implicit.completion", "implicit", provider=self.config.provider,
+            model=model or self.config.model,
+        ):
+            return self._complete_impl(
+                system_prompt, user_prompt, model=model, temperature=temperature,
+                json_schema=json_schema,
+            )
+
+    def _complete_impl(
         self,
         system_prompt: str,
         user_prompt: str,
@@ -1049,12 +1241,22 @@ class AIClient:
                 mode=mode,
             )
             try:
-                response = self._client.chat.completions.create(**kwargs)
+                response = self._create_traced_completion(
+                    stage="completion", structured_mode=mode, **kwargs
+                )
             except Exception as exc:
                 if json_schema and mode != "text" and _is_response_format_error(exc):
                     # Provider rejected this structured-output tier; drop down and
                     # cache so the rest of the run skips the dead mode.
-                    self._structured_mode = self._downgrade_structured_mode(mode)
+                    new_mode = self._downgrade_structured_mode(mode)
+                    emit_event("structured_mode_changed", {
+                        "old_mode": mode, "new_mode": new_mode,
+                        "reason": "provider_rejection",
+                    }, stage="completion")
+                    emit_event("retry", {
+                        "reason": "response_format_rejected", "retry_tier": new_mode,
+                    }, stage="completion")
+                    self._structured_mode = new_mode
                     continue
                 raise
 
@@ -1067,6 +1269,10 @@ class AIClient:
             # the client in a weaker mode for the rest of the process on evidence that
             # says nothing about what the model supports.
             empty_responses += 1
+            emit_event("retry", {
+                "reason": "empty_completion", "attempt": empty_responses,
+                "retry_tier": mode,
+            }, stage="completion")
             if empty_responses > _EMPTY_RESPONSE_RETRIES:
                 raise _empty_response_error(
                     self.config.provider,
@@ -1075,6 +1281,23 @@ class AIClient:
                 )
 
     def _complete_json(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        json_schema: dict[str, Any],
+        temperature: float = 0.0,
+    ) -> str:
+        with trace_operation(
+            "implicit.completion", "implicit", provider=self.config.provider,
+            model=self.config.model,
+        ):
+            return self._complete_json_impl(
+                system_prompt, user_prompt, json_schema=json_schema,
+                temperature=temperature,
+            )
+
+    def _complete_json_impl(
         self,
         system_prompt: str,
         user_prompt: str,
@@ -1094,17 +1317,29 @@ class AIClient:
         try:
             self._parse_json_object(raw)
             return raw
-        except ValueError:
+        except ValueError as exc:
+            emit_event("parse_error", {
+                "parser": "json_object", "error": str(exc),
+            }, stage="structured_output")
             if self._structured_mode == "text":
                 return raw
-            self._structured_mode = self._downgrade_structured_mode(self._structured_mode)
+            old_mode = self._structured_mode
+            self._structured_mode = self._downgrade_structured_mode(old_mode)
+            emit_event("structured_mode_changed", {
+                "old_mode": old_mode, "new_mode": self._structured_mode,
+                "reason": "invalid_json",
+            }, stage="structured_output")
+            emit_event("retry", {
+                "reason": "invalid_json", "retry_tier": self._structured_mode,
+            }, stage="structured_output")
             return self._complete(
                 system_prompt, user_prompt, temperature=temperature, json_schema=json_schema
             )
 
     def _complete_chat(self, messages: list[dict[str, str]], model: str = "", temperature: float = 0.3) -> str:
         model = model or self.config.effective_chat_model
-        response = self._client.chat.completions.create(
+        response = self._create_traced_completion(
+            stage="chat.helper",
             model=model,
             messages=messages,
             temperature=temperature,
@@ -1480,7 +1715,13 @@ SOURCE BLOCKS:
             trace_callback("llm_output", {"block": trace_block, "raw_response": result})
         try:
             return self._parse_checklist_items(result, valid_source_ids)
-        except ValueError:
+        except ValueError as exc:
+            emit_event("parse_error", {
+                "parser": "checklist_items", "error": str(exc),
+            }, stage="checklist.parse")
+            emit_event("retry", {
+                "reason": "malformed_checklist", "next_attempt": 2,
+            }, stage="checklist.retry")
             retry_system = (
                 system
                 + "\n\nYour previous response was malformed. Return the "
@@ -1498,6 +1739,10 @@ SOURCE BLOCKS:
             try:
                 return self._parse_checklist_items(retry_result, valid_source_ids)
             except ValueError as exc:
+                emit_event("parse_error", {
+                    "parser": "checklist_items", "error": str(exc),
+                    "attempt": 2,
+                }, stage="checklist.parse")
                 first = self._response_excerpt(result)
                 second = self._response_excerpt(retry_result)
                 raise ValueError(
@@ -2010,7 +2255,13 @@ SOURCE BLOCKS:
         }
         try:
             return self._parse_entities(result, valid_source_ids)
-        except ValueError:
+        except ValueError as exc:
+            emit_event("parse_error", {
+                "parser": "entities", "error": str(exc),
+            }, stage="entities.parse")
+            emit_event("retry", {
+                "reason": "malformed_entities", "next_attempt": 2,
+            }, stage="entities.retry")
             retry_system = (
                 system
                 + "\nYour previous response was malformed. Return the schema-compliant JSON object only, with valid SOURCE_ID citations."
@@ -2437,7 +2688,13 @@ SOURCE BLOCKS:
         )
         try:
             return self._parse_requirement_items(result)
-        except ValueError:
+        except ValueError as exc:
+            emit_event("parse_error", {
+                "parser": "requirements", "error": str(exc),
+            }, stage="consolidation.extract")
+            emit_event("retry", {
+                "reason": "malformed_requirements", "next_attempt": 2,
+            }, stage="consolidation.extract")
             retry_system = (
                 self._REQUIREMENTS_SYSTEM_PROMPT
                 + "\n\nYour previous response was malformed. Return the "
@@ -3130,17 +3387,35 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
             "",
         )
         for tc in tool_call_dicts:
+            emit_event("tool_request", {
+                "tool_call_id": tc.get("id"),
+                "name": (tc.get("function") or {}).get("name"),
+                "raw_arguments": (tc.get("function") or {}).get("arguments"),
+            }, stage="chat.tools")
+            tool_started = time.monotonic()
             try:
                 args = json.loads(tc["function"]["arguments"])
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
                 args = {}
-            result = self._execute_tool(
-                tc["function"]["name"],
-                args,
-                db,
-                selected_circular_ids,
-                user_query,
-            )
+                emit_event("parse_error", {
+                    "parser": "tool_arguments", "tool_call_id": tc.get("id"),
+                    "error": str(exc),
+                }, stage="chat.tools")
+            try:
+                result = self._execute_tool(
+                    tc["function"]["name"], args, db,
+                    selected_circular_ids, user_query,
+                )
+                emit_event("tool_result", {
+                    "tool_call_id": tc.get("id"), "name": tc["function"]["name"],
+                    "arguments": args, "result": result, "success": True,
+                }, stage="chat.tools", elapsed_ms=round((time.monotonic() - tool_started) * 1000))
+            except Exception as exc:
+                emit_event("tool_result", {
+                    "tool_call_id": tc.get("id"), "name": tc["function"]["name"],
+                    "arguments": args, "success": False, "error": exception_payload(exc),
+                }, stage="chat.tools", elapsed_ms=round((time.monotonic() - tool_started) * 1000))
+                raise
             full_messages.append({
                 "role": "tool",
                 "tool_call_id": tc["id"],
@@ -3154,13 +3429,29 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
         circulars_context: str | None = None,
         selected_circular_ids: list[str] | None = None,
     ) -> str:
+        with trace_operation(
+            "chat.turn", "implicit", provider=self.config.provider,
+            model=self.config.effective_chat_model,
+        ):
+            return self._chat_impl(
+                messages, db, circulars_context, selected_circular_ids
+            )
+
+    def _chat_impl(
+        self,
+        messages: list[dict[str, str]],
+        db: Session,
+        circulars_context: str | None = None,
+        selected_circular_ids: list[str] | None = None,
+    ) -> str:
         full_messages = self._chat_full_messages(
             messages, circulars_context, selected_circular_ids
         )
 
         max_iterations = 5
-        for _ in range(max_iterations):
-            response = self._client.chat.completions.create(
+        for iteration in range(max_iterations):
+            response = self._create_traced_completion(
+                stage=f"chat.iteration.{iteration + 1}",
                 model=self.config.effective_chat_model,
                 messages=full_messages,
                 temperature=0.3,
@@ -3205,7 +3496,8 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
             messages, full_messages, circulars_context
         )
         try:
-            final_response = self._client.chat.completions.create(
+            final_response = self._create_traced_completion(
+                stage="chat.final_synthesis",
                 model=self.config.effective_chat_model,
                 messages=synthesis_messages,
                 temperature=0.3,
@@ -3228,14 +3520,30 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
         circulars_context: str | None = None,
         selected_circular_ids: list[str] | None = None,
     ):
+        with trace_operation(
+            "chat.turn", "implicit", provider=self.config.provider,
+            model=self.config.effective_chat_model,
+        ):
+            yield from self._stream_chat_impl(
+                messages, db, circulars_context, selected_circular_ids
+            )
+
+    def _stream_chat_impl(
+        self,
+        messages: list[dict[str, str]],
+        db: Session,
+        circulars_context: str | None = None,
+        selected_circular_ids: list[str] | None = None,
+    ):
         full_messages = self._chat_full_messages(
             messages, circulars_context, selected_circular_ids
         )
 
         max_iterations = 5
-        for _ in range(max_iterations):
+        for iteration in range(max_iterations):
             yield {"phase": "thinking"}
-            stream = self._client.chat.completions.create(
+            stream = self._create_traced_completion(
+                stage=f"chat.iteration.{iteration + 1}",
                 model=self.config.effective_chat_model,
                 messages=full_messages,
                 temperature=0.3,
@@ -3309,7 +3617,8 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
             messages, full_messages, circulars_context
         )
         try:
-            final_stream = self._client.chat.completions.create(
+            final_stream = self._create_traced_completion(
+                stage="chat.final_synthesis",
                 model=self.config.effective_chat_model,
                 messages=synthesis_messages,
                 temperature=0.3,
@@ -3355,8 +3664,23 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
         }
 
     def test_connection(self) -> dict:
+        with trace_operation(
+            "settings.connection_test", "connection_test",
+            provider=self.config.provider, model=self.config.model,
+        ) as trace:
+            result = self._test_connection_impl()
+            emit_event("normalized_result", result, stage="settings.connection_test")
+            if not result.get("success"):
+                finish_trace(
+                    trace, "failed",
+                    RuntimeError(str(result.get("error") or "Connection test failed")),
+                )
+            return result
+
+    def _test_connection_impl(self) -> dict:
         try:
-            response = self._client.chat.completions.create(
+            response = self._create_traced_completion(
+                stage="settings.connection_test",
                 model=self.config.model,
                 messages=[{"role": "user", "content": "Say 'Connection successful.'"}],
                 max_tokens=10,

@@ -15,6 +15,7 @@ from sbpeye.models import Attachment, CachedDocument, Circular, CircularEntity, 
 from sbpeye.ai import get_ai_client, is_rate_limit_error
 from sbpeye.link_routing import resolve_reference_in_context
 from sbpeye.supersession import apply_annexure_supersession, apply_blanket_supersession
+from sbpeye.llm_debug import emit_event, trace_operation
 
 
 @click.group()
@@ -484,6 +485,7 @@ def consolidate(circular_id, limit, force, verbose, delay):
 
         processed_chains: set[str] = set()
         generated = skipped = failed = 0
+        invocation_id = str(uuid.uuid4())
         for seed in seeds:
             members = resolve_chain(db, seed.id)
             if len(members) < 2:
@@ -512,8 +514,20 @@ def consolidate(circular_id, limit, force, verbose, delay):
                 for member in members:
                     click.echo(f"  - {member.display_name} ({member.date:%Y-%m-%d})" if member.date else f"  - {member.display_name}")
             try:
-                generate_consolidation(db, client, seed)
-                db.commit()
+                with trace_operation(
+                    "circular.consolidation", "cli", target_kind="chain",
+                    target_id=base_id, command_name="circulars consolidate",
+                    metadata={"invocation_id": invocation_id, "member_ids": [item.id for item in members]},
+                ):
+                    result = generate_consolidation(db, client, seed)
+                    emit_event("normalized_result", {
+                        "chain_id": base_id,
+                        "requirements": json.loads(result.requirements or "[]"),
+                    }, stage="consolidation.result")
+                    db.commit()
+                    emit_event("persisted_result", {
+                        "persisted": True, "chain_id": base_id,
+                    }, stage="consolidation.persist")
                 generated += 1
                 click.echo(f"  consolidated: {label}")
             except Exception as exc:
@@ -1150,7 +1164,7 @@ class _BatchOutcome:
         self.count = count    # extra items produced (e.g. relationships created)
 
 
-def _run_ai_batch(db, circulars, *, process, skip=None,
+def _run_ai_batch(db, circulars, *, operation, process, skip=None,
                   verbose=False, delay=0.0, sleep_in_loop=True):
     """Drive an AI batch task over `circulars`: commit/rollback, progress, delay.
 
@@ -1161,12 +1175,24 @@ def _run_ai_batch(db, circulars, *, process, skip=None,
     """
     processed = 0
     total = 0
+    invocation_id = str(uuid.uuid4())
     for c in circulars:
         if skip is not None and skip(c):
             continue
         try:
-            outcome = process(c)
-            db.commit()
+            with trace_operation(
+                operation, "cli", target_kind="circular", target_id=c.id,
+                command_name=f"circulars {operation.split('.', 1)[-1]}",
+                metadata={"invocation_id": invocation_id},
+            ):
+                outcome = process(c)
+                emit_event("normalized_result", {
+                    "detail": outcome.detail, "count": outcome.count,
+                }, stage="cli.result")
+                db.commit()
+                emit_event("persisted_result", {
+                    "persisted": True, "target_id": c.id,
+                }, stage="cli.persist")
             processed += 1
             total += outcome.count
             if verbose:
@@ -1220,7 +1246,7 @@ def _run_summarize(db, client, url, dept, year, limit, refresh, verbose, delay):
 
     print(f"Summarizing {len(circulars)} circulars...")
     processed, _ = _run_ai_batch(
-        db, circulars, process=process, skip=skip,
+        db, circulars, operation="circular.summary", process=process, skip=skip,
         verbose=verbose, delay=delay,
     )
     print(f"\nSummarized {processed}/{len(circulars)} circulars.")
@@ -1251,7 +1277,7 @@ def _run_tags(db, client, url, dept, year, limit, refresh, verbose, delay):
 
     print(f"Tagging {len(circulars)} circulars...")
     processed, _ = _run_ai_batch(
-        db, circulars, process=process, skip=skip,
+        db, circulars, operation="circular.tags", process=process, skip=skip,
         verbose=verbose, delay=delay,
     )
     print(f"\nTagged {processed}/{len(circulars)} circulars.")
@@ -1351,13 +1377,22 @@ def _run_attachment_checklist(db, client, attachment_id, verbose, delay):
         f"Diagnostic checklist run for {attachment.filename} ({attachment.id}).\n"
         "This attachment-only result will not overwrite the circular checklist."
     )
-    result = client.generate_checklist(
-        attachment.circular,
-        delay=delay,
-        trace_callback=_diagnostic_trace_printer() if verbose else None,
-        documents=[document],
-        gaps=[],
-    )
+    with trace_operation(
+        "circular.checklist", "cli", target_kind="attachment",
+        target_id=attachment.id, command_name="circulars checklist",
+        metadata={"diagnostic_attachment_only": True},
+    ):
+        result = client.generate_checklist(
+            attachment.circular,
+            delay=delay,
+            trace_callback=_diagnostic_trace_printer() if verbose else None,
+            documents=[document],
+            gaps=[],
+        )
+        emit_event("normalized_result", result, stage="cli.result")
+        emit_event("persisted_result", {
+            "persisted": False, "attachment_id": attachment.id,
+        }, stage="cli.result")
     click.echo("\n=== 5. FINAL CHECKLIST ===")
     click.echo(json.dumps(result, ensure_ascii=False, indent=2))
     return result
@@ -1409,7 +1444,7 @@ def _run_checklist(db, client, url, dept, year, limit, refresh, verbose, delay):
     print(f"Generating checklists for {len(circulars)} circulars...")
     # The per-call delay is handled inside generate_checklist, so the driver does not sleep.
     processed, _ = _run_ai_batch(
-        db, circulars, process=process,
+        db, circulars, operation="circular.checklist", process=process,
         skip=skip, verbose=verbose, delay=delay, sleep_in_loop=False,
     )
     print(f"\nGenerated checklists for {processed}/{len(circulars)} circulars.")
@@ -1460,7 +1495,7 @@ def _run_relationships(db, client, url, dept, year, limit, refresh, verbose, del
 
     print(f"Extracting relationships for {len(circulars)} circulars...")
     processed, total_rels = _run_ai_batch(
-        db, circulars, process=process,
+        db, circulars, operation="circular.relationships", process=process,
         skip=lambda c: not c.content_text, verbose=verbose, delay=delay,
     )
     print(f"\nExtracted {total_rels} relationships from {processed}/{len(circulars)} circulars.")
@@ -1511,7 +1546,7 @@ def _run_entities(db, client, circular_id, dept, year, limit, refresh, verbose, 
     print(f"Extracting regulatory values for {len(circulars)} circular(s)...")
     # extract_entities handles its own per-block delay, so the driver does not sleep.
     processed, total = _run_ai_batch(
-        db, circulars, process=process, skip=skip,
+        db, circulars, operation="circular.entities", process=process, skip=skip,
         verbose=verbose, delay=delay, sleep_in_loop=False,
     )
     print(f"\nExtracted {total} values from {processed}/{len(circulars)} circular(s).")
@@ -2005,6 +2040,7 @@ def _run_laws_feature(
 
         client = get_ai_client(db)
         processed = skipped = failed = 0
+        invocation_id = str(uuid.uuid4())
         reasons: dict[str, int] = {}
 
         def note(reason: str) -> None:
@@ -2037,15 +2073,30 @@ def _run_laws_feature(
                     continue
 
             try:
-                if container:
-                    outputs = _compute_container_outputs(client, db, document, feature)
-                else:
-                    outputs = _compute_outputs(
-                        client, db, document, document.current_version,
-                        corpus, gaps, feature,
-                    )
-                _persist_outputs(db, document, document.current_version, outputs)
-                db.commit()
+                with trace_operation(
+                    f"law.{feature}", "cli", target_kind="law",
+                    target_id=document.id, command_name=f"laws {feature}",
+                    metadata={
+                        "invocation_id": invocation_id,
+                        "version_id": (
+                            document.current_version.id if document.current_version else None
+                        ),
+                    },
+                ):
+                    if container:
+                        outputs = _compute_container_outputs(client, db, document, feature)
+                    else:
+                        outputs = _compute_outputs(
+                            client, db, document, document.current_version,
+                            corpus, gaps, feature,
+                        )
+                    emit_event("normalized_result", outputs, stage="cli.result")
+                    _persist_outputs(db, document, document.current_version, outputs)
+                    db.commit()
+                    emit_event("persisted_result", {
+                        "persisted": True, "target_id": document.id,
+                        "features": list(outputs),
+                    }, stage="cli.persist")
                 processed += 1
                 if verbose:
                     print(f"  [OK] {label}")

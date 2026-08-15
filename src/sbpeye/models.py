@@ -1,5 +1,5 @@
 from sqlalchemy import (
-    Column, Integer, String, Text, DateTime, ForeignKey, Float, UniqueConstraint, or_,
+    Column, Integer, String, Text, DateTime, ForeignKey, Float, Index, UniqueConstraint, or_,
 )
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -527,6 +527,60 @@ class Settings(Base):
 
     key = Column(String, primary_key=True, index=True)
     value = Column(Text)
+
+
+class LLMTrace(Base):
+    """Durable summary row for one logical text-generation operation."""
+
+    __tablename__ = "llm_traces"
+
+    id = Column(String, primary_key=True)
+    schema_version = Column(Integer, nullable=False, default=1)
+    operation = Column(String, nullable=False, index=True)
+    origin = Column(String, nullable=False, index=True)
+    status = Column(String, nullable=False, default="running", index=True)
+    provider = Column(String, nullable=True, index=True)
+    model = Column(String, nullable=True, index=True)
+    job_id = Column(String, nullable=True, index=True)
+    chat_session_id = Column(String, nullable=True, index=True)
+    target_kind = Column(String, nullable=True)
+    target_id = Column(String, nullable=True, index=True)
+    command_name = Column(String, nullable=True)
+    metadata_json = Column(Text, nullable=False, default="{}")
+    attempt_count = Column(Integer, nullable=False, default=0)
+    prompt_tokens = Column(Integer, nullable=True)
+    completion_tokens = Column(Integer, nullable=True)
+    total_tokens = Column(Integer, nullable=True)
+    payload_bytes = Column(Integer, nullable=False, default=0)
+    error_type = Column(String, nullable=True)
+    error_message = Column(Text, nullable=True)
+    started_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    completed_at = Column(DateTime, nullable=True)
+    duration_ms = Column(Integer, nullable=True)
+
+
+class LLMTraceEvent(Base):
+    """Append-only event in an :class:`LLMTrace` timeline."""
+
+    __tablename__ = "llm_trace_events"
+    __table_args__ = (
+        UniqueConstraint("trace_id", "sequence", name="uq_llm_trace_event_sequence"),
+        Index("ix_llm_trace_event_trace_sequence", "trace_id", "sequence"),
+        Index("ix_llm_trace_event_trace_id", "trace_id", "id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trace_id = Column(String, nullable=False, index=True)
+    sequence = Column(Integer, nullable=False)
+    kind = Column(String, nullable=False, index=True)
+    stage = Column(String, nullable=True)
+    attempt_id = Column(String, nullable=True, index=True)
+    attempt_number = Column(Integer, nullable=True)
+    payload_json = Column(Text, nullable=False)
+    payload_bytes = Column(Integer, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    elapsed_ms = Column(Integer, nullable=True)
 
 
 def upsert_settings(db, values: dict[str, str]) -> None:

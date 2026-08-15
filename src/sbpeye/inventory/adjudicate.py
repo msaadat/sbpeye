@@ -12,6 +12,7 @@ audit what was rejected and why.
 
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass
 
 from .llm import field_of_type
@@ -170,7 +171,10 @@ def adjudicate(
 
     results: dict[int, Verdict] = {}
     with ThreadPoolExecutor(max_workers=max(1, max_workers)) as pool:
-        for batch_result in pool.map(lambda b: _judge_batch(llm, query, b), batches):
+        tasks = [(copy_context(), batch) for batch in batches]
+        for batch_result in pool.map(
+            lambda item: item[0].run(_judge_batch, llm, query, item[1]), tasks
+        ):
             results.update(batch_result)
 
     return [

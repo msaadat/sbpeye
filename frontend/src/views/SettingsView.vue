@@ -8,7 +8,9 @@ import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
 import Password from 'primevue/password'
 import Select from 'primevue/select'
+import ToggleSwitch from 'primevue/toggleswitch'
 import { getProviderModels, getSettings, saveSettings, testEmbeddingConnection, testSettingsConnection } from '@/lib/api'
+import { useLlmDebugState } from '@/lib/useLlmDebugState'
 
 type ProviderOption = {
   name: string
@@ -24,6 +26,7 @@ type ModelSelectOption = {
 }
 
 const toast = useToast()
+const { state: llmDebugState, refreshLlmDebugState, setLlmDebugState } = useLlmDebugState()
 
 const loading = ref(true)
 const saving = ref(false)
@@ -51,6 +54,8 @@ const embeddingApiKeyConfigured = ref(false)
 const embeddingApiKeyEnvVar = ref('EMBEDDING_API_KEY')
 const clearEmbeddingApiKey = ref(false)
 const managedEnvFile = ref('.env.local')
+const llmDebugAllowed = ref(true)
+const llmDebugEnabled = ref(false)
 const discoveredModels = ref<ModelSelectOption[]>([])
 let modelRefreshTimer: ReturnType<typeof setTimeout> | undefined
 let modelRefreshRequestId = 0
@@ -157,6 +162,14 @@ async function loadSettings() {
     embeddingApiKeyEnvVar.value = settings.embedding_api_key_env_var || 'EMBEDDING_API_KEY'
     clearEmbeddingApiKey.value = false
     managedEnvFile.value = settings.managed_env_file || '.env.local'
+    llmDebugAllowed.value = settings.llm_debug_allowed !== false
+    llmDebugEnabled.value = !!settings.llm_debug_enabled
+    setLlmDebugState({
+      allowed: llmDebugAllowed.value,
+      enabled: llmDebugEnabled.value,
+      effective: !!settings.llm_debug_effective,
+    })
+    void refreshLlmDebugState()
     shouldRefreshModels = true
   } catch (err) {
     loadError.value = err instanceof Error ? err.message : 'Failed to load settings'
@@ -257,6 +270,7 @@ async function handleSave() {
       embedding_base_url: embeddingBaseUrl.value,
       embedding_api_key: embeddingApiKey.value,
       clear_embedding_api_key: clearEmbeddingApiKey.value,
+      llm_debug_enabled: llmDebugEnabled.value,
     })
 
     apiKey.value = ''
@@ -269,6 +283,14 @@ async function handleSave() {
     embeddingApiKeyEnvVar.value = result.settings.embedding_api_key_env_var || 'EMBEDDING_API_KEY'
     clearEmbeddingApiKey.value = false
     managedEnvFile.value = result.settings.managed_env_file || '.env.local'
+    llmDebugAllowed.value = result.settings.llm_debug_allowed !== false
+    llmDebugEnabled.value = !!result.settings.llm_debug_enabled
+    setLlmDebugState({
+      allowed: llmDebugAllowed.value,
+      enabled: llmDebugEnabled.value,
+      effective: !!result.settings.llm_debug_effective,
+    })
+    void refreshLlmDebugState()
 
     toast.add({ severity: 'success', summary: 'Saved', detail: result.message, life: 3000 })
   } catch (err) {
@@ -452,6 +474,35 @@ onMounted(() => {
             :disabled="loading || saving"
             @click="markApiKeyForRemoval"
           />
+        </div>
+      </template>
+    </Card>
+
+    <Card class="glass-panel">
+      <template #title>LLM debug tracing</template>
+      <template #content>
+        <div class="debug-setting-row">
+          <div>
+            <strong>Enable LLM tracing</strong>
+            <p>Capture provider requests, responses, retries, tool activity, parsed output, and errors.</p>
+          </div>
+          <ToggleSwitch
+            v-model="llmDebugEnabled"
+            :disabled="loading || !llmDebugAllowed"
+            aria-label="Enable LLM tracing"
+          />
+        </div>
+        <Message v-if="!llmDebugAllowed" severity="warn" :closable="false">
+          Set <code>LLM_DEBUG_ALLOWED=true</code> on the server to allow tracing.
+        </Message>
+        <Message severity="warn" :closable="false">
+          Traces can contain full chat history, prompts, retrieved context, tool results, responses, and tracebacks. They are stored in <code>sbpeye.db</code> without automatic retention.
+        </Message>
+        <div v-if="llmDebugState.effective" class="button-row">
+          <RouterLink to="/debug">Open debug console</RouterLink>
+          <span v-if="llmDebugState.trace_count !== undefined">
+            {{ llmDebugState.trace_count.toLocaleString() }} traces · {{ ((llmDebugState.payload_bytes || 0) / 1024).toFixed(1) }} KiB
+          </span>
         </div>
       </template>
     </Card>

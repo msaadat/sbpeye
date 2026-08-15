@@ -18,6 +18,7 @@ from typing import Any
 
 from .ai import get_ai_client
 from .database import SessionLocal
+from .llm_debug import emit_event, trace_operation
 from .laws_links import (
     find_law_references,
     identifying_names,
@@ -556,7 +557,7 @@ def _persist_outputs(
         version.relationships_generated_at = generated_at
 
 
-def run_law_generation_job(job_id: str) -> None:
+def _run_law_generation_job(job_id: str) -> None:
     """Background worker for a law analysis job. Mirrors `circular_ai.run_generation_job`."""
     db = SessionLocal()
     try:
@@ -606,6 +607,12 @@ def run_law_generation_job(job_id: str) -> None:
             job.result_status = outputs["checklist"].get("status")
         job.completed_at = datetime.utcnow()
         db.commit()
+        emit_event("normalized_result", outputs, stage="generation.result")
+        emit_event("persisted_result", {
+            "persisted": True, "job_id": job.id, "target_id": document.id,
+            "version_id": version.id if version else None,
+            "features": list(outputs),
+        }, stage="generation.persist")
     except Exception as exc:
         db.rollback()
         job = db.query(AIGenerationJob).filter(AIGenerationJob.id == job_id).first()
@@ -614,5 +621,28 @@ def run_law_generation_job(job_id: str) -> None:
             job.error = str(exc)
             job.completed_at = datetime.utcnow()
             db.commit()
+        raise
     finally:
         db.close()
+
+
+def run_law_generation_job(job_id: str) -> None:
+    """Run one law web job inside a durable, correlated logical trace."""
+    db = SessionLocal()
+    try:
+        job = db.query(AIGenerationJob).filter(AIGenerationJob.id == job_id).first()
+        if not job:
+            return
+        operation = f"law.{job.feature}"
+        target_id = job.document_id
+        metadata = {"feature": job.feature}
+    finally:
+        db.close()
+    try:
+        with trace_operation(
+            operation, "web_generation", job_id=job_id,
+            target_kind="law", target_id=target_id, metadata=metadata,
+        ):
+            _run_law_generation_job(job_id)
+    except Exception:
+        return

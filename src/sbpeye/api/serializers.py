@@ -581,9 +581,13 @@ def _get_workspace_for_chat_session(
 
 # --- Settings ---
 
-def _settings_payload(config: AIConfig, embedding: EmbeddingConfig) -> dict:
+def _settings_payload(config: AIConfig, embedding: EmbeddingConfig, db=None) -> dict:
+    from ..llm_debug import debug_allowed, debug_setting_enabled
+
     ai_secret = AIConfig.secret_state(config.provider)
     embedding_secret = EmbeddingConfig.secret_state(embedding.provider)
+    debug_is_allowed = debug_allowed()
+    debug_is_enabled = debug_setting_enabled(db)
     return {
         "provider": config.provider,
         "base_url": config.base_url,
@@ -606,6 +610,9 @@ def _settings_payload(config: AIConfig, embedding: EmbeddingConfig) -> dict:
         "embedding_api_key_configured": embedding_secret["api_key_configured"],
         "embedding_api_key_env_var": embedding_secret["api_key_env_var"],
         "managed_env_file": str(managed_env_path().name),
+        "llm_debug_allowed": debug_is_allowed,
+        "llm_debug_enabled": debug_is_enabled,
+        "llm_debug_effective": debug_is_allowed and debug_is_enabled,
     }
 
 

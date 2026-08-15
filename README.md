@@ -85,6 +85,20 @@ Environment variables:
 - `AI_MODEL`
 - `AI_CHAT_MODEL`
 
+### LLM debug console
+
+The Settings page can opt in to persistent LLM tracing. When enabled, `/debug`
+shows complete provider-facing text-generation requests, reconstructed responses,
+retries, tool activity, parsing, and persistence events. Traces are stored in
+`sbpeye.db`, may contain full prompts/chat context and tracebacks, and are retained
+until manually deleted from the console; there is no automatic pruning.
+
+`LLM_DEBUG_ALLOWED` is the operator gate and defaults to `true`. Set it to `false`
+to disable new trace capture, hide the console navigation, and make trace-data APIs
+return 404 regardless of the saved Settings preference. Operations already being
+captured finish their traces. On startup, traces left running by a process restart
+are marked failed as interrupted.
+
 ## CLI Usage
 
 The package exposes a CLI entry point as `sbpeye`.

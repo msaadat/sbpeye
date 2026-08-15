@@ -8,9 +8,11 @@ import Toast from 'primevue/toast'
 import { useToast } from 'primevue/usetoast'
 import SbpNewsPanel from '@/components/SbpNewsPanel.vue'
 import { getAppStatus, getLlmStatus, startCircularSync, type ApiError, type AppStatus, type CircularSyncStatus, type LlmStatus } from '@/lib/api'
+import { useLlmDebugState } from '@/lib/useLlmDebugState'
 
 const route = useRoute()
 const toast = useToast()
+const { state: llmDebugState, refreshLlmDebugState } = useLlmDebugState()
 const darkMode = ref(localStorage.getItem('sbpeye-theme') === 'dark')
 const status = ref<AppStatus | null>(null)
 const statusLoading = ref(false)
@@ -58,6 +60,12 @@ const navItems = computed(() => [
     route: '/settings',
     active: route.path.startsWith('/settings'),
   },
+  ...(llmDebugState.value.effective ? [{
+    label: 'Debug',
+    icon: 'pi pi-desktop',
+    route: '/debug',
+    active: route.path.startsWith('/debug'),
+  }] : []),
 ])
 
 const statusLabel = computed(() => {
@@ -327,6 +335,7 @@ onMounted(() => {
   syncThemeClass()
   void loadStatus()
   void loadLlmStatus()
+  void refreshLlmDebugState()
 })
 
 onBeforeUnmount(() => {

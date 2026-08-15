@@ -466,6 +466,87 @@ export interface SettingsPayload {
   embedding_api_key_env_var?: string
   clear_embedding_api_key?: boolean
   managed_env_file?: string
+  llm_debug_allowed?: boolean
+  llm_debug_enabled?: boolean
+  llm_debug_effective?: boolean
+}
+
+export interface LlmDebugStatus {
+  allowed: boolean
+  enabled: boolean
+  effective: boolean
+  trace_count?: number
+  payload_bytes?: number
+}
+
+export interface LlmTraceSummary {
+  id: string
+  schema_version: number
+  operation: string
+  origin: string
+  status: 'running' | 'succeeded' | 'failed' | 'cancelled'
+  provider?: string | null
+  model?: string | null
+  job_id?: string | null
+  chat_session_id?: string | null
+  target_kind?: string | null
+  target_id?: string | null
+  command_name?: string | null
+  metadata: Record<string, unknown>
+  attempt_count: number
+  prompt_tokens?: number | null
+  completion_tokens?: number | null
+  total_tokens?: number | null
+  payload_bytes: number
+  error_type?: string | null
+  error_message?: string | null
+  started_at: string
+  updated_at: string
+  completed_at?: string | null
+  duration_ms?: number | null
+}
+
+export interface LlmTraceEvent {
+  id: number
+  trace_id: string
+  sequence: number
+  kind: string
+  stage?: string | null
+  attempt_id?: string | null
+  attempt_number?: number | null
+  payload: unknown
+  payload_bytes: number
+  created_at: string
+  elapsed_ms?: number | null
+}
+
+export interface LlmTraceDetail {
+  trace: LlmTraceSummary
+  events: LlmTraceEvent[]
+  last_sequence: number
+  status: LlmTraceSummary['status']
+}
+
+export interface LlmTraceFilters {
+  status?: string
+  operation?: string
+  origin?: string
+  provider?: string
+  model?: string
+  correlation?: string
+  page?: number
+  per_page?: number
+}
+
+export interface LlmTraceListResponse extends PaginatedResponse<LlmTraceSummary> {
+  latest_event_id: number
+  facets: {
+    statuses: string[]
+    operations: string[]
+    origins: string[]
+    providers: string[]
+    models: string[]
+  }
 }
 
 export interface ProviderModelOption {
@@ -816,6 +897,26 @@ export function buildPdfProxyUrl(url: string): string {
 
 export async function getSettings(): Promise<SettingsPayload> {
   return requestJson<SettingsPayload>('/settings')
+}
+
+export async function getLlmDebugStatus(): Promise<LlmDebugStatus> {
+  return requestJson<LlmDebugStatus>('/debug/status')
+}
+
+export async function getLlmTraces(filters: LlmTraceFilters = {}, signal?: AbortSignal): Promise<LlmTraceListResponse> {
+  return requestJson<LlmTraceListResponse>(`/debug/traces${toQueryString({ ...filters })}`, { signal })
+}
+
+export async function getLlmTrace(id: string, afterSequence = 0, signal?: AbortSignal): Promise<LlmTraceDetail> {
+  return requestJson<LlmTraceDetail>(`/debug/traces/${encodeURIComponent(id)}${toQueryString({ after_sequence: afterSequence })}`, { signal })
+}
+
+export async function deleteLlmTrace(id: string): Promise<{ deleted: number }> {
+  return requestJson<{ deleted: number }>(`/debug/traces/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+export async function deleteAllLlmTraces(): Promise<{ deleted: number; skipped_running: number }> {
+  return requestJson<{ deleted: number; skipped_running: number }>('/debug/traces', { method: 'DELETE' })
 }
 
 export async function saveSettings(payload: SettingsPayload): Promise<{ message: string; settings: SettingsPayload; context_window_detected: boolean }> {

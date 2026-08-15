@@ -8,6 +8,7 @@ from .ai import get_ai_client
 from .database import SessionLocal
 from .link_routing import resolve_reference_in_context
 from .models import AIGenerationJob, Circular, CircularEntity, CircularRelationship
+from .llm_debug import emit_event, trace_operation
 
 
 GENERATION_FEATURES = ("summary", "tags", "checklist", "relationships", "entities")
@@ -174,7 +175,7 @@ def _persist_outputs(db: Session, circular: Circular, outputs: dict, client=None
         circular.entities_generated_at = generated_at
 
 
-def run_generation_job(job_id: str) -> None:
+def _run_generation_job(job_id: str) -> None:
     db = SessionLocal()
     try:
         job = db.query(AIGenerationJob).filter(AIGenerationJob.id == job_id).first()
@@ -203,10 +204,12 @@ def run_generation_job(job_id: str) -> None:
         if job.feature == "consolidation":
             # Chain-level: computes and upserts its own row (consolidation.py).
             from .consolidation import generate_consolidation
-            generate_consolidation(
+            consolidation = generate_consolidation(
                 db, client, circular, progress_callback=update_progress
             )
-            outputs = {}
+            outputs = {
+                "consolidation": json.loads(consolidation.requirements or "[]")
+            }
         else:
             outputs = _compute_outputs(
                 client,
@@ -220,6 +223,11 @@ def run_generation_job(job_id: str) -> None:
             job.result_status = outputs["checklist"].get("status")
         job.completed_at = datetime.utcnow()
         db.commit()
+        emit_event("normalized_result", outputs, stage="generation.result")
+        emit_event("persisted_result", {
+            "persisted": True, "job_id": job.id, "target_id": circular.id,
+            "features": list(outputs),
+        }, stage="generation.persist")
     except Exception as exc:
         db.rollback()
         job = db.query(AIGenerationJob).filter(AIGenerationJob.id == job_id).first()
@@ -228,8 +236,31 @@ def run_generation_job(job_id: str) -> None:
             job.error = str(exc)
             job.completed_at = datetime.utcnow()
             db.commit()
+        raise
     finally:
         db.close()
+
+
+def run_generation_job(job_id: str) -> None:
+    """Run one web job inside a durable, correlated logical trace."""
+    db = SessionLocal()
+    try:
+        job = db.query(AIGenerationJob).filter(AIGenerationJob.id == job_id).first()
+        if not job:
+            return
+        operation = f"circular.{job.feature}"
+        target_id = job.circular_id
+        metadata = {"feature": job.feature}
+    finally:
+        db.close()
+    try:
+        with trace_operation(
+            operation, "web_generation", job_id=job_id,
+            target_kind="circular", target_id=target_id, metadata=metadata,
+        ):
+            _run_generation_job(job_id)
+    except Exception:
+        return
 
 
 def generation_job_payload(job: AIGenerationJob) -> dict:

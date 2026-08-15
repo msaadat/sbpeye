@@ -3026,7 +3026,303 @@ a {
   }
 }
 
+.debug-setting-row,
+.debug-pane-heading,
+.debug-row-top,
+.debug-row-meta,
+.debug-event-heading,
+.debug-trace-header,
+.debug-pagination,
+.json-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.debug-setting-row {
+  justify-content: space-between;
+}
+
+.debug-setting-row p {
+  color: var(--sbp-muted);
+  margin: 0.3rem 0 0;
+}
+
+.debug-filters {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(8rem, 1fr)) minmax(17rem, 2fr) auto;
+  gap: 0.5rem;
+  padding: 0.75rem;
+}
+
+.debug-console {
+  display: grid;
+  grid-template-columns: minmax(19rem, 29rem) minmax(0, 1fr);
+  height: calc(100vh - 16.5rem);
+  min-height: 34rem;
+  overflow: hidden;
+}
+
+.debug-timeline,
+.debug-inspector {
+  min-height: 0;
+  overflow: auto;
+}
+
+.debug-timeline {
+  border-right: 1px solid var(--sbp-border);
+}
+
+.debug-pane-heading,
+.debug-trace-header {
+  justify-content: space-between;
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid var(--sbp-border);
+}
+
+.debug-pane-heading span,
+.debug-muted,
+.debug-row-meta,
+.debug-event-heading time {
+  color: var(--sbp-muted);
+  font-size: var(--sbp-fs-meta);
+}
+
+.debug-trace-row {
+  appearance: none;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.35rem;
+  padding: 0.8rem 1rem;
+  color: var(--sbp-text);
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--sbp-border);
+  text-align: left;
+  cursor: pointer;
+}
+
+.debug-trace-row:hover,
+.debug-trace-row.is-selected {
+  background: var(--sbp-subtle);
+}
+
+.debug-trace-row.is-selected {
+  box-shadow: inset 3px 0 var(--sbp-green);
+}
+
+.debug-status {
+  padding: 0.16rem 0.45rem;
+  border-radius: var(--sbp-radius-pill);
+  font-size: var(--sbp-fs-eyebrow);
+  font-weight: 700;
+  text-transform: uppercase;
+  background: var(--sbp-subtle);
+}
+
+.debug-status.is-running { color: var(--sbp-green-text); }
+.debug-status.is-succeeded { color: var(--sbp-success); }
+.debug-status.is-failed { color: var(--sbp-danger); }
+.debug-status.is-cancelled { color: var(--sbp-warning); }
+
+.debug-id {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--sbp-muted);
+  font: 0.68rem ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.debug-pagination {
+  justify-content: center;
+  padding: 0.65rem;
+}
+
+.debug-trace-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--sbp-surface);
+}
+
+.debug-trace-header h2,
+.debug-trace-header p {
+  margin: 0;
+}
+
+.debug-trace-header p {
+  color: var(--sbp-muted);
+  font-size: var(--sbp-fs-sm);
+  margin-block: 0.35rem;
+}
+
+.debug-event-rail {
+  padding: 1rem;
+}
+
+.debug-event {
+  position: relative;
+  margin: 0 0 0.8rem 0.55rem;
+  padding: 0.75rem;
+  border: 1px solid var(--sbp-border);
+  border-left: 3px solid var(--sbp-green);
+  border-radius: var(--sbp-radius);
+  background: var(--sbp-surface);
+}
+
+.debug-event.is-error { border-left-color: var(--sbp-danger); }
+.debug-event.is-warn { border-left-color: var(--sbp-warning); }
+.debug-event.is-response { border-left-color: var(--sbp-success); }
+
+.debug-event-heading {
+  flex-wrap: wrap;
+  margin-bottom: 0.55rem;
+  font-size: var(--sbp-fs-sm);
+}
+
+.debug-event-heading time {
+  margin-left: auto;
+}
+
+.debug-event-sequence,
+.debug-event-heading > span:not(.debug-event-sequence) {
+  color: var(--sbp-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.debug-empty {
+  padding: 2rem;
+  color: var(--sbp-muted);
+  text-align: center;
+}
+
+.debug-live {
+  color: var(--sbp-green-text);
+  font-size: var(--sbp-fs-sm);
+}
+
+.debug-live span {
+  display: inline-block;
+  width: 0.55rem;
+  height: 0.55rem;
+  margin-right: 0.35rem;
+  border-radius: 50%;
+  background: var(--sbp-green);
+  animation: debug-pulse 1.2s infinite;
+}
+
+@keyframes debug-pulse { 50% { opacity: 0.25; } }
+
+.json-inspector {
+  min-width: 0;
+  font: 0.76rem/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.json-node,
+.json-primitive-row {
+  min-width: 0;
+}
+
+.json-disclosure,
+.json-inline-action,
+.json-actions button {
+  appearance: none;
+  padding: 0.1rem 0.25rem;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: var(--sbp-radius-sm);
+  font: inherit;
+  cursor: pointer;
+}
+
+.json-disclosure:focus-visible,
+.json-inline-action:focus-visible,
+.json-actions button:focus-visible {
+  outline: 2px solid var(--sbp-green);
+  outline-offset: 2px;
+}
+
+.json-children {
+  margin-left: 1.15rem;
+  padding-left: 0.55rem;
+  border-left: 1px dotted var(--sbp-border);
+}
+
+.json-key { color: #806000; font-weight: 600; }
+.json-primitive.is-string { color: var(--sbp-green-text); white-space: pre-wrap; overflow-wrap: anywhere; }
+.json-primitive.is-number { color: #8a4bc2; }
+.json-primitive.is-boolean { color: #176ca8; }
+.json-primitive.is-object { color: var(--sbp-muted); }
+.json-count { color: var(--sbp-muted); font-style: italic; }
+.json-close { margin-left: 0.25rem; }
+.json-inline-action { color: var(--sbp-green-text); text-decoration: underline; }
+
+:root.sbpeye-dark .json-key { color: #e0bd5c; }
+:root.sbpeye-dark .json-primitive.is-number { color: #d29bea; }
+:root.sbpeye-dark .json-primitive.is-boolean { color: #80bfe8; }
+
+.json-actions {
+  margin-top: 0.5rem;
+}
+
+.json-actions button {
+  color: var(--sbp-green-text);
+  border: 1px solid var(--sbp-border);
+}
+
+.json-raw {
+  max-height: 32rem;
+  overflow: auto;
+  padding: 0.75rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--sbp-text);
+  background: var(--sbp-subtle);
+  border-radius: var(--sbp-radius);
+}
+
+@media (max-width: 1100px) {
+  .debug-filters {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .debug-console {
+    grid-template-columns: 22rem minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 800px) {
+  .debug-console {
+    display: flex;
+    flex-direction: column;
+    height: auto;
+    min-height: 0;
+  }
+
+  .debug-timeline {
+    max-height: 26rem;
+    border-right: 0;
+    border-bottom: 1px solid var(--sbp-border);
+  }
+
+  .debug-inspector {
+    max-height: none;
+  }
+
+  .debug-trace-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
 @media (max-width: 680px) {
+  .debug-filters {
+    grid-template-columns: 1fr;
+  }
   .workspace-tab {
     max-width: 10rem;
   }

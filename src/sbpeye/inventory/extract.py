@@ -13,6 +13,7 @@ Every extraction is verified, and an unverifiable one falls back to the whole ch
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass
 
 from .llm import field_of_type
@@ -104,7 +105,10 @@ def extract_spans(
         return [Extraction("", False) for _ in passages]
 
     with ThreadPoolExecutor(max_workers=max(1, max_workers)) as pool:
-        return list(pool.map(lambda p: _extract_one(llm, query, p), passages))
+        tasks = [(copy_context(), passage) for passage in passages]
+        return list(pool.map(
+            lambda item: item[0].run(_extract_one, llm, query, item[1]), tasks
+        ))
 
 
 def resolve_locator(metadata: dict) -> dict:

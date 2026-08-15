@@ -1,10 +1,12 @@
 """CLI adapter for inventory search. Transport only — no search logic lives here."""
 
 import json
+from contextlib import nullcontext
 
 import click
 
 from sbpeye.database import SessionLocal
+from sbpeye.llm_debug import trace_operation
 
 
 @click.group("inventory")
@@ -195,7 +197,16 @@ def inventory_search(query, source, band, max_candidates, max_results, no_llm,
         service = InventorySearchService(
             collection, embedding_backend, embedding_config, llm=llm
         )
-        response = service.search(request, db)
+        trace_scope = (
+            trace_operation(
+                "inventory.search", "cli", target_kind="inventory",
+                command_name="inventory search",
+                metadata={"query": query, "source": source},
+            )
+            if not no_llm else nullcontext()
+        )
+        with trace_scope:
+            response = service.search(request, db)
     except InventoryError as exc:
         raise click.ClickException(f"[{exc.code}] {exc}") from exc
     finally:

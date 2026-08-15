@@ -12,6 +12,7 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 from ..models import Circular, RegDocument
+from ..llm_debug import emit_event, trace_operation
 from . import adjudicate as adjudicate_module
 from . import extract as extract_module
 from .adjudicate import VERDICT_INCLUDED, VERDICT_UNDETERMINED, adjudicate
@@ -116,6 +117,23 @@ class InventorySearchService:
     # ------------------------------------------------------------------ main
 
     def search(
+        self, request: InventorySearchRequest, db: Session
+    ) -> InventorySearchResponse:
+        if self._llm is None:
+            return self._search(request, db)
+        with trace_operation(
+            "inventory.search", "implicit", target_kind="inventory",
+            metadata={"query": request.query},
+        ):
+            response = self._search(request, db)
+            payload = response.to_dict() if hasattr(response, "to_dict") else response
+            emit_event("normalized_result", payload, stage="inventory.result")
+            emit_event("persisted_result", {
+                "persisted": False, "result": payload,
+            }, stage="inventory.result")
+            return response
+
+    def _search(
         self, request: InventorySearchRequest, db: Session
     ) -> InventorySearchResponse:
         request.validate()

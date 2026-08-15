@@ -394,6 +394,49 @@ def _ensure_columns(bind=None):
         ):
             conn.execute(text(statement))
 
+        # LLM diagnostics are deliberately explicit DDL: CLI-only processes can reach
+        # this migration before models.py has registered the ORM declarations.
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS llm_traces ("
+            "id VARCHAR PRIMARY KEY, schema_version INTEGER NOT NULL DEFAULT 1, "
+            "operation VARCHAR NOT NULL, origin VARCHAR NOT NULL, "
+            "status VARCHAR NOT NULL DEFAULT 'running', provider VARCHAR, model VARCHAR, "
+            "job_id VARCHAR, chat_session_id VARCHAR, target_kind VARCHAR, target_id VARCHAR, "
+            "command_name VARCHAR, metadata_json TEXT NOT NULL DEFAULT '{}', "
+            "attempt_count INTEGER NOT NULL DEFAULT 0, prompt_tokens INTEGER, "
+            "completion_tokens INTEGER, total_tokens INTEGER, "
+            "payload_bytes INTEGER NOT NULL DEFAULT 0, error_type VARCHAR, error_message TEXT, "
+            "started_at DATETIME NOT NULL, updated_at DATETIME NOT NULL, "
+            "completed_at DATETIME, duration_ms INTEGER)"
+        ))
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS llm_trace_events ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, trace_id VARCHAR NOT NULL, "
+            "sequence INTEGER NOT NULL, kind VARCHAR NOT NULL, stage VARCHAR, "
+            "attempt_id VARCHAR, attempt_number INTEGER, payload_json TEXT NOT NULL, "
+            "payload_bytes INTEGER NOT NULL, created_at DATETIME NOT NULL, elapsed_ms INTEGER, "
+            "CONSTRAINT uq_llm_trace_event_sequence UNIQUE (trace_id, sequence))"
+        ))
+        for statement in (
+            "CREATE INDEX IF NOT EXISTS ix_llm_traces_operation ON llm_traces (operation)",
+            "CREATE INDEX IF NOT EXISTS ix_llm_traces_origin ON llm_traces (origin)",
+            "CREATE INDEX IF NOT EXISTS ix_llm_traces_status ON llm_traces (status)",
+            "CREATE INDEX IF NOT EXISTS ix_llm_traces_provider ON llm_traces (provider)",
+            "CREATE INDEX IF NOT EXISTS ix_llm_traces_model ON llm_traces (model)",
+            "CREATE INDEX IF NOT EXISTS ix_llm_traces_job_id ON llm_traces (job_id)",
+            "CREATE INDEX IF NOT EXISTS ix_llm_traces_chat_session_id ON llm_traces (chat_session_id)",
+            "CREATE INDEX IF NOT EXISTS ix_llm_traces_target_id ON llm_traces (target_id)",
+            "CREATE INDEX IF NOT EXISTS ix_llm_traces_started_at ON llm_traces (started_at)",
+            "CREATE INDEX IF NOT EXISTS ix_llm_traces_updated_at ON llm_traces (updated_at)",
+            "CREATE INDEX IF NOT EXISTS ix_llm_trace_events_trace_id ON llm_trace_events (trace_id)",
+            "CREATE INDEX IF NOT EXISTS ix_llm_trace_events_kind ON llm_trace_events (kind)",
+            "CREATE INDEX IF NOT EXISTS ix_llm_trace_events_attempt_id ON llm_trace_events (attempt_id)",
+            "CREATE INDEX IF NOT EXISTS ix_llm_trace_events_created_at ON llm_trace_events (created_at)",
+            "CREATE INDEX IF NOT EXISTS ix_llm_trace_event_trace_sequence ON llm_trace_events (trace_id, sequence)",
+            "CREATE INDEX IF NOT EXISTS ix_llm_trace_event_trace_id ON llm_trace_events (trace_id, id)",
+        ):
+            conn.execute(text(statement))
+
         # Persistent FTS5 lexical index for keyword search (see search.py). Rows are
         # maintained application-side (cells hold tokenize() output); this just ensures
         # the virtual table exists. Backfill happens lazily on first server start.

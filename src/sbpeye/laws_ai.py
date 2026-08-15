@@ -38,6 +38,12 @@ from .models import (
 # have no chain. Their equivalent is version diffing, which the plan defers.
 LAW_GENERATION_FEATURES = ("summary", "tags", "checklist", "entities", "relationships")
 LAW_GENERATION_ACTIONS = (*LAW_GENERATION_FEATURES, "all")
+# What "all" actually runs. The checklist is the most expensive feature here — one LLM
+# call per chunk, over documents that run to hundreds of pages — and is wanted far less
+# often than the rest, so it is opt-in: ask for `checklist` by name to get one.
+LAW_BULK_FEATURES = tuple(
+    item for item in LAW_GENERATION_FEATURES if item != "checklist"
+)
 
 
 # Why a document yielded no analysable text. The first five are structural — the corpus is
@@ -406,8 +412,15 @@ def _generate_relationships(
     return counts
 
 
-def _requested_features(feature: str, available: tuple[str, ...]) -> tuple[str, ...]:
-    """Expand `all`, and refuse a name nothing will act on.
+def _requested_features(
+    feature: str,
+    available: tuple[str, ...],
+    bulk: tuple[str, ...] | None = None,
+) -> tuple[str, ...]:
+    """Expand `all` to `bulk`, and refuse a name nothing will act on.
+
+    `bulk` is narrower than `available` where a feature is too expensive to run unasked:
+    it stays individually requestable without riding along on every `all`.
 
     Without this an unrecognised feature runs every branch, matches none, and returns no
     outputs — which a batch caller cannot tell apart from a document that legitimately
@@ -416,7 +429,7 @@ def _requested_features(feature: str, available: tuple[str, ...]) -> tuple[str, 
     and the feature is `summary`.
     """
     if feature == "all":
-        return available
+        return bulk if bulk is not None else available
     if feature not in available:
         raise ValueError(
             f"Unknown feature {feature!r}. Expected one of: {', '.join(available)}."
@@ -472,7 +485,9 @@ def _compute_outputs(
     feature: str,
     progress_callback=None,
 ) -> dict[str, Any]:
-    features = _requested_features(feature, LAW_GENERATION_FEATURES)
+    features = _requested_features(
+        feature, LAW_GENERATION_FEATURES, bulk=LAW_BULK_FEATURES
+    )
     label = law_analysis_label(document)
     subject = document.doc_type or "regulation"
     outputs: dict[str, Any] = {}

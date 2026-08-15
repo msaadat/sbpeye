@@ -217,7 +217,15 @@ function generationLabel(feature: GenerationFeature, label: string): string {
   return `${hasGenerated(feature) ? 'Regenerate' : 'Generate'} ${label}`
 }
 
-const allGenerated = computed(() => generationFeatures.every(({ feature }) => hasGenerated(feature)))
+/**
+ * What "Generate All" covers on the backend. The checklist is the priciest feature — one
+ * model call per chunk — so `all` skips it and it is generated on request instead.
+ */
+const BULK_FEATURES: GenerationFeature[] = generationFeatures
+  .map(({ feature }) => feature)
+  .filter((feature) => feature !== 'checklist')
+
+const allGenerated = computed(() => BULK_FEATURES.every((feature) => hasGenerated(feature)))
 const hasRelationships = computed(() =>
   Boolean(circular.value?.relationships.outgoing.length || circular.value?.relationships.incoming.length),
 )

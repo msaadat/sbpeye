@@ -473,8 +473,15 @@ function generationLabel(feature: LawGenerationFeature, label: string): string {
   return `${hasGenerated(feature) ? 'Regenerate' : 'Generate'} ${label}`
 }
 
+/**
+ * What "Generate All" covers on the backend. The checklist is the priciest feature — one
+ * model call per chunk of a document that can run to hundreds of pages — so `all` skips it
+ * and it is generated on request instead.
+ */
 const allGenerated = computed(() =>
-  generationFeatures.value.every(({ feature }) => hasGenerated(feature)),
+  generationFeatures.value
+    .filter(({ feature }) => feature !== 'checklist')
+    .every(({ feature }) => hasGenerated(feature)),
 )
 
 /**
@@ -1376,8 +1383,8 @@ onMounted(() => {
               <i class="pi pi-sparkles" />
               <p class="detail-rail-empty-title">No AI analysis yet</p>
               <p class="detail-rail-empty-text">
-                Generate a summary, tags, an obligations checklist and the regulatory values
-                this document states.
+                Generate a summary, tags, relationships and the regulatory values this
+                document states. The obligations checklist is generated separately.
               </p>
               <Button
                 icon="pi pi-sparkles"

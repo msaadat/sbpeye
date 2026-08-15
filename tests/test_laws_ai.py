@@ -387,7 +387,6 @@ def test_analysis_is_stored_against_the_edition_that_produced_it(monkeypatch):
     assert job.status == "succeeded", job.error
     assert stored.current_version.summary == "Summary of Prudential Regulations for SME Financing."
     assert json.loads(stored.current_version.tags) == ["Capital Adequacy"]
-    assert json.loads(stored.current_version.compliance_checklist)["status"] == "completed"
     # The document row stays clean: it is reserved for container rollups.
     assert stored.summary is None
 
@@ -1234,6 +1233,51 @@ def test_an_unknown_feature_raises_rather_than_quietly_producing_nothing():
     assert _requested_features("all", LAW_GENERATION_FEATURES) == LAW_GENERATION_FEATURES
     with pytest.raises(ValueError, match="Unknown feature"):
         _requested_features("summarize", LAW_GENERATION_FEATURES)
+
+
+def test_generate_all_leaves_the_checklist_alone(monkeypatch):
+    """The checklist is a call per chunk over a document that can run to hundreds of
+    pages, so `all` skips it and it is asked for by name."""
+    from sqlalchemy.orm import sessionmaker
+
+    import sbpeye.laws_ai as laws_ai_module
+    from sbpeye.models import AIGenerationJob, RegDocument
+    from test_laws_search import add_law, make_session
+
+    assert "checklist" not in laws_ai_module.LAW_BULK_FEATURES
+    assert "checklist" in laws_ai_module.LAW_GENERATION_ACTIONS
+
+    db, engine = make_session()
+    add_law(db, "doc-1", file_type="html", index=False)
+    db.add(AIGenerationJob(
+        id="job-1", target_kind="law", document_id="doc-1", feature="all",
+        status="queued", created_at=datetime(2026, 8, 14),
+    ))
+    db.commit()
+
+    client = FakeLawClient()
+    monkeypatch.setattr(laws_ai_module, "SessionLocal", sessionmaker(bind=engine, autoflush=False))
+    monkeypatch.setattr(laws_ai_module, "get_ai_client", lambda db: client)
+
+    laws_ai_module.run_law_generation_job("job-1")
+
+    db.expire_all()
+    stored = db.query(RegDocument).filter(RegDocument.id == "doc-1").one()
+    assert stored.current_version.summary  # the rest of `all` still ran
+    assert stored.current_version.compliance_checklist is None
+    assert stored.current_version.checklist_generated_at is None
+
+    # And asking for one by name still produces it.
+    db.add(AIGenerationJob(
+        id="job-2", target_kind="law", document_id="doc-1", feature="checklist",
+        status="queued", created_at=datetime(2026, 8, 14),
+    ))
+    db.commit()
+    laws_ai_module.run_law_generation_job("job-2")
+
+    db.expire_all()
+    stored = db.query(RegDocument).filter(RegDocument.id == "doc-1").one()
+    assert json.loads(stored.current_version.compliance_checklist)["status"] == "completed"
 
 
 def test_the_cli_summarises_parts_before_rolling_up_their_container(monkeypatch):

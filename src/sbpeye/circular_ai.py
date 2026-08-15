@@ -15,6 +15,10 @@ GENERATION_FEATURES = ("summary", "tags", "checklist", "relationships", "entitie
 # Consolidation is a chain-level, multi-call operation, so it is a standalone
 # action rather than part of "all".
 GENERATION_ACTIONS = (*GENERATION_FEATURES, "consolidation", "all")
+# What "all" actually runs. The checklist is the most expensive feature here — one LLM
+# call per chunk of the circular — and is wanted far less often than the rest, so it is
+# opt-in: ask for `checklist` by name to get one.
+BULK_FEATURES = tuple(item for item in GENERATION_FEATURES if item != "checklist")
 
 
 def _resolve_reference(
@@ -80,7 +84,7 @@ def _compute_outputs(
     feature: str,
     progress_callback=None,
 ) -> dict:
-    features = GENERATION_FEATURES if feature == "all" else (feature,)
+    features = BULK_FEATURES if feature == "all" else (feature,)
     outputs: dict = {}
     for item in features:
         if item == "summary":

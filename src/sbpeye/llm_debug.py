@@ -26,10 +26,18 @@ import uuid
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError, OperationalError
 
-from .database import SessionLocal
+# `SessionLocal` is the application database and is used for exactly one thing here:
+# reading the `llm_debug_enabled` setting, which lives with the rest of the settings.
+# Every trace write goes to `DebugSessionLocal` — a different file entirely.
+from .database import DebugBase, DebugSessionLocal, SessionLocal, debug_engine
 from .models import LLMTrace, LLMTraceEvent, Settings
 
 logger = logging.getLogger(__name__)
+
+# The recorder creates its own tables. This module is the first place where both the
+# debug engine and the trace models are in scope, and every path that writes a trace
+# imports it, so there is no ordering left to get wrong.
+DebugBase.metadata.create_all(bind=debug_engine)
 
 _FALSE_VALUES = {"0", "false", "no", "off"}
 _SECRET_KEYS = {
@@ -131,7 +139,7 @@ def debug_allowed() -> bool:
 
 def debug_setting_enabled(db=None) -> bool:
     owns_session = db is None
-    session = db or SessionLocal()
+    session = db or SessionLocal()  # app DB: Settings lives there
     try:
         row = session.query(Settings).filter(Settings.key == "llm_debug_enabled").first()
         return bool(row and str(row.value).strip().lower() in {"1", "true", "yes", "on"})
@@ -281,7 +289,7 @@ def _create_trace(
     except Exception:
         logger.warning("LLM trace metadata could not be serialized", exc_info=True)
         return None
-    db = SessionLocal()
+    db = DebugSessionLocal()
     try:
         db.add(LLMTrace(
             id=trace_id, operation=operation, origin=origin, status="running",
@@ -328,7 +336,7 @@ def emit_event(
     lock = _trace_lock(active.trace_id)
     with lock:
         for retry in range(3):
-            db = SessionLocal()
+            db = DebugSessionLocal()
             try:
                 trace = db.query(LLMTrace).filter(LLMTrace.id == active.trace_id).first()
                 if trace is None:
@@ -390,7 +398,7 @@ def finish_trace(
 ) -> None:
     if not handle or not handle.enabled:
         return
-    state_db = SessionLocal()
+    state_db = DebugSessionLocal()
     try:
         existing_status = state_db.query(LLMTrace.status).filter(
             LLMTrace.id == handle.trace_id
@@ -413,7 +421,7 @@ def finish_trace(
         "status": status, "duration_ms": duration_ms,
         "error": error_payload,
     }, elapsed_ms=duration_ms, handle=handle)
-    db = SessionLocal()
+    db = DebugSessionLocal()
     try:
         trace = db.query(LLMTrace).filter(LLMTrace.id == handle.trace_id).first()
         if trace:
@@ -528,7 +536,7 @@ def exception_payload(exc: BaseException | None) -> dict[str, Any]:
 
 def fail_interrupted_traces() -> int:
     """Close rows which cannot still be active after a server restart."""
-    db = SessionLocal()
+    db = DebugSessionLocal()
     try:
         rows = db.query(LLMTrace).filter(LLMTrace.status == "running").all()
         ids = [row.id for row in rows]
@@ -541,7 +549,7 @@ def fail_interrupted_traces() -> int:
             "status": "failed", "reason": "interrupted_by_restart",
             "error": exception_payload(error),
         }, handle=handle)
-        db = SessionLocal()
+        db = DebugSessionLocal()
         try:
             row = db.query(LLMTrace).filter(LLMTrace.id == trace_id, LLMTrace.status == "running").first()
             if row:

@@ -3,7 +3,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship
 from datetime import datetime
-from .database import Base
+from .database import Base, DebugBase
 
 class Circular(Base):
     __tablename__ = "circulars"
@@ -529,8 +529,12 @@ class Settings(Base):
     value = Column(Text)
 
 
-class LLMTrace(Base):
-    """Durable summary row for one logical text-generation operation."""
+class LLMTrace(DebugBase):
+    """Durable summary row for one logical text-generation operation.
+
+    On ``DebugBase``, not ``Base``: traces live in their own database file, so they
+    must not be created alongside the application tables.
+    """
 
     __tablename__ = "llm_traces"
 
@@ -560,7 +564,7 @@ class LLMTrace(Base):
     duration_ms = Column(Integer, nullable=True)
 
 
-class LLMTraceEvent(Base):
+class LLMTraceEvent(DebugBase):
     """Append-only event in an :class:`LLMTrace` timeline."""
 
     __tablename__ = "llm_trace_events"

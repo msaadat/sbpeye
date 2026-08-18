@@ -1,6 +1,8 @@
 import chromadb
+import logging
+import os
 from pathlib import Path
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import bindparam, create_engine, inspect, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
@@ -10,15 +12,43 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SQLALCHEMY_DATABASE_URL = f"sqlite:///{PROJECT_ROOT / 'sbpeye.db'}"
 CHROMA_DB_DIR = PROJECT_ROOT / "chroma_db"
 
+# LLM traces live in their own file. They are diagnostics, not application data:
+# high-churn, disposable, and an order of magnitude larger per row than anything
+# else here (payload blobs of whole prompts). Keeping them in `sbpeye.db` meant
+# every backup, copy and VACUUM of the corpus carried tens of megabytes of debug
+# output, and a stray recorder write could touch the file the app serves from.
+DEBUG_DATABASE_PATH = Path(
+    os.getenv("SBPEYE_DEBUG_DB") or (PROJECT_ROOT / "sbpeye_debug.db")
+)
+DEBUG_DATABASE_URL = f"sqlite:///{DEBUG_DATABASE_PATH}"
+
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
+debug_engine = create_engine(
+    DEBUG_DATABASE_URL, connect_args={"check_same_thread": False}
+)
+DebugSessionLocal = sessionmaker(
+    autocommit=False, autoflush=False, bind=debug_engine
+)
+
 Base = declarative_base()
+# A separate metadata, so `Base.metadata.create_all(engine)` can never recreate the
+# trace tables inside the application database.
+DebugBase = declarative_base()
 
 def get_db():
     db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def get_debug_db():
+    db = DebugSessionLocal()
     try:
         yield db
     finally:
@@ -394,48 +424,9 @@ def _ensure_columns(bind=None):
         ):
             conn.execute(text(statement))
 
-        # LLM diagnostics are deliberately explicit DDL: CLI-only processes can reach
-        # this migration before models.py has registered the ORM declarations.
-        conn.execute(text(
-            "CREATE TABLE IF NOT EXISTS llm_traces ("
-            "id VARCHAR PRIMARY KEY, schema_version INTEGER NOT NULL DEFAULT 1, "
-            "operation VARCHAR NOT NULL, origin VARCHAR NOT NULL, "
-            "status VARCHAR NOT NULL DEFAULT 'running', provider VARCHAR, model VARCHAR, "
-            "job_id VARCHAR, chat_session_id VARCHAR, target_kind VARCHAR, target_id VARCHAR, "
-            "command_name VARCHAR, metadata_json TEXT NOT NULL DEFAULT '{}', "
-            "attempt_count INTEGER NOT NULL DEFAULT 0, prompt_tokens INTEGER, "
-            "completion_tokens INTEGER, total_tokens INTEGER, "
-            "payload_bytes INTEGER NOT NULL DEFAULT 0, error_type VARCHAR, error_message TEXT, "
-            "started_at DATETIME NOT NULL, updated_at DATETIME NOT NULL, "
-            "completed_at DATETIME, duration_ms INTEGER)"
-        ))
-        conn.execute(text(
-            "CREATE TABLE IF NOT EXISTS llm_trace_events ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, trace_id VARCHAR NOT NULL, "
-            "sequence INTEGER NOT NULL, kind VARCHAR NOT NULL, stage VARCHAR, "
-            "attempt_id VARCHAR, attempt_number INTEGER, payload_json TEXT NOT NULL, "
-            "payload_bytes INTEGER NOT NULL, created_at DATETIME NOT NULL, elapsed_ms INTEGER, "
-            "CONSTRAINT uq_llm_trace_event_sequence UNIQUE (trace_id, sequence))"
-        ))
-        for statement in (
-            "CREATE INDEX IF NOT EXISTS ix_llm_traces_operation ON llm_traces (operation)",
-            "CREATE INDEX IF NOT EXISTS ix_llm_traces_origin ON llm_traces (origin)",
-            "CREATE INDEX IF NOT EXISTS ix_llm_traces_status ON llm_traces (status)",
-            "CREATE INDEX IF NOT EXISTS ix_llm_traces_provider ON llm_traces (provider)",
-            "CREATE INDEX IF NOT EXISTS ix_llm_traces_model ON llm_traces (model)",
-            "CREATE INDEX IF NOT EXISTS ix_llm_traces_job_id ON llm_traces (job_id)",
-            "CREATE INDEX IF NOT EXISTS ix_llm_traces_chat_session_id ON llm_traces (chat_session_id)",
-            "CREATE INDEX IF NOT EXISTS ix_llm_traces_target_id ON llm_traces (target_id)",
-            "CREATE INDEX IF NOT EXISTS ix_llm_traces_started_at ON llm_traces (started_at)",
-            "CREATE INDEX IF NOT EXISTS ix_llm_traces_updated_at ON llm_traces (updated_at)",
-            "CREATE INDEX IF NOT EXISTS ix_llm_trace_events_trace_id ON llm_trace_events (trace_id)",
-            "CREATE INDEX IF NOT EXISTS ix_llm_trace_events_kind ON llm_trace_events (kind)",
-            "CREATE INDEX IF NOT EXISTS ix_llm_trace_events_attempt_id ON llm_trace_events (attempt_id)",
-            "CREATE INDEX IF NOT EXISTS ix_llm_trace_events_created_at ON llm_trace_events (created_at)",
-            "CREATE INDEX IF NOT EXISTS ix_llm_trace_event_trace_sequence ON llm_trace_events (trace_id, sequence)",
-            "CREATE INDEX IF NOT EXISTS ix_llm_trace_event_trace_id ON llm_trace_events (trace_id, id)",
-        ):
-            conn.execute(text(statement))
+        # LLM trace tables are deliberately absent here: they live in the debug
+        # database now, and `llm_debug` creates them there on import. Recreating them
+        # in this file would resurrect the empty shells `_relocate_trace_tables` drops.
 
         # Persistent FTS5 lexical index for keyword search (see search.py). Rows are
         # maintained application-side (cells hold tokenize() output); this just ensures
@@ -481,5 +472,97 @@ def _ensure_columns(bind=None):
         ):
             conn.execute(text(statement))
 
+_TRACE_TABLES = ("llm_traces", "llm_trace_events")
+
+
+def _relocate_trace_tables(
+    source=None, target=None, target_path: Path | None = None
+) -> int:
+    """Move any trace rows still living in `sbpeye.db` into the debug database.
+
+    Traces used to share the application database. Copy them across, drop the old
+    tables and reclaim the pages, so an existing checkout keeps its history and
+    stops paying for it in `sbpeye.db`. A no-op once the tables are gone.
+
+    The schema is replayed from `sqlite_master` rather than from `DebugBase`: this
+    runs at module import, before `models` has been imported, so the ORM metadata
+    is still empty here. Copying the recorded DDL also carries the indexes across
+    verbatim and keeps the migration correct if the model later changes.
+
+    The engines are parameters so the move can be exercised against throwaway files;
+    they default to this module's application and debug engines.
+    """
+    source = source if source is not None else engine
+    target = target if target is not None else debug_engine
+    target_path = target_path if target_path is not None else DEBUG_DATABASE_PATH
+
+    with source.begin() as conn:
+        legacy = [
+            (row[0], row[1], row[2])
+            for row in conn.execute(text(
+                "SELECT type, name, sql FROM sqlite_master "
+                "WHERE sql IS NOT NULL AND (name IN :names OR tbl_name IN :names)"
+            ).bindparams(bindparam("names", expanding=True)), {"names": list(_TRACE_TABLES)})
+        ]
+    legacy_tables = {name for kind, name, _ in legacy if kind == "table"}
+    if not legacy_tables:
+        return 0
+
+    with target.begin() as conn:
+        present = set(inspect(conn).get_table_names())
+        for kind, name, sql in legacy:
+            if kind == "table" and name in present:
+                continue
+            if kind == "index" and present:
+                continue
+            conn.execute(text(sql))
+
+    # Release the pooled connection that just built the schema; the copy below needs
+    # the debug file free of other handles before it can be detached again.
+    target.dispose()
+
+    moved = 0
+    # One connection with both files attached: no row crosses into Python, and the
+    # copy is a single transaction that either lands whole or not at all. SQLite
+    # forbids ATTACH/DETACH inside a transaction, so the connection runs in
+    # autocommit and the transaction is opened by hand around the data statements.
+    with source.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        conn.execute(
+            text("ATTACH DATABASE :path AS debugdb"), {"path": str(target_path)}
+        )
+        try:
+            conn.execute(text("BEGIN"))
+            try:
+                for table in _TRACE_TABLES:
+                    if table not in legacy_tables:
+                        continue
+                    # OR IGNORE: a half-finished earlier attempt must not abort the move.
+                    result = conn.execute(text(
+                        f"INSERT OR IGNORE INTO debugdb.{table} SELECT * FROM main.{table}"
+                    ))
+                    moved += result.rowcount or 0
+                    conn.execute(text(f"DROP TABLE main.{table}"))
+                conn.execute(text("COMMIT"))
+            except Exception:
+                conn.execute(text("ROLLBACK"))
+                raise
+        finally:
+            conn.execute(text("DETACH DATABASE debugdb"))
+
+    # VACUUM needs its own connection outside a transaction. Reclaiming the pages is
+    # the point of the move, so a failure here is worth a line in the log.
+    try:
+        with source.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text("VACUUM"))
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "sbpeye.db could not be vacuumed after moving traces out", exc_info=True
+        )
+    return moved
+
+
 Base.metadata.create_all(bind=engine)
+# The debug tables are created by `llm_debug`, which imports `models` and so is the
+# first point where `DebugBase.metadata` actually knows about them.
+_relocate_trace_tables()
 _ensure_columns()

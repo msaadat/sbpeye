@@ -3,11 +3,11 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import sessionmaker
 
 from sbpeye.ai import AIClient, AIConfig
-from sbpeye.database import Base
+from sbpeye.database import Base, DebugBase, _relocate_trace_tables
 from sbpeye import llm_debug
 from sbpeye.models import LLMTrace, LLMTraceEvent, Settings
 from sbpeye.api import debug as debug_api
@@ -19,8 +19,12 @@ def _debug_database(tmp_path: Path, monkeypatch):
         connect_args={"check_same_thread": False},
     )
     Base.metadata.create_all(engine)
+    DebugBase.metadata.create_all(engine)
     factory = sessionmaker(bind=engine)
+    # Production splits these across two files; one factory here so a test can read
+    # the `llm_debug_enabled` setting and the traces it produced from the same place.
     monkeypatch.setattr(llm_debug, "SessionLocal", factory)
+    monkeypatch.setattr(llm_debug, "DebugSessionLocal", factory)
     monkeypatch.setenv("LLM_DEBUG_ALLOWED", "true")
     db = factory()
     db.add(Settings(key="llm_debug_enabled", value="true"))
@@ -302,7 +306,10 @@ def test_debug_api_payloads_filter_increment_and_prune(tmp_path, monkeypatch):
         llm_debug.emit_event("context", {"prompt": "evidence"})
 
     db = factory()
-    gate = debug_api.status(db)
+    # `status` is the one route spanning both databases: the enabled flag is a
+    # Settings row in the application database, the counts come from the debug one.
+    # The fixture collapses them onto a single session.
+    gate = debug_api.status(db, db)
     assert gate["effective"] is True
     assert gate["trace_count"] == 1
     listing = debug_api.list_traces(
@@ -329,6 +336,50 @@ def test_debug_api_payloads_filter_increment_and_prune(tmp_path, monkeypatch):
     assert db.query(LLMTrace).one().id == "still-running"
     assert db.query(LLMTraceEvent).count() == 0
     db.close()
+
+
+def test_trace_tables_stay_out_of_the_application_metadata():
+    """`Base.metadata.create_all(engine)` must never put traces back in sbpeye.db."""
+    assert "llm_traces" not in Base.metadata.tables
+    assert "llm_trace_events" not in Base.metadata.tables
+    assert "llm_traces" in DebugBase.metadata.tables
+    assert "llm_trace_events" in DebugBase.metadata.tables
+
+
+def test_relocate_moves_legacy_traces_and_drops_them(tmp_path):
+    """An existing checkout keeps its history and stops paying for it in sbpeye.db."""
+    app_path, debug_path = tmp_path / "app.db", tmp_path / "debug.db"
+    source = create_engine(f"sqlite:///{app_path}")
+    target = create_engine(f"sqlite:///{debug_path}")
+
+    # Seed the legacy layout: trace tables living in the application database.
+    DebugBase.metadata.create_all(source)
+    seed = sessionmaker(bind=source)()
+    seed.add(LLMTrace(
+        id="t-1", operation="chat.turn", origin="web_chat", status="succeeded",
+        metadata_json="{}", started_at=llm_debug.datetime.utcnow(),
+        updated_at=llm_debug.datetime.utcnow(),
+    ))
+    seed.add(LLMTraceEvent(
+        trace_id="t-1", sequence=1, kind="context", payload_json="{}",
+        payload_bytes=2, created_at=llm_debug.datetime.utcnow(),
+    ))
+    seed.commit()
+    seed.close()
+
+    assert _relocate_trace_tables(source, target, debug_path) == 2
+
+    moved = sessionmaker(bind=create_engine(f"sqlite:///{debug_path}"))()
+    assert moved.query(LLMTrace).one().id == "t-1"
+    assert moved.query(LLMTraceEvent).one().kind == "context"
+    moved.close()
+
+    with create_engine(f"sqlite:///{app_path}").connect() as conn:
+        names = set(inspect(conn).get_table_names())
+    assert not names & {"llm_traces", "llm_trace_events"}
+
+    # Idempotent: a second start finds nothing left to move.
+    assert _relocate_trace_tables(source, target, debug_path) == 0
 
 
 def test_only_gateway_calls_chat_completions_create():

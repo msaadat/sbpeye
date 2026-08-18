@@ -26,3 +26,7 @@ src/sbpeye/static/spa/
 
 # Local analysis and rendered QA artifacts
 /tmp/
+
+# LLM trace recorder — diagnostics, not corpus data (sbpeye.db itself is tracked)
+/sbpeye_debug.db
+*.db.backup-*

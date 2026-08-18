@@ -16,7 +16,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from sbpeye.database import Base, get_db
+from sbpeye.database import Base, DebugBase, get_db, get_debug_db
 from sbpeye.models import Circular
 import sbpeye.llm_debug as llm_debug_module
 import sbpeye.main as main_module
@@ -193,6 +193,9 @@ def db_factory():
         poolclass=StaticPool,
     )
     Base.metadata.create_all(engine)
+    # Traces live in their own database in production; tests collapse both onto one
+    # in-memory file so a single factory can assert across app rows and trace rows.
+    DebugBase.metadata.create_all(engine)
     return sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
@@ -204,6 +207,7 @@ def client(db_factory, monkeypatch):
     # Left unpatched it resolves to the real sbpeye.db, so every chat-route test
     # wrote live rows into the user's debug log — five per run of this module.
     monkeypatch.setattr(llm_debug_module, "SessionLocal", db_factory)
+    monkeypatch.setattr(llm_debug_module, "DebugSessionLocal", db_factory)
     monkeypatch.setattr(main_module, "get_ai_client", lambda db=None: FakeAIClient())
     monkeypatch.setattr(main_module, "_build_chat_circulars_context", lambda *a, **k: "")
 
@@ -215,6 +219,7 @@ def client(db_factory, monkeypatch):
             db.close()
 
     main_module.app.dependency_overrides[get_db] = override_get_db
+    main_module.app.dependency_overrides[get_debug_db] = override_get_db
     with TestClient(main_module.app) as test_client:
         yield test_client, db_factory
     main_module.app.dependency_overrides.clear()

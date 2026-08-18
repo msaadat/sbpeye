@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
-from ..database import get_db
+from ..database import get_db, get_debug_db
 from ..llm_debug import debug_allowed, debug_setting_enabled
 from ..models import LLMTrace, LLMTraceEvent
 
@@ -49,7 +49,10 @@ def require_debug_enabled(db: Session = Depends(get_db)) -> None:
 
 
 @router.get("/status")
-def status(db: Session = Depends(get_db)):
+def status(
+    db: Session = Depends(get_db),
+    debug_db: Session = Depends(get_debug_db),
+):
     allowed = debug_allowed()
     enabled = debug_setting_enabled(db)
     effective = allowed and enabled
@@ -57,7 +60,7 @@ def status(db: Session = Depends(get_db)):
         "allowed": allowed, "enabled": enabled, "effective": effective,
     }
     if effective:
-        count, size = db.query(
+        count, size = debug_db.query(
             func.count(LLMTrace.id), func.coalesce(func.sum(LLMTrace.payload_bytes), 0)
         ).one()
         payload.update(trace_count=int(count), payload_bytes=int(size))
@@ -74,7 +77,7 @@ def list_traces(
     correlation: str | None = None,
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=100),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_debug_db),
 ):
     query = db.query(LLMTrace)
     for column, value in (
@@ -117,7 +120,7 @@ def list_traces(
 def trace_detail(
     trace_id: str,
     after_sequence: int = Query(0, ge=0),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_debug_db),
 ):
     trace = db.query(LLMTrace).filter(LLMTrace.id == trace_id).first()
     if not trace:
@@ -144,7 +147,7 @@ def trace_detail(
 
 
 @router.delete("/traces/{trace_id}", dependencies=[Depends(require_debug_enabled)])
-def delete_trace(trace_id: str, db: Session = Depends(get_db)):
+def delete_trace(trace_id: str, db: Session = Depends(get_debug_db)):
     trace = db.query(LLMTrace).filter(LLMTrace.id == trace_id).first()
     if not trace:
         raise HTTPException(status_code=404, detail="Trace not found")
@@ -159,7 +162,7 @@ def delete_trace(trace_id: str, db: Session = Depends(get_db)):
 
 
 @router.delete("/traces", dependencies=[Depends(require_debug_enabled)])
-def delete_all_traces(db: Session = Depends(get_db)):
+def delete_all_traces(db: Session = Depends(get_debug_db)):
     running_ids = [row[0] for row in db.query(LLMTrace.id).filter(
         LLMTrace.status == "running"
     ).all()]

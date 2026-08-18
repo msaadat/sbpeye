@@ -17,7 +17,12 @@ import threading
 from .database import PROJECT_ROOT, engine, Base, get_db, SessionLocal, has_vector_store_data
 from .models import AIGenerationJob, Attachment, CachedDocument, SyncStatus, circular_sync_only, Circular, CircularEntity, CircularRelationship, EcoDataSeries, EcoDataEntry, RegDocument, RegDocumentVersion, Settings, ChatSession, ChatMessage, ResearchWorkspace, WorkspaceCircular, upsert_settings
 from .api.debug import router as debug_router
-from .llm_debug import emit_event, fail_interrupted_traces, trace_operation
+from .llm_debug import (
+    bind_context,
+    emit_event,
+    fail_interrupted_traces,
+    trace_operation,
+)
 from .search import backfill_fts, backfill_laws_fts, index_circular_fts, resolve_metric_terms, search_engine
 from .ai import AIClient, AIConfig, classify_provider_state, friendly_chat_error, get_ai_client, get_provider_api_key, get_provider_definition, normalize_provider
 from .circular_ai import GENERATION_ACTIONS, generation_job_payload, run_generation_job
@@ -2682,7 +2687,11 @@ async def chat_message_stream(request: Request, db: Session = Depends(get_db)):
             stream_db.close()
 
     return StreamingResponse(
-        stream_response(),
+        # Starlette drives a sync generator through the threadpool, handing each
+        # chunk to whichever worker is free. Without a pinned context the trace
+        # opened while producing the first chunk is invisible while producing the
+        # rest, which cost this endpoint every event after `chat.context`.
+        bind_context(stream_response()),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

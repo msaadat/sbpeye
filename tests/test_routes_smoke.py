@@ -9,10 +9,21 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 import sbpeye.database as database_module
 import sbpeye.main as main_module
-from sbpeye.models import Attachment, CachedDocument, ChatMessage, ChatSession, CircularRelationship, SyncStatus
+from sbpeye import llm_debug
+from sbpeye.models import (
+    Attachment,
+    CachedDocument,
+    ChatMessage,
+    ChatSession,
+    CircularRelationship,
+    LLMTrace,
+    LLMTraceEvent,
+    Settings,
+    SyncStatus,
+)
 from sbpeye.scraper.circulars import circular_identity
 
-from conftest import make_circular
+from conftest import FakeAIClient, make_circular
 
 
 def _seed_circular(db_factory, **overrides):
@@ -567,6 +578,81 @@ def test_chat_stream_creates_session_and_streams(client):
         ).all()
         assert [m.role for m in messages] == ["user", "assistant"]
         assert messages[1].content == "fake stream reply"
+    finally:
+        db.close()
+
+
+def test_chat_stream_records_one_complete_trace(client, monkeypatch):
+    """The streamed turn must leave a debug record good enough to answer "why that answer?".
+
+    Starlette produces each SSE chunk on a different threadpool worker. Tracing state
+    lives in a ContextVar, so unless the route pins a context, the trace opened while
+    producing the first chunk is gone by the second: the provider payloads land on an
+    orphan trace with no chat session, the later events are dropped, and the closing
+    reset raises into the route — which is what made streamed chats undebuggable.
+    """
+    test_client, db_factory = client
+    monkeypatch.setenv("LLM_DEBUG_ALLOWED", "true")
+    db = db_factory()
+    db.add(Settings(key="llm_debug_enabled", value="true"))
+    db.commit()
+    db.close()
+
+    class TracingAIClient(FakeAIClient):
+        """Mirrors AIClient.stream_chat: a nested trace around a multi-chunk stream."""
+
+        def stream_chat(self, messages, db, **kwargs):
+            yield from llm_debug.bind_context(self._traced(messages, db))
+
+        def _traced(self, messages, db):
+            with llm_debug.trace_operation("chat.turn", "implicit", provider="stub"):
+                llm_debug.emit_event(
+                    "provider_request", {"provider": "stub", "kwargs": {"model": "m"}},
+                    stage="chat.iteration.1",
+                )
+                yield {"phase": "thinking"}
+                yield "fake "
+                yield {"phase": "tools", "tools": ["Searching circulars"]}
+                llm_debug.emit_event(
+                    "tool_result", {"name": "search_circulars"}, stage="chat.tools",
+                )
+                yield "stream reply"
+                llm_debug.emit_event(
+                    "provider_response", {"content": "fake stream reply", "stream": True},
+                    stage="chat.iteration.1",
+                )
+
+    monkeypatch.setattr(main_module, "get_ai_client", lambda db=None: TracingAIClient())
+
+    with test_client.stream("POST", "/api/chat/stream", json={"message": "Trace me"}) as resp:
+        assert resp.status_code == 200
+        body = "".join(resp.iter_text())
+    assert "event: done" in body
+    assert "event: error" not in body
+
+    db = db_factory()
+    try:
+        session_id = db.query(ChatSession).one().id
+        traces = db.query(LLMTrace).all()
+        # One trace, not a web_chat stub plus a detached implicit one.
+        assert len(traces) == 1
+        trace = traces[0]
+        assert (trace.origin, trace.status) == ("web_chat", "succeeded")
+        assert trace.chat_session_id == session_id
+
+        kinds = [
+            event.kind
+            for event in db.query(LLMTraceEvent)
+            .filter(LLMTraceEvent.trace_id == trace.id)
+            .order_by(LLMTraceEvent.sequence)
+            .all()
+        ]
+        # Everything after the first chunk used to be missing entirely.
+        assert kinds == [
+            "operation_started", "context", "provider_request", "tool_result",
+            "provider_response", "normalized_result", "persisted_result",
+            "operation_completed",
+        ]
     finally:
         db.close()
 

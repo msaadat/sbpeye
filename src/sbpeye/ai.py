@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from .checklist import compact_required_checklist
 from .env import load_app_env, resolve_env_value
 from .llm_debug import (
+    bind_context,
     close_implicit_trace,
     emit_event,
     ensure_implicit_trace,
@@ -3514,6 +3515,22 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
         return content
 
     def stream_chat(
+        self,
+        messages: list[dict[str, str]],
+        db: Session,
+        circulars_context: str | None = None,
+        selected_circular_ids: list[str] | None = None,
+    ):
+        # Pinned to one context so the trace opened below — and any trace the
+        # caller already opened around this loop — stays current across every
+        # resumption of the stream, whichever thread drives it.
+        yield from bind_context(
+            self._stream_chat_traced(
+                messages, db, circulars_context, selected_circular_ids
+            )
+        )
+
+    def _stream_chat_traced(
         self,
         messages: list[dict[str, str]],
         db: Session,

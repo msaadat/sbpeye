@@ -1,4 +1,5 @@
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -52,6 +53,100 @@ def test_trace_persists_ordered_events_and_active_snapshot(tmp_path, monkeypatch
         "operation_started", "context", "normalized_result", "operation_completed",
     ]
     db.close()
+
+
+def _drive_across_threads(iterator):
+    """Resume ``iterator`` the way Starlette's threadpool drives a sync generator.
+
+    Each chunk is produced on a different worker, so nothing a step writes to a
+    ContextVar survives into the next step unless the iterator pins a context of
+    its own. This is what silently emptied every streamed chat trace.
+    """
+    chunks = []
+    while True:
+        box = {}
+
+        def step():
+            try:
+                box["value"] = next(iterator)
+            except StopIteration:
+                box["stop"] = True
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the caller
+                box["error"] = exc
+
+        worker = threading.Thread(target=step)
+        worker.start()
+        worker.join()
+        if "error" in box:
+            raise box["error"]
+        if box.get("stop"):
+            return chunks
+        chunks.append(box["value"])
+
+
+def test_streamed_trace_keeps_every_event_across_worker_threads(tmp_path, monkeypatch):
+    factory = _debug_database(tmp_path, monkeypatch)
+
+    def turn():
+        with llm_debug.trace_operation(
+            "chat.turn", "web_chat", chat_session_id="session-1",
+        ):
+            llm_debug.emit_event("context", {"step": "open"}, stage="chat.context")
+            yield "first"
+            # A nested trace_operation must still find the parent here, or it
+            # opens an orphan trace carrying no chat session.
+            with llm_debug.trace_operation("chat.turn", "implicit") as nested:
+                assert nested is not None and nested.origin == "web_chat"
+                yield "second"
+            llm_debug.emit_event("normalized_result", {"step": "close"}, stage="chat.result")
+
+    assert _drive_across_threads(llm_debug.bind_context(turn())) == ["first", "second"]
+
+    db = factory()
+    traces = db.query(LLMTrace).all()
+    assert len(traces) == 1
+    assert traces[0].chat_session_id == "session-1"
+    assert traces[0].status == "succeeded"
+    events = db.query(LLMTraceEvent).order_by(LLMTraceEvent.sequence).all()
+    assert [event.kind for event in events] == [
+        "operation_started", "context", "normalized_result", "operation_completed",
+    ]
+    db.close()
+
+
+def test_abandoned_stream_closes_its_trace_in_the_pinned_context(tmp_path, monkeypatch):
+    factory = _debug_database(tmp_path, monkeypatch)
+    cleaned = []
+
+    def turn():
+        with llm_debug.trace_operation("chat.turn", "web_chat"):
+            try:
+                yield "first"
+                yield "second"
+            finally:
+                cleaned.append(llm_debug.current_trace() is not None)
+
+    stream = llm_debug.bind_context(turn())
+    assert next(stream) == "first"
+    stream.close()
+
+    assert cleaned == [True]
+    db = factory()
+    trace = db.query(LLMTrace).one()
+    assert trace.status == "cancelled"
+    db.close()
+
+
+def test_unpinned_generator_never_raises_tracing_errors_at_the_caller(tmp_path, monkeypatch):
+    """Tracing is fail-open: a stray context must cost events, never the response."""
+    _debug_database(tmp_path, monkeypatch)
+
+    def turn():
+        with llm_debug.trace_operation("chat.turn", "web_chat"):
+            yield "first"
+            yield "second"
+
+    assert _drive_across_threads(turn()) == ["first", "second"]
 
 
 def test_sanitizer_redacts_structural_secrets_without_losing_token_counts():

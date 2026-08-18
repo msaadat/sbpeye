@@ -18,6 +18,7 @@ from sqlalchemy.pool import StaticPool
 
 from sbpeye.database import Base, get_db
 from sbpeye.models import Circular
+import sbpeye.llm_debug as llm_debug_module
 import sbpeye.main as main_module
 
 
@@ -170,6 +171,19 @@ class FakeAIClient:
         yield "stream reply"
 
 
+@pytest.fixture(autouse=True)
+def quarantined_trace_recorder(monkeypatch):
+    """Keep the LLM trace recorder out of the developer's real ``sbpeye.db``.
+
+    ``llm_debug`` opens its own sessions rather than joining the request's, so an
+    unpatched suite records live rows into the database the app is actually
+    using — the debug page fills up with test traffic. Off by default here; a
+    test that asserts on traces re-enables it and points the recorder at its own
+    database (see ``tests/test_llm_debug.py``).
+    """
+    monkeypatch.setenv("LLM_DEBUG_ALLOWED", "false")
+
+
 @pytest.fixture
 def db_factory():
     """An isolated in-memory DB shared across every connection in one test."""
@@ -186,6 +200,10 @@ def db_factory():
 def client(db_factory, monkeypatch):
     """A TestClient wired to the in-memory DB with the AI layer stubbed out."""
     monkeypatch.setattr(main_module, "SessionLocal", db_factory)
+    # The trace recorder opens its own sessions rather than joining the request's.
+    # Left unpatched it resolves to the real sbpeye.db, so every chat-route test
+    # wrote live rows into the user's debug log — five per run of this module.
+    monkeypatch.setattr(llm_debug_module, "SessionLocal", db_factory)
     monkeypatch.setattr(main_module, "get_ai_client", lambda db=None: FakeAIClient())
     monkeypatch.setattr(main_module, "_build_chat_circulars_context", lambda *a, **k: "")
 

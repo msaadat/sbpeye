@@ -19,7 +19,7 @@ import threading
 import time
 import traceback
 from types import SimpleNamespace
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Iterable, Iterator, Mapping, TypeVar
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import uuid
 
@@ -60,6 +60,69 @@ class TraceHandle:
 _current_trace: ContextVar[TraceHandle | None] = ContextVar(
     "sbpeye_llm_trace", default=None
 )
+
+_T = TypeVar("_T")
+_EXHAUSTED = object()
+
+
+def _reset_trace(token: Token | None) -> None:
+    """Restore the previous handle, tolerating a token from a dead context.
+
+    Diagnostics must never be the reason a request fails. A generator that was
+    not wrapped in :func:`bind_context` can be resumed under a context the token
+    does not belong to; clearing the variable is the correct approximation there,
+    since the context being unwound is about to be discarded anyway.
+    """
+    if token is None:
+        return
+    try:
+        _current_trace.reset(token)
+    except ValueError:
+        _current_trace.set(None)
+
+
+def bind_context(iterable: Iterable[_T]) -> Iterator[_T]:
+    """Step an iterator inside one captured context for its whole lifetime.
+
+    A generator owns no context of its own (PEP 567): it runs in whichever
+    context resumes it. Under a ``StreamingResponse`` each ``next()`` is
+    dispatched to an anyio worker thread holding its own copy of the request
+    context, so a ``ContextVar`` set while producing one chunk is invisible while
+    producing the next. For tracing — whose whole notion of "the current trace"
+    lives in a ContextVar — that meant the handle opened on the first chunk was
+    gone by the second: nested ``trace_operation`` calls saw no parent and opened
+    orphan traces with no chat session on them, later ``emit_event`` calls found
+    nothing active and dropped the payloads, and the closing ``reset`` raised
+    ``ValueError`` out of the route. Pinning every resumption to the same context
+    object makes the trace opened in the first chunk still current in the last.
+
+    Wrap the outermost generator of a streaming response; everything it drives
+    inherits the pinned context.
+    """
+    iterator = iter(iterable)
+    context = copy_context()
+
+    def step() -> Any:
+        # StopIteration must not cross ``Context.run`` and escape this generator:
+        # PEP 479 would turn it into a RuntimeError instead of a clean stop.
+        try:
+            return next(iterator)
+        except StopIteration:
+            return _EXHAUSTED
+
+    try:
+        while True:
+            item = context.run(step)
+            if item is _EXHAUSTED:
+                return
+            yield item
+    finally:
+        # Close the wrapped generator inside the pinned context too, so its
+        # cleanup — the ``finally`` that closes a trace on client disconnect —
+        # still sees the handle it opened.
+        close = getattr(iterator, "close", None)
+        if close is not None:
+            context.run(close)
 
 
 def debug_allowed() -> bool:
@@ -389,8 +452,7 @@ def trace_operation(operation: str, origin: str, **kwargs: Any) -> Iterator[Trac
     else:
         finish_trace(handle, "succeeded")
     finally:
-        if token is not None:
-            _current_trace.reset(token)
+        _reset_trace(token)
 
 
 @contextmanager
@@ -406,7 +468,7 @@ def trace_span(stage: str, metadata: Mapping[str, Any] | None = None):
     try:
         yield child
     finally:
-        _current_trace.reset(token)
+        _reset_trace(token)
 
 
 def ensure_implicit_trace(provider: str | None = None, model: str | None = None):
@@ -431,12 +493,7 @@ def close_implicit_trace(
 ) -> None:
     if owns_trace:
         finish_trace(handle, "cancelled" if cancelled else ("failed" if error else "succeeded"), error)
-        if token is not None:
-            try:
-                _current_trace.reset(token)
-            except ValueError:
-                # A streaming iterator may be finalized from a different context.
-                _current_trace.set(None)
+        _reset_trace(token)
 
 
 def run_in_copied_context(function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:

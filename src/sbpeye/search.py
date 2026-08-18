@@ -1,6 +1,7 @@
 import re
 import logging
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime
 from sqlalchemy import text
 from sqlalchemy.orm import Session, joinedload
@@ -442,6 +443,201 @@ def prepare_chunks(
 
 
 # ---------------------------------------------------------------------------
+# Passage primitives and match evidence
+# ---------------------------------------------------------------------------
+
+# Words in the preview window cut out of a passage.
+SNIPPET_WINDOW = 25
+
+
+def best_window(text: str, query_tokens: set[str], window: int = SNIPPET_WINDOW) -> str:
+    """The densest `window`-word run of `text`, by count of query-matching words.
+
+    Only ever call this on a *passage* — one retrieved chunk, or a short circular
+    body (the corpus median is 164 words). Term density picks a readable line out
+    of a passage; run over a whole document it reliably prefers prose *about* a
+    subject to the table that states the value, because prose repeats the subject's
+    words and a table states them once. Which passage matched is retrieval's answer
+    to give (see `MatchEvidence`), not something to re-derive here.
+    """
+    if not text or not query_tokens:
+        return ""
+    words = text.split()
+    if not words:
+        return ""
+    if len(words) <= window:
+        return text
+
+    words_lower = [re.sub(r"[^\w]", "", w).lower() for w in words]
+    best_score = -1
+    best_pos = 0
+    for i in range(len(words) - window + 1):
+        score = sum(
+            1
+            for w in words_lower[i : i + window]
+            if any(qt in w for qt in query_tokens)
+        )
+        if score > best_score:
+            best_score = score
+            best_pos = i
+
+    end = min(len(words), best_pos + window)
+    snippet = " ".join(words[best_pos:end])
+    if best_pos > 0:
+        snippet = "…" + snippet
+    if end < len(words):
+        snippet += "…"
+    return snippet
+
+
+def highlight_terms(text: str, query_tokens: set[str]) -> str:
+    """Wrap query matches in ``<mark>`` for the search UI. Presentation only."""
+    if not text or not query_tokens:
+        return text or ""
+    for token in query_tokens:
+        if token.isalpha():
+            # Matches dotted acronyms like T.T. or T.T as well as plain prefixes.
+            dotted = r'\.?'.join(re.escape(c) for c in token) + r'\.?(?!\w)'
+            pattern = rf"(?i)\b({dotted}|{re.escape(token)}\w*)"
+        else:
+            pattern = rf"(?i)\b({re.escape(token)}\w*)"
+        text = re.sub(pattern, r"<mark>\1</mark>", text)
+    return text
+
+
+def make_preview(
+    text: str, query_tokens: set[str], window: int = SNIPPET_WINDOW
+) -> str:
+    """A short highlighted blurb for the search UI: locate a window, then mark it up."""
+    return highlight_terms(best_window(text, query_tokens, window), query_tokens)
+
+
+def _window_density(window_text: str, query_tokens: set[str]) -> int:
+    """How many words of a preview window match the query. Used only to choose
+    between passages retrieval already ranked as comparable."""
+    return sum(
+        1
+        for word in window_text.split()
+        if any(qt in re.sub(r"[^\w]", "", word).lower() for qt in query_tokens)
+    )
+
+
+@dataclass(frozen=True)
+class MatchEvidence:
+    """Where a hit actually came from, carried out of the retriever.
+
+    The vector arm knows which chunk matched. Collapsing that to a document rank for
+    RRF is right for *ranking* and lossy for everything else, so the chunk rides along
+    here instead of being reconstructed downstream by guesswork. `doc_type` and
+    `source_id` mirror the chunk metadata written at index time: an attachment chunk
+    carries its attachment id, a circular-body chunk carries none, a law chunk carries
+    the version whose text is in force.
+    """
+
+    text: str
+    doc_type: str                    # "circular" | "attachment" | "law"
+    source_id: str | None = None     # attachment id, or law version id
+    source_label: str | None = None  # attachment filename
+    page: int | None = None
+    source_ref: str | None = None
+    distance: float | None = None
+    chunk_index: int | None = None
+
+
+def _evidence_from_chunk(
+    meta: dict, text: str, distance: float | None
+) -> MatchEvidence:
+    """Build evidence from one Chroma chunk's metadata, for either corpus."""
+    doc_type = meta.get("doc_type") or "circular"
+    if doc_type == "law":
+        source_id = meta.get("version_id")
+        source_label = meta.get("part_label") or meta.get("title") or None
+    else:
+        source_id = meta.get("attachment_id")
+        source_label = meta.get("filename") if source_id else None
+    return MatchEvidence(
+        text=text or "",
+        doc_type=doc_type,
+        source_id=source_id,
+        source_label=source_label,
+        page=meta.get("page_start"),
+        source_ref=meta.get("ref"),
+        distance=distance,
+        chunk_index=meta.get("chunk_index"),
+    )
+
+
+def choose_evidence(
+    evidence: list[MatchEvidence], query_tokens: set[str]
+) -> tuple[MatchEvidence, str] | None:
+    """Pick which matched passage to show, and its preview.
+
+    Retrieval decides *which passages are candidates*; this only decides which of
+    those to put in front of the reader. Nearest-by-embedding is not automatically
+    the most informative: the top two chunks of a document are routinely separated
+    by a rounding error in distance while one holds a heading and the other holds
+    the table the question is about. Among passages retrieval already scored as
+    comparable, term density is a fair way to break the tie — the failure mode it
+    has over a whole document (preferring prose about a subject to the figure
+    itself) needs a large field of unmatched text to bite, and there isn't one here.
+
+    Ties keep the retrieval order, so the nearest chunk wins when nothing separates
+    them on density.
+    """
+    scored = [
+        (item, best_window(item.text, query_tokens))
+        for item in evidence
+        if item.text
+    ]
+    if not scored:
+        return None
+    item, window = max(
+        scored, key=lambda pair: _window_density(pair[1], query_tokens)
+    )
+    return item, highlight_terms(window, query_tokens)
+
+
+def _collect_evidence(
+    results: dict, owner_key: str, keep: int
+) -> tuple[dict[str, int], dict[str, list[MatchEvidence]]]:
+    """Split one Chroma response into per-owner ranks and per-owner evidence.
+
+    `owner_key` is the metadata field that names the thing being ranked —
+    ``circular_id`` for circulars, ``document_id`` for laws. Ranks are unchanged
+    from the old de-duplicating loop, so RRF fusion behaves exactly as before; the
+    evidence is the part that used to be dropped on the floor.
+    """
+    ranks: dict[str, int] = {}
+    evidence: dict[str, list[MatchEvidence]] = {}
+    ids = results["ids"][0] if results.get("ids") else []
+    metas = results["metadatas"][0] if results.get("metadatas") else []
+    documents = results["documents"][0] if results.get("documents") else []
+    distances = results["distances"][0] if results.get("distances") else []
+
+    for index, chunk_id in enumerate(ids):
+        meta = metas[index] if index < len(metas) else {}
+        owner_id = meta.get(owner_key, chunk_id)
+        if owner_id not in ranks:
+            ranks[owner_id] = len(ranks) + 1
+        chunk_text = documents[index] if index < len(documents) else ""
+        # Ranking never depends on the stored text, but quoting does. A chunk whose
+        # text did not come back is still a legitimate rank and a useless quote, so
+        # it is left out of the evidence and the caller falls back to scanning.
+        if not chunk_text:
+            continue
+        bucket = evidence.setdefault(owner_id, [])
+        if len(bucket) < keep:
+            bucket.append(
+                _evidence_from_chunk(
+                    meta,
+                    chunk_text,
+                    distances[index] if index < len(distances) else None,
+                )
+            )
+    return ranks, evidence
+
+
+# ---------------------------------------------------------------------------
 # FTS5 lexical index (persistent, incremental — replaces in-memory rank-bm25)
 # ---------------------------------------------------------------------------
 
@@ -677,7 +873,7 @@ class SearchEngine:
     DEPT_MATCH_BONUS = 0.02        # per-word department overlap bonus
     RECENCY_WEIGHT = 0.008         # recency decay weight
     REFERENCE_BONUS = 0.5          # bonus for exact reference matches
-    SNIPPET_WINDOW = 25            # words in snippet window
+    EVIDENCE_K = 3                 # matched chunks retained per result
 
     def _fts_ranks(self, db: Session, expanded_tokens: list[str]) -> dict[str, int]:
         """Rank circulars via the persistent FTS5 index for the expanded query.
@@ -753,18 +949,14 @@ class SearchEngine:
 
     def _vector_ranks(
         self, query: str
-    ) -> tuple[dict[str, int], dict[str, str], dict[str, dict]]:
-        """Rank circulars via Chroma. ``({circular_id: rank}, sources, references)``.
+    ) -> tuple[dict[str, int], dict[str, list[MatchEvidence]]]:
+        """Rank circulars via Chroma. ``({circular_id: rank}, {circular_id: evidence})``.
 
-        Chunks are collapsed to their parent circular, keeping each circular's best
-        chunk: `sources` records which attachment that chunk came from (so snippets
-        quote the passage that actually matched) and `references` its page/ref
-        provenance. A vector-store failure degrades to an empty arm rather than
-        taking the whole search down.
+        Chunks are collapsed to their parent circular for ranking; the chunks
+        themselves come back as evidence, so a result can quote the passage that
+        actually matched instead of hunting for one afterwards. A vector-store
+        failure degrades to an empty arm rather than taking the whole search down.
         """
-        vector_ranks: dict[str, int] = {}
-        vector_sources: dict[str, str] = {}
-        vector_references: dict[str, dict] = {}
         try:
             query_embeddings = embedding_backend.embed_queries([query])
             results = collection.query(
@@ -774,34 +966,15 @@ class SearchEngine:
                 # circular candidate set as ids that resolve to no circular, silently
                 # displacing real hits. Every circular/attachment chunk carries doc_type.
                 where={"doc_type": {"$in": ["circular", "attachment"]}},
+                include=["metadatas", "documents", "distances"],
             )
-            raw_ids = results["ids"][0] if results["ids"] else []
-            raw_metas = (
-                results["metadatas"][0] if results.get("metadatas") else []
-            )
-
-            # De-duplicate chunked results by circular_id
-            rank_counter = 1
-            for i, vid in enumerate(raw_ids):
-                meta = raw_metas[i] if i < len(raw_metas) else {}
-                circular_id = meta.get("circular_id", vid)
-                if circular_id not in vector_ranks:
-                    vector_ranks[circular_id] = rank_counter
-                    if meta.get("ref"):
-                        vector_references[circular_id] = {
-                            "source_ref": meta.get("ref"),
-                            "source_page": meta.get("page_start"),
-                            "doc_type": meta.get("doc_type"),
-                            "attachment_id": meta.get("attachment_id"),
-                        }
-                    if meta.get("doc_type") == "attachment" and meta.get("attachment_id"):
-                        vector_sources[circular_id] = meta["attachment_id"]
-                    rank_counter += 1
         except Exception:
             logger.exception(
                 "ChromaDB vector search failed — falling back to BM25-only"
             )
-        return vector_ranks, vector_sources, vector_references
+            return {}, {}
+
+        return _collect_evidence(results, "circular_id", self.EVIDENCE_K)
 
     def _law_fts_ranks(self, db: Session, expanded_tokens: list[str]) -> dict[str, int]:
         """Rank laws/regulations via the `laws_fts` index. ``{document_id: rank}``."""
@@ -831,44 +1004,43 @@ class SearchEngine:
             ranks[row[0]] = rank + 1
         return ranks
 
-    def _law_vector_ranks(self, query: str) -> dict[str, int]:
-        """Rank laws via Chroma, restricted to law chunks. ``{document_id: rank}``."""
-        ranks: dict[str, int] = {}
+    def _law_vector_ranks(
+        self, query: str
+    ) -> tuple[dict[str, int], dict[str, list[MatchEvidence]]]:
+        """Rank laws via Chroma, restricted to law chunks.
+
+        Returns ``({document_id: rank}, {document_id: [MatchEvidence, …]})``.
+        """
         try:
             results = collection.query(
                 query_embeddings=embedding_backend.embed_queries([query]),
                 n_results=self.CANDIDATE_COUNT,
                 where={"kind": "law"},
+                include=["metadatas", "documents", "distances"],
             )
         except Exception:
             logger.exception("ChromaDB law vector search failed — lexical arm only")
-            return ranks
+            return {}, {}
 
-        raw_ids = results["ids"][0] if results["ids"] else []
-        raw_metas = results["metadatas"][0] if results.get("metadatas") else []
-        rank_counter = 1
-        for index, chunk_id in enumerate(raw_ids):
-            meta = raw_metas[index] if index < len(raw_metas) else {}
-            document_id = meta.get("document_id", chunk_id)
-            if document_id not in ranks:
-                ranks[document_id] = rank_counter
-                rank_counter += 1
-        return ranks
+        return _collect_evidence(results, "document_id", self.EVIDENCE_K)
 
     def _law_scores(
         self, query: str, db: Session, query_tokens: list[str], expanded_tokens: list[str],
         doc_type: str | None = None,
-    ) -> tuple[dict[str, float], dict[str, RegDocument]]:
+    ) -> tuple[dict[str, float], dict[str, RegDocument], dict[str, list[MatchEvidence]]]:
         """RRF scores for the law corpus, fused exactly like the circular arms.
 
         Laws get no recency bonus: their listing dates are display metadata SBP fills with
         placeholders (see the plan's §1.1), so ranking on them would be noise.
+
+        Returns ``(scores, documents, evidence)`` — the evidence being the matched
+        chunks the vector arm found, carried through for the caller to render.
         """
         fts_ranks = self._law_fts_ranks(db, expanded_tokens)
-        vector_ranks = self._law_vector_ranks(query)
+        vector_ranks, evidence = self._law_vector_ranks(query)
         candidate_ids = set(fts_ranks) | set(vector_ranks)
         if not candidate_ids:
-            return {}, {}
+            return {}, {}, {}
 
         documents_query = db.query(RegDocument).filter(RegDocument.id.in_(candidate_ids))
         if doc_type and doc_type.strip():
@@ -886,24 +1058,52 @@ class SearchEngine:
             title_words = set(tokenize(document.title or ""))
             score += len(query_words & title_words) * self.TITLE_MATCH_BONUS
             scores[document_id] = score
-        return scores, documents
+        return scores, documents, evidence
 
     def _circular_result(
         self,
         circular: Circular,
         snippet_tokens: set[str],
-        vector_sources: dict[str, str],
-        vector_references: dict[str, dict],
+        evidence_by_id: dict[str, list[MatchEvidence]],
     ) -> dict:
-        """Build one circular search result (snippet + provenance of the match)."""
-        snippet, source, attachment_id, filename = self._best_snippet_source(
-            circular,
-            snippet_tokens,
-            preferred_attachment_id=vector_sources.get(circular.id),
+        """Build one circular search result (snippet + provenance of the match).
+
+        The preview is cut from the chunk the vector arm matched, so the snippet, the
+        `match_source` badge and the page citation all describe one passage. The old
+        code re-derived the passage independently and then had to check whether the
+        two agreed before it dared cite a page; they now agree by construction.
+        """
+        chosen = choose_evidence(
+            evidence_by_id.get(circular.id) or [], snippet_tokens
         )
-        reference = vector_references.get(circular.id, {})
-        reference_matches_source = reference.get("doc_type") == source and (
-            source != "attachment" or reference.get("attachment_id") == attachment_id
+        if chosen is not None:
+            evidence, snippet = chosen
+            filename = evidence.source_label
+            if evidence.source_id and not filename:
+                filename = next(
+                    (
+                        item.filename
+                        for item in circular.attachments
+                        if item.id == evidence.source_id
+                    ),
+                    None,
+                )
+            return {
+                "result_kind": "circular",
+                "circular": circular,
+                "snippet": snippet,
+                "match_source": evidence.doc_type,
+                "attachment_id": evidence.source_id,
+                "attachment_filename": filename,
+                "source_ref": evidence.source_ref,
+                "source_page": evidence.page,
+            }
+
+        # No vector evidence: a lexical-only hit, or Chroma is unavailable. Fall back
+        # to scanning the documents themselves. This path cannot cite a page — nothing
+        # located the passage, so there is no page to name.
+        snippet, source, attachment_id, filename = self._scan_documents(
+            circular, snippet_tokens
         )
         return {
             "result_kind": "circular",
@@ -912,10 +1112,6 @@ class SearchEngine:
             "match_source": source,
             "attachment_id": attachment_id,
             "attachment_filename": filename,
-            **({
-                "source_ref": reference.get("source_ref"),
-                "source_page": reference.get("source_page"),
-            } if reference_matches_source else {}),
         }
 
     def _latest_laws(
@@ -932,15 +1128,40 @@ class SearchEngine:
             .limit(limit)
             .all()
         )
-        return [self._law_result(document, set()) for document in documents], total
+        return [self._law_result(document, set(), {}) for document in documents], total
 
-    def _law_result(self, document: RegDocument, snippet_tokens: set[str]) -> dict:
+    def _law_result(
+        self,
+        document: RegDocument,
+        snippet_tokens: set[str],
+        evidence_by_id: dict[str, list[MatchEvidence]],
+    ) -> dict:
+        """Build one law result. Same evidence rule as circulars.
+
+        Laws need this more than circulars do, not less: a captured edition is a whole
+        instrument — an FE Manual chapter runs to tens of thousands of words — so a
+        preview cut by term density across the full text is picking from an enormous
+        field. The matched chunk narrows that to the passage retrieval actually scored.
+        """
         version = _searchable_law_version(document)
+        chosen = choose_evidence(
+            evidence_by_id.get(document.id) or [], snippet_tokens
+        )
+        if chosen is not None:
+            evidence, snippet = chosen
+            return {
+                "result_kind": "law",
+                "law": document,
+                "version": version,
+                "snippet": snippet,
+                "source_ref": evidence.source_ref,
+                "source_page": evidence.page,
+            }
         return {
             "result_kind": "law",
             "law": document,
             "version": version,
-            "snippet": self._generate_snippet(
+            "snippet": make_preview(
                 (version.content_text if version else "") or "", snippet_tokens
             ),
         }
@@ -1064,91 +1285,19 @@ class SearchEngine:
         return [circular for circular in candidates if is_match(circular)][:limit]
 
     # ------------------------------------------------------------------
-    # Snippet generation
+    # Snippet fallback (no vector evidence)
     # ------------------------------------------------------------------
 
-    def _generate_snippet(
-        self, content: str, query_tokens: set[str], window: int = 0,
-    ) -> str:
-        """Find the most relevant passage and highlight matching terms."""
-        if not content or not query_tokens:
-            return ""
-
-        window = window or self.SNIPPET_WINDOW
-        words = content.split()
-        if not words:
-            return ""
-
-        # Short documents — use entire text
-        if len(words) <= window:
-            snippet = content
-        else:
-            # Score each window position by query-term density
-            words_lower = [
-                re.sub(r"[^\w]", "", w).lower() for w in words
-            ]
-            best_score = -1
-            best_pos = 0
-
-            for i in range(len(words) - window + 1):
-                score = sum(
-                    1
-                    for w in words_lower[i : i + window]
-                    if any(qt in w for qt in query_tokens)
-                )
-                if score > best_score:
-                    best_score = score
-                    best_pos = i
-
-            start = best_pos
-            end = min(len(words), start + window)
-            snippet = " ".join(words[start:end])
-
-            if start > 0:
-                snippet = "…" + snippet
-            if end < len(words):
-                snippet += "…"
-
-        # Highlight matching terms (case-insensitive, match prefixes too)
-        for token in query_tokens:
-            if token.isalpha():
-                # Matches dotted acronyms like T.T. or T.T or normal prefix like tt/ttbar
-                dotted = r'\.?'.join(re.escape(c) for c in token) + r'\.?(?!\w)'
-                pattern = rf"(?i)\b({dotted}|{re.escape(token)}\w*)"
-            else:
-                pattern = rf"(?i)\b({re.escape(token)}\w*)"
-            snippet = re.sub(
-                pattern,
-                r"<mark>\1</mark>",
-                snippet,
-            )
-
-        return snippet
-
-    def _best_snippet_source(
-        self,
-        circular: Circular,
-        query_tokens: set[str],
-        preferred_attachment_id: str | None = None,
+    def _scan_documents(
+        self, circular: Circular, query_tokens: set[str],
     ) -> tuple[str, str, str | None, str | None]:
-        """Return snippet and source metadata for the strongest matching document."""
-        if preferred_attachment_id:
-            preferred = next(
-                (
-                    item
-                    for item in circular.attachments
-                    if item.id == preferred_attachment_id and item.content_text
-                ),
-                None,
-            )
-            if preferred:
-                return (
-                    self._generate_snippet(preferred.content_text, query_tokens),
-                    "attachment",
-                    preferred.id,
-                    preferred.filename,
-                )
+        """Pick a document by token overlap and preview it. Fallback only.
 
+        Used when the vector arm returned nothing for this circular — a lexical-only
+        hit, or Chroma being down. It carries the known weakness of scanning whole
+        documents (a long attachment's densest window is often prose near the answer
+        rather than the answer), which is why it is no longer the primary path.
+        """
         candidates: list[tuple[str, str, str | None, str | None]] = [
             (circular.content_text or "", "circular", None, None)
         ]
@@ -1164,7 +1313,7 @@ class SearchEngine:
 
         text, source, attachment_id, filename = max(candidates, key=score)
         return (
-            self._generate_snippet(text, query_tokens),
+            make_preview(text, query_tokens),
             source,
             attachment_id,
             filename,
@@ -1212,7 +1361,7 @@ class SearchEngine:
 
         ref_results = self._search_by_reference(query, db, limit)
         fts_ranks = self._fts_ranks(db, expanded_tokens)
-        vector_ranks, vector_sources, vector_references = self._vector_ranks(query)
+        vector_ranks, vector_evidence = self._vector_ranks(query)
 
         candidate_ids = (
             set(fts_ranks) | set(vector_ranks) | {c.id for c in ref_results}
@@ -1239,11 +1388,10 @@ class SearchEngine:
         }
 
         def build(circular_id: str) -> dict:
-            # Both lists share `vector_sources`, so a circular appearing in each gets
+            # Both lists share `vector_evidence`, so a circular appearing in each gets
             # the same passage quoted rather than two different ones.
             result = self._circular_result(
-                id_to_circular[circular_id], snippet_tokens,
-                vector_sources, vector_references,
+                id_to_circular[circular_id], snippet_tokens, vector_evidence,
             )
             result["lexical_rank"] = fts_ranks.get(circular_id)
             result["semantic_rank"] = vector_ranks.get(circular_id)
@@ -1321,7 +1469,7 @@ class SearchEngine:
 
         if not include_circulars:
             expanded_tokens = expand_query_tokens(query_tokens)
-            scores, documents = self._law_scores(
+            scores, documents, law_evidence = self._law_scores(
                 query, db, query_tokens, expanded_tokens, doc_type
             )
             ordered_ids = sorted(scores, key=scores.__getitem__, reverse=True)
@@ -1329,7 +1477,9 @@ class SearchEngine:
             snippet_tokens = set(query_tokens) | set(expanded_tokens)
             return (
                 [
-                    self._law_result(documents[document_id], snippet_tokens)
+                    self._law_result(
+                        documents[document_id], snippet_tokens, law_evidence
+                    )
                     for document_id in ordered_ids[offset:offset + limit]
                 ],
                 total,
@@ -1344,7 +1494,7 @@ class SearchEngine:
         bm25_ranks = self._fts_ranks(db, expanded_tokens)
 
         # 3. Vector search (use original query — embeddings handle semantics)
-        vector_ranks, vector_sources, vector_references = self._vector_ranks(query)
+        vector_ranks, vector_evidence = self._vector_ranks(query)
 
         # 4. Reciprocal Rank Fusion + bonuses
         all_candidate_ids = (
@@ -1404,7 +1554,7 @@ class SearchEngine:
         # 5. Sort — with laws merged in when asked for. Both corpora produce RRF scores
         # on the same scale and constant, so one sorted list is meaningful.
         if include_laws:
-            law_scores, law_documents = self._law_scores(
+            law_scores, law_documents, law_evidence = self._law_scores(
                 query, db, query_tokens, expanded_tokens, doc_type
             )
             merged = [("circular", cid, score) for cid, score in rrf_scores.items()]
@@ -1424,12 +1574,16 @@ class SearchEngine:
             ordered = []
             for kind, item_id, _score in merged[offset:offset + limit]:
                 if kind == "law":
-                    ordered.append(self._law_result(law_documents[item_id], snippet_tokens))
+                    ordered.append(
+                        self._law_result(
+                            law_documents[item_id], snippet_tokens, law_evidence
+                        )
+                    )
                     continue
                 circular = id_to_circular.get(item_id)
                 if circular is not None:
                     ordered.append(
-                        self._circular_result(circular, snippet_tokens, vector_sources, vector_references)
+                        self._circular_result(circular, snippet_tokens, vector_evidence)
                     )
             return ordered, total
 
@@ -1459,7 +1613,7 @@ class SearchEngine:
             c = id_to_circular.get(cid)
             if c:
                 ordered.append(
-                    self._circular_result(c, snippet_tokens, vector_sources, vector_references)
+                    self._circular_result(c, snippet_tokens, vector_evidence)
                 )
 
         return ordered, total

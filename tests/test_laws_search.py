@@ -316,7 +316,7 @@ def test_the_circular_vector_arm_excludes_law_chunks(monkeypatch):
     monkeypatch.setattr(
         "sbpeye.search.embedding_backend.embed_queries", lambda queries: [[0.0]]
     )
-    monkeypatch.setattr(SearchEngine, "_law_vector_ranks", lambda self, query: {})
+    monkeypatch.setattr(SearchEngine, "_law_vector_ranks", lambda self, query: ({}, {}))
 
     search_engine.search("SME financing", db)
 

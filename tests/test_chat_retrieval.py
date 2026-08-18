@@ -428,6 +428,92 @@ def test_reference_search_understands_dated_year():
     assert [item.id for item in results] == ["old"]
 
 
+def test_reference_search_trusts_the_year_in_the_reference_over_the_date():
+    """The cited year belongs to the reference *number*, not the publication date.
+
+    SBP's EDMD circulars numbered "of 2002" through "of 2004" all carry a
+    backfilled 2001-03-31 date, and "Circular No. 01 of 2011" is dated January
+    2012. Narrowing on the date year alone made all 45 such circulars in the
+    corpus unreachable by the reference their own listing prints.
+    """
+    db = make_session()
+    db.add(
+        Circular(
+            id="backfilled",
+            reference="EDMD Circular No. 12 of 2004",
+            title="Export Finance Scheme",
+            department="EDMD",
+            date=datetime(2001, 3, 31),  # backfilled, disagrees with the reference
+            content_text="Export refinance terms.",
+        )
+    )
+    db.commit()
+
+    results = SearchEngine._search_by_reference(
+        "EDMD Circular No. 12 of 2004", db, limit=5
+    )
+
+    assert [item.id for item in results] == ["backfilled"]
+
+
+def test_reference_search_separates_circulars_by_their_reference_year():
+    """The year still discriminates — it is just read from the right place."""
+    db = make_session()
+    db.add_all([
+        Circular(
+            id="of-2003",
+            reference="EDMD Circular No. 09 of 2003",
+            title="Earlier scheme",
+            department="EDMD",
+            date=datetime(2001, 3, 31),
+            content_text="Earlier terms.",
+        ),
+        Circular(
+            id="of-2004",
+            reference="EDMD Circular No. 09 of 2004",
+            title="Later scheme",
+            department="EDMD",
+            date=datetime(2001, 3, 31),  # same backfilled date as the 2003 one
+            content_text="Later terms.",
+        ),
+    ])
+    db.commit()
+
+    results = SearchEngine._search_by_reference(
+        "EDMD Circular No. 09 of 2004", db, limit=5
+    )
+
+    assert [item.id for item in results] == ["of-2004"]
+
+
+def test_reference_search_ignores_a_year_that_belongs_to_the_title():
+    """A year elsewhere in the title must not decide the match.
+
+    "FD Circular Letter No. 08 / 2018" spells its year with a slash, which
+    REFERENCE_PATTERN does not read as the reference's year — so the date
+    settles it. The title's own "Of 2016" must not be mistaken for the
+    reference year and veto the match.
+    """
+    db = make_session()
+    db.add(
+        Circular(
+            id="slashed",
+            reference="FD Circular Letter No. 08 / 2018 of 2018",
+            title="Constitution Petition No.57 Of 2016 - Dam Fund",
+            department="FD",
+            date=datetime(2018, 10, 4),
+            content_text="Dam fund collections.",
+        )
+    )
+    db.commit()
+
+    results = SearchEngine._search_by_reference(
+        "FD Circular Letter No. 08 of 2018", db, limit=5
+    )
+
+    assert [item.id for item in results] == ["slashed"]
+
+
 def test_circular_details_reports_ambiguous_reference():
     db = make_session()
     db.add_all([

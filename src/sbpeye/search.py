@@ -999,16 +999,41 @@ class SearchEngine:
                 ~Circular.title.ilike("%letter%"),
             )
 
+        # The year the user cites is the one in the *reference number*, which is not
+        # always the year SBP published in: EDMD's 2002-2004 circulars all carry a
+        # backfilled 2001-03-31 date, and a circular numbered "of 2011" can be dated
+        # January 2012. Admit a candidate on either signal here and let
+        # reference_matches() settle which one actually governs.
         if year:
-            q_obj = q_obj.filter(extract("year", Circular.date) == int(year))
+            q_obj = q_obj.filter(
+                or_(
+                    Circular.reference.ilike(f"%{year}%"),
+                    extract("year", Circular.date) == int(year),
+                )
+            )
 
         candidates = q_obj.order_by(Circular.date.desc()).limit(max(limit * 20, 100)).all()
 
-        def reference_matches(text: str | None) -> bool:
+        def reference_matches(text: str | None) -> tuple[bool, bool]:
+            """Return ``(dated, undated)`` over the occurrences in `text` that match
+            the query's department, number and document type.
+
+            `dated` — an occurrence spelled its own year and it is the year asked for.
+            `undated` — an occurrence carried no year, so only the circular's date can
+            settle it. An occurrence whose year *disagrees* names a different circular
+            and sets neither flag.
+
+            The year has to come from the same occurrence that matched the number;
+            reading it from anywhere in the string would let an unrelated year in the
+            title decide, and titles like "Constitution Petition No.57 Of 2016" carry
+            years of their own.
+            """
+            dated = undated = False
             for candidate in REFERENCE_PATTERN.finditer(text or ""):
                 candidate_dept = candidate.group(1).upper()
                 candidate_type = (candidate.group(2) or "").lower().strip()
                 candidate_num = candidate.group(3).lstrip("0") or "0"
+                candidate_year = candidate.group(4)
                 candidate_is_letter = bool(re.search(r"let", candidate_type))
                 candidate_is_plain = bool(candidate_type) and not candidate_is_letter
                 if candidate_dept != dept_code or candidate_num != num_raw:
@@ -1017,14 +1042,26 @@ class SearchEngine:
                     continue
                 if is_plain and candidate_is_letter:
                     continue
-                return True
-            return False
+                if candidate_year is None:
+                    undated = True
+                elif year is None or candidate_year == year:
+                    dated = True
+            return dated, undated
 
-        return [
-            circular
-            for circular in candidates
-            if reference_matches(circular.reference) or reference_matches(circular.title)
-        ][:limit]
+        def is_match(circular: Circular) -> bool:
+            reference_dated, reference_undated = reference_matches(circular.reference)
+            title_dated, title_undated = reference_matches(circular.title)
+            if reference_dated or title_dated:
+                return True
+            if not (reference_undated or title_undated):
+                return False
+            # The reference number gave no year of its own — fall back to the date,
+            # which is what references like "FD Circular Letter No. 08 / 2018" need.
+            if year is None:
+                return True
+            return circular.date is not None and circular.date.year == int(year)
+
+        return [circular for circular in candidates if is_match(circular)][:limit]
 
     # ------------------------------------------------------------------
     # Snippet generation

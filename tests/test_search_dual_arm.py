@@ -194,8 +194,6 @@ def test_rank_is_none_when_an_arm_did_not_return_the_circular(db, fake_vectors):
 # ---------------------------------------------------------------------------
 
 def test_exact_reference_returns_its_own_list(db, no_vectors):
-    # `_search_by_reference` narrows on the circular's date year, so the fixture
-    # dates have to agree with the year in the reference.
     _add(db, id="c-ref", reference="BPRD Circular No. 07 of 2019",
          title="Target", date=datetime(2019, 3, 1))
     _add(db, id="c-other", reference="BPRD Circular No. 08 of 2019",
@@ -205,6 +203,25 @@ def test_exact_reference_returns_its_own_list(db, no_vectors):
     arms = search_engine.dual_arm_search("BPRD Circular No. 07 of 2019", db)
 
     assert [r["circular"].id for r in arms["reference_matches"]] == ["c-ref"]
+
+
+def test_exact_reference_survives_a_date_that_disagrees_with_it(db, no_vectors):
+    """The reference arm keys off the year in the reference, not the date year.
+
+    The two are not the same field: 45 circulars in the corpus disagree, most of
+    them EDMD's, which carry a backfilled 2001-03-31 date under references
+    numbered "of 2002" through "of 2004". Narrowing the arm on the date year made
+    every one of them unreachable by the reference a user would actually cite.
+    """
+    _add(db, id="c-backfilled", reference="EDMD Circular No. 12 of 2004",
+         title="Target", date=datetime(2001, 3, 31))
+    _add(db, id="c-same-date", reference="EDMD Circular No. 11 of 2004",
+         title="Other", date=datetime(2001, 3, 31))
+    backfill_fts(db)
+
+    arms = search_engine.dual_arm_search("EDMD Circular No. 12 of 2004", db)
+
+    assert [r["circular"].id for r in arms["reference_matches"]] == ["c-backfilled"]
 
 
 def test_filters_apply_to_both_arms(db, fake_vectors):

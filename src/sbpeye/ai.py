@@ -6,6 +6,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from itertools import zip_longest
 from types import SimpleNamespace
 from typing import Any
 
@@ -162,7 +163,11 @@ TOOLS = [
                 "`semantic_results` whose title looks unrelated — that usually means the answer "
                 "sits in an attachment rather than the covering letter, and consolidated "
                 "frameworks that revise earlier limits often look like this. Call "
-                "get_circular_details on it to read the full document set before concluding."
+                "get_circular_details on it to read the full document set before concluding.\n"
+                "`matching_passage` is a short preview and is often not the passage that "
+                "answers the question. Where an entry carries `full_circular_text`, that is "
+                "the circular's complete letter — quote it directly, and do not spend a "
+                "get_circular_details call to re-read it unless you need its attachments."
             ),
             "parameters": {
                 "type": "object",
@@ -824,6 +829,16 @@ _EMPTY_RESPONSE_RETRIES = 2
 # at the very end, past the default max_context_tokens clip. 24k chars covers the
 # longest cover letter observed in the DB while still bounding pathological inputs.
 RELATIONSHIP_CONTEXT_CHARS = 24_000
+
+# A search hit whose body is this short is handed over whole rather than as a 25-word
+# preview. Most SBP circulars are two-page letters — the corpus median body is ~990
+# chars and 4k covers 95% of them — so the preview is usually a lossy summary of
+# something that would have fit anyway. It costs a follow-up get_circular_details
+# round to recover, and the last tool round of a chat turn has no such round left.
+SEARCH_INLINE_BODY_MAX_CHARS = 4_000
+# Ceiling on the total body text inlined across one search response, so a limit=50
+# call cannot turn a result list into a 100-document dump.
+SEARCH_INLINE_BODY_BUDGET_CHARS = 40_000
 
 
 class ProviderResponseError(RuntimeError):
@@ -2889,12 +2904,48 @@ SOURCE BLOCKS:
         return [str(item) for item in selected if str(item) in allowed]
 
     @staticmethod
-    def _search_result_payload(result: dict) -> dict:
+    def _inline_body_texts(*result_groups: list[dict]) -> dict[str, str]:
+        """Pick which hits are short enough to hand over whole, within one budget.
+
+        `matching_passage` is a 25-word window chosen by term density, which on a
+        circular reliably prefers the addressee block ("All Authorized Dealers in
+        Foreign Exchange… Attention of Authorized Dealers is invited towards…") to the
+        one sentence that states the rule — the salutation of an FX circular is denser
+        in an FX query's words than the operative clause is. For a two-page letter the
+        fix is not a better window but no window: send the letter.
+
+        The groups are consumed round-robin so the arms share the budget evenly; the
+        semantic arm is the one that surfaces a circular whose title looks unrelated,
+        and it must not starve because the lexical arm was serialized first. A circular
+        in both arms is charged once and inlined in both.
+        """
+        texts: dict[str, str] = {}
+        remaining = SEARCH_INLINE_BODY_BUDGET_CHARS
+        for row in zip_longest(*result_groups):
+            for result in row:
+                if result is None:
+                    continue
+                circular = result["circular"]
+                if circular.id in texts:
+                    continue
+                body = (circular.content_text or "").strip()
+                if not body or len(body) > SEARCH_INLINE_BODY_MAX_CHARS:
+                    continue
+                if len(body) > remaining:
+                    return texts
+                texts[circular.id] = body
+                remaining -= len(body)
+        return texts
+
+    @staticmethod
+    def _search_result_payload(result: dict, body_texts: dict[str, str] | None = None) -> dict:
         """Serialize one search result for a tool response.
 
         `lexical_rank`/`semantic_rank` are carried through when present (the dual-arm
         path sets them) so the model can see where each retriever placed a circular,
-        and which ones both arms agreed on.
+        and which ones both arms agreed on. `full_circular_text`, when `_inline_body_texts`
+        granted it, is the complete letter — the model needs no follow-up lookup to
+        quote it, though attachments still live behind get_circular_details.
         """
         circular = result["circular"]
         matching_passage = re.sub(r"</?mark>", "", result.get("snippet") or "")
@@ -2918,6 +2969,9 @@ SOURCE BLOCKS:
             "attachment_citation": attachment_citation,
             "citation": f"[[circular:{circular.id}|{circular.display_name}]]",
         }
+        body = (body_texts or {}).get(circular.id)
+        if body:
+            payload["full_circular_text"] = body
         for key in ("lexical_rank", "semantic_rank"):
             if key in result:
                 payload[key] = result[key]
@@ -2976,9 +3030,12 @@ SOURCE BLOCKS:
                             tag=tag if tag else None, sort_by="date",
                         )
                         relaxed_department = bool(results)
+                    body_texts = self._inline_body_texts(results)
                     return json.dumps({
                         "ranking": "date",
-                        "results": [self._search_result_payload(r) for r in results],
+                        "results": [
+                            self._search_result_payload(r, body_texts) for r in results
+                        ],
                         "count": len(results),
                         "department_filter_relaxed": relaxed_department,
                     })
@@ -2995,8 +3052,9 @@ SOURCE BLOCKS:
                     )
                     relaxed_department = bool(any(arms.values()))
 
+                body_texts = self._inline_body_texts(*arms.values())
                 payload = {
-                    key: [self._search_result_payload(r) for r in results]
+                    key: [self._search_result_payload(r, body_texts) for r in results]
                     for key, results in arms.items()
                 }
                 unique = {

@@ -1060,6 +1060,23 @@ class SearchEngine:
             scores[document_id] = score
         return scores, documents, evidence
 
+    def _evidence_filename(
+        self, circular: Circular, evidence: MatchEvidence
+    ) -> str | None:
+        """The attachment filename a piece of evidence came from, if any."""
+        if evidence.source_label:
+            return evidence.source_label
+        if not evidence.source_id:
+            return None
+        return next(
+            (
+                item.filename
+                for item in circular.attachments
+                if item.id == evidence.source_id
+            ),
+            None,
+        )
+
     def _circular_result(
         self,
         circular: Circular,
@@ -1072,31 +1089,41 @@ class SearchEngine:
         `match_source` badge and the page citation all describe one passage. The old
         code re-derived the passage independently and then had to check whether the
         two agreed before it dared cite a page; they now agree by construction.
+
+        `passages` carries *every* retained chunk whole, in retrieval order, for readers
+        that can take more than one preview. Windowing is safe on prose and unsafe on a
+        table: PDF extraction interleaves a table's columns, so a window centred on the
+        query's words lands mid-row and can pair one row's label with the next row's
+        figure. Whole chunks are the only form of a table that cannot mislead, so the
+        preview and the passage list deliberately carry different things — a snippet for
+        a human scanning results, and the passage itself for a reader that will quote it.
         """
-        chosen = choose_evidence(
-            evidence_by_id.get(circular.id) or [], snippet_tokens
-        )
+        evidence_list = evidence_by_id.get(circular.id) or []
+        passages = [
+            {
+                "text": item.text,
+                "match_source": item.doc_type,
+                "attachment_id": item.source_id,
+                "attachment_filename": self._evidence_filename(circular, item),
+                "source_page": item.page,
+                "source_ref": item.source_ref,
+            }
+            for item in evidence_list
+            if item.text
+        ]
+        chosen = choose_evidence(evidence_list, snippet_tokens)
         if chosen is not None:
             evidence, snippet = chosen
-            filename = evidence.source_label
-            if evidence.source_id and not filename:
-                filename = next(
-                    (
-                        item.filename
-                        for item in circular.attachments
-                        if item.id == evidence.source_id
-                    ),
-                    None,
-                )
             return {
                 "result_kind": "circular",
                 "circular": circular,
                 "snippet": snippet,
                 "match_source": evidence.doc_type,
                 "attachment_id": evidence.source_id,
-                "attachment_filename": filename,
+                "attachment_filename": self._evidence_filename(circular, evidence),
                 "source_ref": evidence.source_ref,
                 "source_page": evidence.page,
+                "passages": passages,
             }
 
         # No vector evidence: a lexical-only hit, or Chroma is unavailable. Fall back
@@ -1112,6 +1139,8 @@ class SearchEngine:
             "match_source": source,
             "attachment_id": attachment_id,
             "attachment_filename": filename,
+            # Nothing located a passage, so there is none to hand over whole.
+            "passages": [],
         }
 
     def _latest_laws(

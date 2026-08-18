@@ -164,10 +164,19 @@ TOOLS = [
                 "sits in an attachment rather than the covering letter, and consolidated "
                 "frameworks that revise earlier limits often look like this. Call "
                 "get_circular_details on it to read the full document set before concluding.\n"
-                "`matching_passage` is a short preview and is often not the passage that "
-                "answers the question. Where an entry carries `full_circular_text`, that is "
-                "the circular's complete letter — quote it directly, and do not spend a "
-                "get_circular_details call to re-read it unless you need its attachments."
+                "`matching_passages` are the retrieved passages in full — quote from these. "
+                "`matching_passage_excerpt`, where it appears instead, is a short window and "
+                "is often not the passage that answers the question.\n"
+                "`full_circular_text` is the circular's complete covering LETTER, not its "
+                "complete content — quote it rather than spending a get_circular_details "
+                "call to re-read the same letter. When `attachment_text_chars` is present "
+                "the circular has annexures whose text is NOT in this result. A letter that "
+                "announces a change without stating its terms ('details are at Annexure', "
+                "'the Framework has been amended') is a pointer, not an answer: the operative "
+                "figures live in the annexure, and revised limits usually arrive this way. "
+                "Do not conclude from an older circular that states a figure outright over a "
+                "newer one whose figure is in an annexure you have not read — call "
+                "get_circular_details on the newer one first."
             ),
             "parameters": {
                 "type": "object",
@@ -839,6 +848,10 @@ SEARCH_INLINE_BODY_MAX_CHARS = 4_000
 # Ceiling on the total body text inlined across one search response, so a limit=50
 # call cannot turn a result list into a 100-document dump.
 SEARCH_INLINE_BODY_BUDGET_CHARS = 40_000
+# Ceiling on the matched-chunk text handed over whole across one search response.
+# Chunks average ~1.5k chars, so this covers the head of both arms — which is where
+# a wrong passage does its damage, because that is what the model reads first.
+SEARCH_PASSAGE_BUDGET_CHARS = 24_000
 
 
 class ProviderResponseError(RuntimeError):
@@ -2938,14 +2951,76 @@ SOURCE BLOCKS:
         return texts
 
     @staticmethod
-    def _search_result_payload(result: dict, body_texts: dict[str, str] | None = None) -> dict:
+    def _passage_sets(
+        *result_groups: list[dict], body_texts: dict[str, str]
+    ) -> dict[str, list[dict]]:
+        """Pick which hits hand over their matched chunks whole, within one budget.
+
+        A 25-word window is a fair preview of prose and a liar on a table. PDF
+        extraction interleaves a table's columns, so the window that is densest in the
+        query's words lands mid-row: on the Asaan limits table it renders
+        "Max Credit Balance16: PKR 1,000,000 … 2 Asaan Account" and stops before the
+        figure belonging to the Asaan row, pairing one row's label with another row's
+        number. No window size fixes that — the whole chunk does.
+
+        Budgeted round-robin across the arms, on the same fairness argument as
+        `_inline_body_texts`: the semantic arm is the one that surfaces a circular whose
+        title looks unrelated, and it must not starve because the lexical arm was
+        serialized first.
+
+        A circular in both arms is served in both — the lists are meant to be readable
+        independently — so it is charged for both. Charging once would let the budget
+        understate what actually goes on the wire by about half.
+        """
+        appearances: dict[str, int] = {}
+        for group in result_groups:
+            for result in group:
+                circular_id = result["circular"].id
+                appearances[circular_id] = appearances.get(circular_id, 0) + 1
+
+        chosen: dict[str, list[dict]] = {}
+        remaining = SEARCH_PASSAGE_BUDGET_CHARS
+        for row in zip_longest(*result_groups):
+            for result in row:
+                if result is None:
+                    continue
+                circular = result["circular"]
+                if circular.id in chosen:
+                    continue
+                copies = appearances.get(circular.id, 1)
+                kept: list[dict] = []
+                spent = 0
+                for passage in result.get("passages") or []:
+                    text = (passage.get("text") or "").strip()
+                    # A body chunk repeats text `full_circular_text` already sent whole.
+                    if not text or (
+                        passage.get("match_source") != "attachment"
+                        and circular.id in body_texts
+                    ):
+                        continue
+                    if spent + len(text) * copies > remaining:
+                        break
+                    kept.append({**passage, "text": text})
+                    spent += len(text) * copies
+                if kept:
+                    chosen[circular.id] = kept
+                    remaining -= spent
+        return chosen
+
+    @staticmethod
+    def _search_result_payload(
+        result: dict,
+        body_texts: dict[str, str] | None = None,
+        passage_sets: dict[str, list[dict]] | None = None,
+    ) -> dict:
         """Serialize one search result for a tool response.
 
         `lexical_rank`/`semantic_rank` are carried through when present (the dual-arm
         path sets them) so the model can see where each retriever placed a circular,
         and which ones both arms agreed on. `full_circular_text`, when `_inline_body_texts`
-        granted it, is the complete letter — the model needs no follow-up lookup to
-        quote it, though attachments still live behind get_circular_details.
+        granted it, is the complete covering letter — but a letter is not a document:
+        `attachment_text_chars` reports how much annexure text sits behind it that no
+        field here contains, which is what makes a cover letter recognisable as one.
         """
         circular = result["circular"]
         matching_passage = re.sub(r"</?mark>", "", result.get("snippet") or "")
@@ -2964,11 +3039,38 @@ SOURCE BLOCKS:
             "status": circular.status or "active",
             "tags": json.loads(circular.tags) if circular.tags else [],
             "url": circular.url,
-            "matching_passage": matching_passage or None,
             "match_source": result.get("match_source"),
             "attachment_citation": attachment_citation,
             "citation": f"[[circular:{circular.id}|{circular.display_name}]]",
         }
+
+        attachment_chars = sum(
+            len(item.content_text or "") for item in circular.attachments
+        )
+        if attachment_chars:
+            payload["attachment_text_chars"] = attachment_chars
+
+        passages = (passage_sets or {}).get(circular.id) or []
+        if passages:
+            payload["matching_passages"] = [
+                {
+                    "passage": item["text"],
+                    "source": item.get("match_source"),
+                    "page": item.get("source_page"),
+                    "attachment_citation": (
+                        f"[[attachment:{item['attachment_id']}|"
+                        f"{item['attachment_filename']}]]"
+                        if item.get("attachment_id") and item.get("attachment_filename")
+                        else None
+                    ),
+                }
+                for item in passages
+            ]
+        elif matching_passage:
+            # Budget spent, or a lexical-only hit with no located chunk. A window is
+            # all there is here, so it is labelled as the excerpt it is.
+            payload["matching_passage_excerpt"] = matching_passage
+
         body = (body_texts or {}).get(circular.id)
         if body:
             payload["full_circular_text"] = body
@@ -3031,10 +3133,12 @@ SOURCE BLOCKS:
                         )
                         relaxed_department = bool(results)
                     body_texts = self._inline_body_texts(results)
+                    passage_sets = self._passage_sets(results, body_texts=body_texts)
                     return json.dumps({
                         "ranking": "date",
                         "results": [
-                            self._search_result_payload(r, body_texts) for r in results
+                            self._search_result_payload(r, body_texts, passage_sets)
+                            for r in results
                         ],
                         "count": len(results),
                         "department_filter_relaxed": relaxed_department,
@@ -3053,8 +3157,12 @@ SOURCE BLOCKS:
                     relaxed_department = bool(any(arms.values()))
 
                 body_texts = self._inline_body_texts(*arms.values())
+                passage_sets = self._passage_sets(*arms.values(), body_texts=body_texts)
                 payload = {
-                    key: [self._search_result_payload(r, body_texts) for r in results]
+                    key: [
+                        self._search_result_payload(r, body_texts, passage_sets)
+                        for r in results
+                    ]
                     for key, results in arms.items()
                 }
                 unique = {

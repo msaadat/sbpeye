@@ -718,6 +718,91 @@ class SearchEngine:
             ranks[row[0]] = rank + 1
         return ranks
 
+    @staticmethod
+    def _apply_circular_filters(
+        q_obj,
+        *,
+        start_year: int | None = None,
+        end_year: int | None = None,
+        department: str | None = None,
+        tag: str | None = None,
+    ):
+        """Apply the circular-corpus filters to a query. Shared by every search path."""
+        from sqlalchemy import extract, or_
+
+        if start_year:
+            q_obj = q_obj.filter(extract('year', Circular.date) >= start_year)
+        if end_year:
+            q_obj = q_obj.filter(extract('year', Circular.date) <= end_year)
+        if department and department.strip():
+            dept = department.strip()
+            q_obj = q_obj.filter(
+                or_(
+                    Circular.department == dept,
+                    Circular.department.ilike(f"%{dept}%"),
+                )
+            )
+        if tag and tag.strip():
+            q_obj = q_obj.filter(
+                or_(
+                    Circular.tags.like(f'%"{tag}"%'),
+                    Circular.tags.like(f'%{tag}%'),
+                )
+            )
+        return q_obj
+
+    def _vector_ranks(
+        self, query: str
+    ) -> tuple[dict[str, int], dict[str, str], dict[str, dict]]:
+        """Rank circulars via Chroma. ``({circular_id: rank}, sources, references)``.
+
+        Chunks are collapsed to their parent circular, keeping each circular's best
+        chunk: `sources` records which attachment that chunk came from (so snippets
+        quote the passage that actually matched) and `references` its page/ref
+        provenance. A vector-store failure degrades to an empty arm rather than
+        taking the whole search down.
+        """
+        vector_ranks: dict[str, int] = {}
+        vector_sources: dict[str, str] = {}
+        vector_references: dict[str, dict] = {}
+        try:
+            query_embeddings = embedding_backend.embed_queries([query])
+            results = collection.query(
+                query_embeddings=query_embeddings,
+                n_results=self.CANDIDATE_COUNT,
+                # Laws share the collection; without this their chunks would enter the
+                # circular candidate set as ids that resolve to no circular, silently
+                # displacing real hits. Every circular/attachment chunk carries doc_type.
+                where={"doc_type": {"$in": ["circular", "attachment"]}},
+            )
+            raw_ids = results["ids"][0] if results["ids"] else []
+            raw_metas = (
+                results["metadatas"][0] if results.get("metadatas") else []
+            )
+
+            # De-duplicate chunked results by circular_id
+            rank_counter = 1
+            for i, vid in enumerate(raw_ids):
+                meta = raw_metas[i] if i < len(raw_metas) else {}
+                circular_id = meta.get("circular_id", vid)
+                if circular_id not in vector_ranks:
+                    vector_ranks[circular_id] = rank_counter
+                    if meta.get("ref"):
+                        vector_references[circular_id] = {
+                            "source_ref": meta.get("ref"),
+                            "source_page": meta.get("page_start"),
+                            "doc_type": meta.get("doc_type"),
+                            "attachment_id": meta.get("attachment_id"),
+                        }
+                    if meta.get("doc_type") == "attachment" and meta.get("attachment_id"):
+                        vector_sources[circular_id] = meta["attachment_id"]
+                    rank_counter += 1
+        except Exception:
+            logger.exception(
+                "ChromaDB vector search failed — falling back to BM25-only"
+            )
+        return vector_ranks, vector_sources, vector_references
+
     def _law_fts_ranks(self, db: Session, expanded_tokens: list[str]) -> dict[str, int]:
         """Rank laws/regulations via the `laws_fts` index. ``{document_id: rank}``."""
         ranks: dict[str, int] = {}
@@ -1049,7 +1134,101 @@ class SearchEngine:
         )
 
     # ------------------------------------------------------------------
-    # Main search
+    # Unfused retrieval (chat)
+    # ------------------------------------------------------------------
+    def dual_arm_search(
+        self,
+        query: str,
+        db: Session,
+        *,
+        limit: int = 10,
+        department: str | None = None,
+        tag: str | None = None,
+        start_year: int | None = None,
+        end_year: int | None = None,
+    ) -> dict[str, list[dict]]:
+        """Return the lexical and semantic arms separately, unfused — for chat.
+
+        ``search()`` fuses the two retrievers with RRF and then adds title/recency
+        bonuses. That is right for the search UI, where a human scans titles and dates
+        and does their own judging. It is wrong for a chat tool, because the bonuses are
+        an order of magnitude larger than the entire RRF range: a two-word title match
+        is +0.10 against a best-case +0.033 from both arms at rank 1. A circular that
+        names the topic only in its body or an annexure therefore cannot outrank one
+        that names it in the title, however much better the retrieval judged it to be.
+
+        Handing the model both ranked lists keeps that signal intact and lets it decide,
+        which is the one thing an LLM is better at than a scoring formula. Every entry
+        carries both `lexical_rank` and `semantic_rank`, so agreement between the arms
+        stays visible. Reference-pattern hits come back as their own list rather than as
+        a score bonus, for the same reason.
+        """
+        empty: dict[str, list[dict]] = {
+            "reference_matches": [], "lexical_results": [], "semantic_results": []
+        }
+        query_tokens = tokenize(query)
+        if not query.strip() or not query_tokens:
+            return empty
+
+        expanded_tokens = expand_query_tokens(query_tokens)
+        snippet_tokens = set(query_tokens) | set(expanded_tokens)
+
+        ref_results = self._search_by_reference(query, db, limit)
+        fts_ranks = self._fts_ranks(db, expanded_tokens)
+        vector_ranks, vector_sources, vector_references = self._vector_ranks(query)
+
+        candidate_ids = (
+            set(fts_ranks) | set(vector_ranks) | {c.id for c in ref_results}
+        )
+        if not candidate_ids:
+            return empty
+
+        if start_year or end_year or department or tag:
+            filtered = self._apply_circular_filters(
+                db.query(Circular.id).filter(Circular.id.in_(candidate_ids)),
+                start_year=start_year, end_year=end_year,
+                department=department, tag=tag,
+            )
+            candidate_ids &= {row[0] for row in filtered.all()}
+            if not candidate_ids:
+                return empty
+
+        id_to_circular = {
+            c.id: c
+            for c in db.query(Circular)
+            .options(joinedload(Circular.attachments))
+            .filter(Circular.id.in_(candidate_ids))
+            .all()
+        }
+
+        def build(circular_id: str) -> dict:
+            # Both lists share `vector_sources`, so a circular appearing in each gets
+            # the same passage quoted rather than two different ones.
+            result = self._circular_result(
+                id_to_circular[circular_id], snippet_tokens,
+                vector_sources, vector_references,
+            )
+            result["lexical_rank"] = fts_ranks.get(circular_id)
+            result["semantic_rank"] = vector_ranks.get(circular_id)
+            return result
+
+        def arm(ranks: dict[str, int]) -> list[dict]:
+            ordered = sorted(
+                (cid for cid in ranks if cid in id_to_circular),
+                key=ranks.__getitem__,
+            )
+            return [build(cid) for cid in ordered[:limit]]
+
+        return {
+            "reference_matches": [
+                build(c.id) for c in ref_results if c.id in id_to_circular
+            ],
+            "lexical_results": arm(fts_ranks),
+            "semantic_results": arm(vector_ranks),
+        }
+
+    # ------------------------------------------------------------------
+    # Main search (fused — search UI, browse, laws)
     # ------------------------------------------------------------------
     def search(
         self, query: str, db: Session, limit: int = 20,
@@ -1074,34 +1253,19 @@ class SearchEngine:
         badge them. `department`, `tag` and the year bounds are circular-only concepts and
         are simply not applied to the law arm; `doc_type` is the law-side filter.
         """
-        from sqlalchemy import extract, or_
-
         include_circulars = source in ("circulars", "all")
         include_laws = source in ("laws", "all")
         if not include_circulars and not include_laws:
             raise ValueError(f"Unknown search source: {source!r}")
 
         def apply_filters(q_obj):
-            if start_year:
-                q_obj = q_obj.filter(extract('year', Circular.date) >= start_year)
-            if end_year:
-                q_obj = q_obj.filter(extract('year', Circular.date) <= end_year)
-            if department and department.strip():
-                dept = department.strip()
-                q_obj = q_obj.filter(
-                    or_(
-                        Circular.department == dept,
-                        Circular.department.ilike(f"%{dept}%"),
-                    )
-                )
-            if tag and tag.strip():
-                q_obj = q_obj.filter(
-                    or_(
-                        Circular.tags.like(f'%"{tag}"%'),
-                        Circular.tags.like(f'%{tag}%'),
-                    )
-                )
-            return q_obj
+            return self._apply_circular_filters(
+                q_obj,
+                start_year=start_year,
+                end_year=end_year,
+                department=department,
+                tag=tag,
+            )
 
         query_tokens = tokenize(query)
 
@@ -1143,45 +1307,7 @@ class SearchEngine:
         bm25_ranks = self._fts_ranks(db, expanded_tokens)
 
         # 3. Vector search (use original query — embeddings handle semantics)
-        vector_ranks: dict[str, int] = {}
-        vector_sources: dict[str, str] = {}
-        vector_references: dict[str, dict] = {}
-        try:
-            query_embeddings = embedding_backend.embed_queries([query])
-            results = collection.query(
-                query_embeddings=query_embeddings,
-                n_results=self.CANDIDATE_COUNT,
-                # Laws share the collection; without this their chunks would enter the
-                # circular candidate set as ids that resolve to no circular, silently
-                # displacing real hits. Every circular/attachment chunk carries doc_type.
-                where={"doc_type": {"$in": ["circular", "attachment"]}},
-            )
-            raw_ids = results["ids"][0] if results["ids"] else []
-            raw_metas = (
-                results["metadatas"][0] if results.get("metadatas") else []
-            )
-
-            # De-duplicate chunked results by circular_id
-            rank_counter = 1
-            for i, vid in enumerate(raw_ids):
-                meta = raw_metas[i] if i < len(raw_metas) else {}
-                circular_id = meta.get("circular_id", vid)
-                if circular_id not in vector_ranks:
-                    vector_ranks[circular_id] = rank_counter
-                    if meta.get("ref"):
-                        vector_references[circular_id] = {
-                            "source_ref": meta.get("ref"),
-                            "source_page": meta.get("page_start"),
-                            "doc_type": meta.get("doc_type"),
-                            "attachment_id": meta.get("attachment_id"),
-                        }
-                    if meta.get("doc_type") == "attachment" and meta.get("attachment_id"):
-                        vector_sources[circular_id] = meta["attachment_id"]
-                    rank_counter += 1
-        except Exception:
-            logger.exception(
-                "ChromaDB vector search failed — falling back to BM25-only"
-            )
+        vector_ranks, vector_sources, vector_references = self._vector_ranks(query)
 
         # 4. Reciprocal Rank Fusion + bonuses
         all_candidate_ids = (

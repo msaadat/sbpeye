@@ -146,7 +146,24 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "search_circulars",
-            "description": "Search SBP circulars by keyword, topic, department, or tag. Use this when the user asks for circulars on a specific subject, regulation, or topic. Returns matching circulars with title, date, department, reference, and summary.",
+            "description": (
+                "Search SBP circulars by keyword, topic, department, or tag. Use this when the "
+                "user asks for circulars on a specific subject, regulation, or topic.\n"
+                "Returns TWO independently ranked lists, deliberately not merged, plus "
+                "`reference_matches` for any exact circular reference in the query:\n"
+                "- `lexical_results`: keyword/BM25 ranking. Favours circulars whose title and "
+                "text repeat the query's words.\n"
+                "- `semantic_results`: meaning-based ranking over passages, including the text "
+                "of attached annexures and frameworks. Finds circulars that answer the question "
+                "without using its words.\n"
+                "Judge both lists yourself; neither is authoritative. Each entry carries "
+                "`lexical_rank` and `semantic_rank`, so you can see which circulars both "
+                "retrievers agreed on. Pay particular attention to a circular ranked highly by "
+                "`semantic_results` whose title looks unrelated — that usually means the answer "
+                "sits in an attachment rather than the covering letter, and consolidated "
+                "frameworks that revise earlier limits often look like this. Call "
+                "get_circular_details on it to read the full document set before concluding."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2871,6 +2888,41 @@ SOURCE BLOCKS:
         allowed = set(valid_ids)
         return [str(item) for item in selected if str(item) in allowed]
 
+    @staticmethod
+    def _search_result_payload(result: dict) -> dict:
+        """Serialize one search result for a tool response.
+
+        `lexical_rank`/`semantic_rank` are carried through when present (the dual-arm
+        path sets them) so the model can see where each retriever placed a circular,
+        and which ones both arms agreed on.
+        """
+        circular = result["circular"]
+        matching_passage = re.sub(r"</?mark>", "", result.get("snippet") or "")
+        attachment_citation = None
+        if result.get("attachment_id") and result.get("attachment_filename"):
+            attachment_citation = (
+                f"[[attachment:{result['attachment_id']}|"
+                f"{result['attachment_filename']}]]"
+            )
+        payload = {
+            "title": circular.title,
+            "reference": circular.reference,
+            "department": circular.department,
+            "date": circular.date.strftime("%Y-%m-%d") if circular.date else None,
+            "summary": circular.summary[:500] if circular.summary else None,
+            "status": circular.status or "active",
+            "tags": json.loads(circular.tags) if circular.tags else [],
+            "url": circular.url,
+            "matching_passage": matching_passage or None,
+            "match_source": result.get("match_source"),
+            "attachment_citation": attachment_citation,
+            "citation": f"[[circular:{circular.id}|{circular.display_name}]]",
+        }
+        for key in ("lexical_rank", "semantic_rank"):
+            if key in result:
+                payload[key] = result[key]
+        return payload
+
     def _execute_tool(
         self,
         name: str,
@@ -2902,56 +2954,59 @@ SOURCE BLOCKS:
             if name == "search_circulars":
                 from .chat_retrieval import FRESHNESS_QUERY_PATTERN
                 from .search import search_engine
-                from .models import Circular
                 query = arguments.get("query", "")
                 department = arguments.get("department", "")
                 tag = arguments.get("tag", "")
                 limit = int(arguments.get("limit", 10))
-                results, _ = search_engine.search(
+
+                # "Latest / most recent" questions want date order over relevance, and
+                # the fused engine already sorts by date for them. Only ordinary
+                # relevance queries go down the dual-arm path.
+                if FRESHNESS_QUERY_PATTERN.search(str(query)):
+                    results, _ = search_engine.search(
+                        query, db, limit=limit,
+                        department=department if department else None,
+                        tag=tag if tag else None,
+                        sort_by="date",
+                    )
+                    relaxed_department = False
+                    if not results and department:
+                        results, _ = search_engine.search(
+                            query, db, limit=limit,
+                            tag=tag if tag else None, sort_by="date",
+                        )
+                        relaxed_department = bool(results)
+                    return json.dumps({
+                        "ranking": "date",
+                        "results": [self._search_result_payload(r) for r in results],
+                        "count": len(results),
+                        "department_filter_relaxed": relaxed_department,
+                    })
+
+                arms = search_engine.dual_arm_search(
                     query, db, limit=limit,
                     department=department if department else None,
                     tag=tag if tag else None,
-                    sort_by=(
-                        "date"
-                        if FRESHNESS_QUERY_PATTERN.search(str(query))
-                        else "relevance"
-                    ),
                 )
                 relaxed_department = False
-                if not results and department:
-                    results, _ = search_engine.search(
+                if department and not any(arms.values()):
+                    arms = search_engine.dual_arm_search(
                         query, db, limit=limit, tag=tag if tag else None
                     )
-                    relaxed_department = bool(results)
-                out = []
-                for r in results:
-                    c = r["circular"]
-                    matching_passage = re.sub(
-                        r"</?mark>", "", r.get("snippet") or ""
-                    )
-                    attachment_citation = None
-                    if r.get("attachment_id") and r.get("attachment_filename"):
-                        attachment_citation = (
-                            f"[[attachment:{r['attachment_id']}|"
-                            f"{r['attachment_filename']}]]"
-                        )
-                    out.append({
-                        "title": c.title,
-                        "reference": c.reference,
-                        "department": c.department,
-                        "date": c.date.strftime("%Y-%m-%d") if c.date else None,
-                        "summary": c.summary[:500] if c.summary else None,
-                        "status": c.status or "active",
-                        "tags": json.loads(c.tags) if c.tags else [],
-                        "url": c.url,
-                        "matching_passage": matching_passage or None,
-                        "match_source": r.get("match_source"),
-                        "attachment_citation": attachment_citation,
-                        "citation": f"[[circular:{c.id}|{c.display_name}]]",
-                    })
+                    relaxed_department = bool(any(arms.values()))
+
+                payload = {
+                    key: [self._search_result_payload(r) for r in results]
+                    for key, results in arms.items()
+                }
+                unique = {
+                    item["citation"]
+                    for results in payload.values() for item in results
+                }
                 return json.dumps({
-                    "results": out,
-                    "count": len(out),
+                    "ranking": "dual_arm",
+                    **payload,
+                    "count": len(unique),
                     "department_filter_relaxed": relaxed_department,
                 })
 

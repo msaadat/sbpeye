@@ -16,6 +16,7 @@ from openai import APIError, OpenAI
 from sqlalchemy.orm import Session
 
 from .checklist import compact_required_checklist
+from .citation_handles import CitationHandles, StreamExpander
 from .env import load_app_env, resolve_env_value
 from .llm_debug import (
     bind_context,
@@ -893,6 +894,44 @@ def _empty_response_error(
     )
 
 
+def _messages_with_handles(
+    messages: list[dict[str, str]], handles: CitationHandles
+) -> list[dict[str, str]]:
+    """Replay a stored conversation with handles in place of ids.
+
+    Only assistant turns carry citations, and only they are rewritten — a user's own words
+    are left exactly as typed.
+    """
+    return [
+        {**message, "content": handles.for_history(message.get("content"))}
+        if message.get("role") == "assistant"
+        else message
+        for message in messages
+    ]
+
+
+def _report_dropped_citations(handles: CitationHandles) -> None:
+    """Log citations the gate refused to render.
+
+    A drop is a source the reader will not get, so it is worth an event even though the
+    answer itself reads normally without it — silently correct output is exactly how the
+    old dead-link bug stayed invisible for so long.
+    """
+    dropped = handles.take_dropped()
+    if dropped:
+        emit_event(
+            "citation_drop",
+            {"dropped": dropped, "count": len(dropped)},
+            stage="chat.citations",
+        )
+
+
+def _expanded_answer(content: str, handles: CitationHandles) -> str:
+    expanded = handles.expand(content)
+    _report_dropped_citations(handles)
+    return expanded
+
+
 def _status_code(exc: Exception) -> int | None:
     """Best-effort HTTP status from OpenAI SDK or requests exceptions."""
     status = getattr(exc, "status_code", None)
@@ -1444,8 +1483,10 @@ class AIClient:
                 "content": (
                     "You are an expert assistant for SBP circulars and regulations. "
                     "No tools are available in this step. Answer using only the "
-                    "provided selected context and database lookup results. Preserve "
-                    "any exact citation tokens you use."
+                    "provided selected context and database lookup results. Cite "
+                    "sources only with the short handles shown beside them — "
+                    "[[c:...]], [[a:...]], [[l:...]] — copied character for "
+                    "character. Never write a document ID or invent a handle."
                 ),
             },
             *messages,
@@ -3548,10 +3589,13 @@ You have been provided with pre-selected circulars as context below. Answer prim
 but you also have tools to search the database if the user asks about circulars not covered here.
 
 IMPORTANT RULES:
-1. Cite a circular only with the exact [[circular:ID|label]] token supplied in context or tool results.
-1a. Cite a law or regulation only with the exact [[law:ID|label]] token returned by a tool.
-2. Cite an attachment only with the exact [[attachment:ID|label]] token supplied in context or tool results.
-Never expose IDs outside those tokens, alter a token, invent a token, or turn plain-text references into links.
+1. Cite a source only with the exact short handle printed beside it in the context or in a
+tool result: [[c:...]] for a circular, [[a:...]] for an attachment, [[l:...]] for a law.
+Copy the handle character for character.
+2. A handle renders as a link showing the document's own name, so write "as required by
+[[c:BPRD-CL-01-2021]]" rather than repeating the reference immediately beside it.
+2a. Never write a document ID, never invent or adjust a handle, and never use a handle you
+were not given. A source you have no handle for is named in prose and cited with nothing.
 3. Be precise and highlight regulatory differences when comparing circulars.
 4. Use search_selected_documents when the included passages do not contain enough detail. It can
 search the complete selected circulars and their attachments. Do not claim attachment content is
@@ -3564,10 +3608,13 @@ Pre-selected circulars:
 Use your tools to search and retrieve relevant circulars from the database before answering.
 
 IMPORTANT RULES:
-1. Cite a circular only with an exact [[circular:ID|label]] token returned by a tool.
-2. Cite an attachment only with an exact [[attachment:ID|label]] token returned by a tool.
-2a. Cite a law or regulation only with an exact [[law:ID|label]] token returned by a tool.
-Never expose IDs outside those tokens, alter a token, invent a token, or turn plain-text references into links.
+1. Cite a source only with the exact short handle printed beside it in a tool result:
+[[c:...]] for a circular, [[a:...]] for an attachment, [[l:...]] for a law. Copy the handle
+character for character.
+2. A handle renders as a link showing the document's own name, so write "as required by
+[[c:BPRD-CL-01-2021]]" rather than repeating the reference immediately beside it.
+2a. Never write a document ID, never invent or adjust a handle, and never use a handle you
+were not given. A source you have no handle for is named in prose and cited with nothing.
 3. If you need more details on a circular found in a search, use the get_circular_details tool with the circular reference or title."""
 
     def _chat_full_messages(
@@ -3575,8 +3622,19 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
         messages: list[dict[str, str]],
         circulars_context: str | None,
         selected_circular_ids: list[str] | None,
+        handles: CitationHandles | None = None,
     ) -> list[dict]:
-        """Prepend the (context-aware) system prompt to the conversation."""
+        """Prepend the (context-aware) system prompt to the conversation.
+
+        Given a handle map, the selected-circular context and every replayed assistant
+        turn are rewritten so the model sees short handles instead of ids. Rewriting the
+        history is not optional: answers are persisted with real tokens and the routes
+        rebuild the conversation from those rows, so a turn-scoped map alone would leave
+        the model reading uuids off its own transcript from the second turn onward.
+        """
+        if handles is not None:
+            circulars_context = handles.to_handles(circulars_context)
+            messages = _messages_with_handles(messages, handles)
         system_prompt = self._chat_system_prompt(
             circulars_context if selected_circular_ids else None
         )
@@ -3589,6 +3647,7 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
         tool_call_dicts: list[dict],
         db: Session,
         selected_circular_ids: list[str] | None,
+        handles: CitationHandles | None = None,
     ) -> None:
         """Record the assistant's tool requests, run each tool, and append its result.
 
@@ -3628,6 +3687,10 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
                     tc["function"]["name"], args, db,
                     selected_circular_ids, user_query,
                 )
+                if handles is not None:
+                    # Recorded post-rewrite so the trace shows what the model was
+                    # actually handed, handles and all.
+                    result = handles.to_handles(result)
                 emit_event("tool_result", {
                     "tool_call_id": tc.get("id"), "name": tc["function"]["name"],
                     "arguments": args, "result": result, "success": True,
@@ -3666,8 +3729,9 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
         circulars_context: str | None = None,
         selected_circular_ids: list[str] | None = None,
     ) -> str:
+        handles = CitationHandles()
         full_messages = self._chat_full_messages(
-            messages, circulars_context, selected_circular_ids
+            messages, circulars_context, selected_circular_ids, handles
         )
 
         max_iterations = 5
@@ -3692,7 +3756,7 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
                 )
 
             if not msg.tool_calls:
-                return msg.content or ""
+                return _expanded_answer(msg.content or "", handles)
 
             self._apply_tool_calls(
                 full_messages,
@@ -3710,12 +3774,15 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
                 ],
                 db,
                 selected_circular_ids,
+                handles,
             )
 
         # Fallback if max iterations reached. Use a fresh synthesis prompt so
         # models that keep requesting tools do not see prior tool-call messages.
         synthesis_messages = self._tool_result_synthesis_messages(
-            messages, full_messages, circulars_context
+            _messages_with_handles(messages, handles),
+            full_messages,
+            handles.to_handles(circulars_context),
         )
         try:
             final_response = self._create_traced_completion(
@@ -3733,7 +3800,7 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
             raise _empty_response_error(
                 self.config.provider, self.config.effective_chat_model
             )
-        return content
+        return _expanded_answer(content, handles)
 
     def stream_chat(
         self,
@@ -3773,8 +3840,9 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
         circulars_context: str | None = None,
         selected_circular_ids: list[str] | None = None,
     ):
+        handles = CitationHandles()
         full_messages = self._chat_full_messages(
-            messages, circulars_context, selected_circular_ids
+            messages, circulars_context, selected_circular_ids, handles
         )
 
         max_iterations = 5
@@ -3793,6 +3861,10 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
             content_parts: list[str] = []
             tool_calls: dict[int, dict] = {}
             saw_choice = False
+            # Deltas split a citation anywhere, so what reaches the client is the
+            # expander's output rather than the provider's — the route downstream
+            # persists exactly the text the reader saw, with real tokens in it.
+            expander = StreamExpander(handles)
 
             for chunk in stream:
                 if not chunk.choices:
@@ -3801,7 +3873,9 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
                 delta = chunk.choices[0].delta
                 if delta.content:
                     content_parts.append(delta.content)
-                    yield delta.content
+                    ready = expander.feed(delta.content)
+                    if ready:
+                        yield ready
 
                 for tc in delta.tool_calls or []:
                     index = tc.index
@@ -3830,6 +3904,11 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
                     self.config.provider, self.config.effective_chat_model, "streamed"
                 )
 
+            trailing = expander.close()
+            if trailing:
+                yield trailing
+            _report_dropped_citations(handles)
+
             if not tool_calls:
                 return
 
@@ -3848,11 +3927,14 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
                 ordered_calls,
                 db,
                 selected_circular_ids,
+                handles,
             )
 
         yield {"phase": "thinking"}
         synthesis_messages = self._tool_result_synthesis_messages(
-            messages, full_messages, circulars_context
+            _messages_with_handles(messages, handles),
+            full_messages,
+            handles.to_handles(circulars_context),
         )
         try:
             final_stream = self._create_traced_completion(
@@ -3862,12 +3944,19 @@ Never expose IDs outside those tokens, alter a token, invent a token, or turn pl
                 temperature=0.3,
                 stream=True,
             )
+            final_expander = StreamExpander(handles)
             for chunk in final_stream:
                 if not chunk.choices:
                     continue
                 content = chunk.choices[0].delta.content
                 if content:
-                    yield content
+                    ready = final_expander.feed(content)
+                    if ready:
+                        yield ready
+            trailing = final_expander.close()
+            if trailing:
+                yield trailing
+            _report_dropped_citations(handles)
         except APIError as exc:
             if self._is_tool_choice_none_error(exc):
                 yield self._tool_iteration_limit_message()

@@ -7,12 +7,14 @@ import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import Button from 'primevue/button'
 import InputText from 'primevue/inputtext'
+import Menu from 'primevue/menu'
 import ProgressSpinner from 'primevue/progressspinner'
 import Textarea from 'primevue/textarea'
 import CircularResultContent from '@/components/CircularResultContent.vue'
 import {
   buildDocumentContentUrl,
   deleteChatSession,
+  downloadChatSessionMarkdown,
   getChatSession,
   getChatSessions,
   getCircularDetail,
@@ -555,6 +557,38 @@ function newSession() {
   focusComposer()
 }
 
+/** One popup shared by every row rather than a Menu per session: the rail routinely
+    holds fifty conversations, and only one menu is ever open. */
+const sessionMenu = ref<InstanceType<typeof Menu> | null>(null)
+const sessionMenuTarget = ref<ChatSession | null>(null)
+
+const sessionMenuItems = computed(() => {
+  const session = sessionMenuTarget.value
+  if (!session) return []
+  return [
+    // A workspace takes its name from the workspace, so renaming is not offered here.
+    ...(isWorkspaceSession(session)
+      ? []
+      : [{ label: 'Rename', icon: 'pi pi-pencil', command: () => startRenaming(session) }]),
+    {
+      label: 'Export as Markdown',
+      icon: 'pi pi-download',
+      command: () => void downloadSession(session),
+    },
+    {
+      label: session.is_default_workspace ? 'Clear' : 'Delete',
+      icon: 'pi pi-trash',
+      class: 'session-menu-danger',
+      command: () => confirmDeleteSession(session),
+    },
+  ]
+})
+
+function openSessionMenu(event: Event, session: ChatSession) {
+  sessionMenuTarget.value = session
+  sessionMenu.value?.toggle(event)
+}
+
 function startRenaming(session: ChatSession) {
   if (isWorkspaceSession(session)) return
   renamingSessionId.value = session.id
@@ -651,6 +685,22 @@ function downloadMessage(message: LocalMessage) {
   anchor.download = `sbpeye-answer-${new Date().toISOString().slice(0, 10)}.md`
   anchor.click()
   URL.revokeObjectURL(url)
+}
+
+/** The per-message download flattens citations to plain labels because the reader still
+    has the app around them. A whole transcript is read elsewhere, so the server renders
+    this one with every citation linked to its document on sbp.org.pk. */
+async function downloadSession(session: ChatSession) {
+  try {
+    await downloadChatSessionMarkdown(session.id)
+  } catch (error) {
+    toast.add({
+      severity: 'error',
+      summary: 'Export failed',
+      detail: error instanceof Error ? error.message : 'Unable to export this conversation.',
+      life: 6000,
+    })
+  }
 }
 
 function startEditing(message: LocalMessage) {
@@ -1175,29 +1225,23 @@ onBeforeUnmount(() => {
               </button>
               <div class="session-item-actions">
                 <Button
-                  v-if="!isWorkspaceSession(session)"
-                  icon="pi pi-pencil"
+                  icon="pi pi-ellipsis-h"
                   text
                   rounded
                   size="small"
                   severity="secondary"
-                  aria-label="Rename session"
-                  @click="startRenaming(session)"
-                />
-                <Button
-                  icon="pi pi-trash"
-                  text
-                  rounded
-                  size="small"
-                  severity="danger"
-                  aria-label="Delete session"
-                  @click="confirmDeleteSession(session)"
+                  :aria-label="`Actions for ${session.title || 'this conversation'}`"
+                  aria-haspopup="true"
+                  aria-controls="session-actions-menu"
+                  @click="openSessionMenu($event, session)"
                 />
               </div>
             </template>
           </div>
         </template>
       </div>
+
+      <Menu id="session-actions-menu" ref="sessionMenu" :model="sessionMenuItems" popup />
     </aside>
 
     <section class="chat-pane">
@@ -1240,6 +1284,21 @@ onBeforeUnmount(() => {
               @click="clearContextSearch"
             ><i class="pi pi-times" /></button>
           </div>
+
+          <!-- Session-level twin of the per-message download; also reachable here when
+               the conversations rail is collapsed. -->
+          <Button
+            v-if="activeSession && messages.length"
+            class="context-export"
+            icon="pi pi-download"
+            text
+            rounded
+            size="small"
+            severity="secondary"
+            aria-label="Export conversation as markdown"
+            title="Export conversation as Markdown"
+            @click="downloadSession(activeSession)"
+          />
         </div>
 
         <div v-if="selectedCirculars.length" class="context-chip-list">

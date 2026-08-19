@@ -1020,6 +1020,13 @@ a {
   gap: 0.15rem;
 }
 
+/* Destructive item in the session actions menu, so it reads as the odd one out without
+   needing an icon colour that fights the rest of the list. */
+.session-menu-danger .p-menu-item-link,
+.session-menu-danger .p-menu-item-link .p-menu-item-icon {
+  color: var(--sbp-danger);
+}
+
 .session-rename {
   display: grid;
   grid-column: 1 / -1;
@@ -1854,6 +1861,10 @@ a.context-chip:hover {
   flex: 1 1 auto;
   max-width: 22rem;
   margin-left: auto;
+}
+
+.context-export {
+  flex: 0 0 auto;
 }
 
 .chat-messages {

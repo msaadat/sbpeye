@@ -38,6 +38,7 @@ from .laws_ai import (
     run_law_generation_job,
 )
 from .checklist_export import build_checklist_workbook, circular_subject, law_subject
+from .chat_export import render_session_markdown, session_filename
 from .embeddings import EmbeddingConfig, create_embedding_backend
 from .env import managed_env_path, set_managed_env_value, unset_managed_env_value
 from .link_routing import (
@@ -2282,6 +2283,34 @@ async def get_chat_session(session_id: str, db: Session = Depends(get_db)):
             if circular_id in circular_by_id
         ],
     }
+
+
+@app.get("/api/chat/sessions/{session_id}/export.md")
+async def export_chat_session(session_id: str, db: Session = Depends(get_db)):
+    """The whole conversation as one markdown file, both sides, citations linked to SBP.
+
+    Server-side because only the database knows where a cited document lives on
+    sbp.org.pk; the chat view has the labels but not the URLs behind them.
+    """
+    workspace = _get_workspace_for_chat_session(db, session_id)
+    if workspace:
+        title = workspace.name
+    elif _workspace_id_from_chat_session(session_id):
+        return JSONResponse({"error": "Workspace not found"}, status_code=404)
+    else:
+        session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+        if not session:
+            return JSONResponse({"error": "Session not found"}, status_code=404)
+        title = session.title
+
+    markdown = render_session_markdown(db, title, _ordered_chat_messages(db, session_id))
+    return StreamingResponse(
+        iter([markdown]),
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{session_filename(title)}"'
+        },
+    )
 
 
 @app.patch("/api/chat/sessions/{session_id}")

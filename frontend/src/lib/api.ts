@@ -646,6 +646,14 @@ function toQueryString(params: Record<string, string | number | boolean | null |
   return query ? `?${query}` : ''
 }
 
+/** The download name the server chose, so the title-and-date stem is decided in one
+    place. Falls back to the caller's own name when the header is absent or unparseable. */
+function filenameFromResponse(response: Response): string | null {
+  const header = response.headers.get('content-disposition') || ''
+  const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(header)
+  return match ? decodeURIComponent(match[1]).trim() || null : null
+}
+
 async function readErrorPayload(response: Response): Promise<ApiErrorPayload | undefined> {
   const contentType = response.headers.get('content-type') || ''
 
@@ -984,6 +992,30 @@ export async function truncateChatSession(
     `/chat/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}`,
     { method: 'DELETE' },
   )
+}
+
+/** The whole conversation as markdown. The server renders it because it is the only
+    side that can turn a citation id into a link to the document on sbp.org.pk. */
+export async function downloadChatSessionMarkdown(sessionId: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/chat/sessions/${encodeURIComponent(sessionId)}/export.md`)
+
+  if (!response.ok) {
+    const payload = await readErrorPayload(response)
+    throw Object.assign(new Error(payload?.error || `Chat export failed with ${response.status}`), {
+      status: response.status,
+      payload,
+    }) as ApiError
+  }
+
+  const blob = await response.blob()
+  const downloadUrl = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = downloadUrl
+  anchor.download = filenameFromResponse(response) || 'sbpeye-chat.md'
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  URL.revokeObjectURL(downloadUrl)
 }
 
 export async function sendChatMessage(payload: {

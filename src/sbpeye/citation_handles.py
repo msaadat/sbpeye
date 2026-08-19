@@ -173,7 +173,7 @@ class CitationHandles:
         those rows. Without this the model reads a transcript full of uuids on turn two and
         copies from it — the fix would hold for one turn and quietly decay after.
         """
-        return _strip_bare_uuids(self.to_handles(text))
+        return strip_bare_uuids(self.to_handles(text))
 
     # -- expansion -------------------------------------------------------------
 
@@ -195,7 +195,7 @@ class CitationHandles:
         pieces: list[str] = []
         cursor = 0
         for match in _COMBINED_PATTERN.finditer(text):
-            pieces.append(_strip_bare_uuids(text[cursor : match.start()]))
+            pieces.append(strip_bare_uuids(text[cursor : match.start()]))
             cursor = match.end()
             if match.group(1):  # a real token the model wrote out in full
                 replacement = self._keep_or_drop_token(
@@ -206,7 +206,7 @@ class CitationHandles:
             if not replacement:
                 cursor = _close_gap(pieces, text, cursor)
             pieces.append(replacement)
-        pieces.append(_strip_bare_uuids(text[cursor:]))
+        pieces.append(strip_bare_uuids(text[cursor:]))
         return "".join(pieces)
 
     def _resolve_handle(self, prefix: str, slug: str) -> str:
@@ -233,7 +233,7 @@ _COMBINED_PATTERN = re.compile(
 )
 
 
-def _strip_bare_uuids(text: str) -> str:
+def strip_bare_uuids(text: str) -> str:
     """Remove invented ids along with the space each one occupied.
 
     Each removal closes its own gap. An answer-wide tidy pass would be simpler and wrong:

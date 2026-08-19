@@ -30,3 +30,7 @@ src/sbpeye/static/spa/
 # LLM trace recorder — diagnostics, not corpus data (sbpeye.db itself is tracked)
 /sbpeye_debug.db
 *.db.backup-*
+
+# Benchmark runs — captured answers and scores. The methodology in benchmarks/ is
+# tracked; results are per-run, per-model evidence and stay local.
+/benchmarks/results/

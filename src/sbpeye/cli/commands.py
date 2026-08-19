@@ -1694,6 +1694,7 @@ def _run_cache_check_stale(db, prune=False, verbose=False):
     local_path file is missing, for the HTML cache and attachments dir."""
     import uuid
     from sbpeye.scraper.circulars import HTML_CACHE_DIR, ATTACHMENTS_DIR
+    from sbpeye.models import RegDocumentVersion
 
     # --- HTML cache: cache/html/<uuid5(url)>.html ---
     expected_html_names = set()
@@ -1727,6 +1728,18 @@ def _run_cache_check_stale(db, prune=False, verbose=False):
         expected_attachment_paths[resolved] = ("cached_document", doc_id, local_path)
         if not resolved.is_file():
             missing_attachment_refs.append(("cached_document", doc_id, local_path))
+    # Law/regulation versions archive under attachments/laws/, inside the tree walked
+    # below. Leaving them out of the expected set makes every archived edition look like
+    # an orphan, and --prune deletes the whole laws corpus.
+    for version_id, local_path in db.query(
+        RegDocumentVersion.id, RegDocumentVersion.local_path
+    ).all():
+        if not local_path:
+            continue
+        resolved = (PROJECT_ROOT / local_path).resolve()
+        expected_attachment_paths[resolved] = ("law_version", version_id, local_path)
+        if not resolved.is_file():
+            missing_attachment_refs.append(("law_version", version_id, local_path))
 
     attachment_orphans = []
     if ATTACHMENTS_DIR.is_dir():

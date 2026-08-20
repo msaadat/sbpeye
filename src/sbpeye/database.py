@@ -7,10 +7,13 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
 from .embeddings import EmbeddingConfig, create_embedding_backend
+# Re-exported: most of the codebase reaches the data root through `database`, and the
+# test suite monkeypatches it there. `env` owns the definition — see the comment on
+# DATA_ROOT for why it is not derived from this file's location.
+from .env import DATA_ROOT, PROJECT_ROOT
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-SQLALCHEMY_DATABASE_URL = f"sqlite:///{PROJECT_ROOT / 'sbpeye.db'}"
-CHROMA_DB_DIR = PROJECT_ROOT / "chroma_db"
+SQLALCHEMY_DATABASE_URL = f"sqlite:///{DATA_ROOT / 'sbpeye.db'}"
+CHROMA_DB_DIR = DATA_ROOT / "chroma_db"
 
 # LLM traces live in their own file. They are diagnostics, not application data:
 # high-churn, disposable, and an order of magnitude larger per row than anything
@@ -18,7 +21,7 @@ CHROMA_DB_DIR = PROJECT_ROOT / "chroma_db"
 # every backup, copy and VACUUM of the corpus carried tens of megabytes of debug
 # output, and a stray recorder write could touch the file the app serves from.
 DEBUG_DATABASE_PATH = Path(
-    os.getenv("SBPEYE_DEBUG_DB") or (PROJECT_ROOT / "sbpeye_debug.db")
+    os.getenv("SBPEYE_DEBUG_DB") or (DATA_ROOT / "sbpeye_debug.db")
 )
 DEBUG_DATABASE_URL = f"sqlite:///{DEBUG_DATABASE_PATH}"
 
@@ -30,7 +33,7 @@ DEBUG_DATABASE_URL = f"sqlite:///{DEBUG_DATABASE_PATH}"
 # dirty in git — and any redeploy silently reverted whatever had been saved through
 # the Settings UI.
 APP_DATABASE_PATH = Path(
-    os.getenv("SBPEYE_APP_DB") or (PROJECT_ROOT / "sbpeye_app.db")
+    os.getenv("SBPEYE_APP_DB") or (DATA_ROOT / "sbpeye_app.db")
 )
 APP_DATABASE_URL = f"sqlite:///{APP_DATABASE_PATH}"
 

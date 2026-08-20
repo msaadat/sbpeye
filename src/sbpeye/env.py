@@ -7,9 +7,28 @@ from pathlib import Path
 from dotenv import dotenv_values, set_key, unset_key
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-MANAGED_ENV_FILE = PROJECT_ROOT / ".env.local"
-_ENV_FILES = (PROJECT_ROOT / ".env", MANAGED_ENV_FILE)
+# Where the code lives and where its data lives are not the same question. In a
+# container the source sits in a read-only image layer and the writable volume is
+# mounted elsewhere, so everything mutable — both databases, `chroma_db/`,
+# `attachments/`, `cache/` and the managed env file — hangs off DATA_ROOT rather than
+# off wherever this file happens to sit. Defaulting to the source root keeps local
+# checkouts and the whole test suite working unchanged.
+#
+# `SBPEYE_DATA_DIR` has to be a real process environment variable. It is read before
+# any env file is loaded, because it is what says where those files are; setting it in
+# `.env.local` cannot work.
+CODE_ROOT = Path(__file__).resolve().parents[2]
+DATA_ROOT = Path(os.getenv("SBPEYE_DATA_DIR") or CODE_ROOT).resolve()
+
+# Every use of this name is a database, a cache or the attachment tree; none of it is a
+# code path, so it is an alias rather than a second root. Kept because ~40 call sites
+# import it, and because the attachment path-containment guards in `main` and
+# `api/serializers` compare against it — one name means they cannot drift from the tree
+# they are guarding. Package assets resolve relative to `__file__` (see `main.STATIC_DIR`).
+PROJECT_ROOT = DATA_ROOT
+
+MANAGED_ENV_FILE = DATA_ROOT / ".env.local"
+_ENV_FILES = (DATA_ROOT / ".env", MANAGED_ENV_FILE)
 _ORIGINAL_ENV = dict(os.environ)
 
 

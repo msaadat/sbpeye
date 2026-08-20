@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Literal, NotRequired, TypedDict
 
+from .env import DATA_ROOT
 from .models import Attachment, Circular
 
 
@@ -15,7 +16,7 @@ class Document(TypedDict):
 
 def document_from_circular(circular: Circular) -> Document:
     text = circular.content_text or ""
-    cache_file = Path(__file__).resolve().parents[2] / "cache" / "html" / f"{circular.id}.html"
+    cache_file = DATA_ROOT / "cache" / "html" / f"{circular.id}.html"
     if cache_file.is_file():
         from .scraper.clean_html import extract_sbp_text
 
@@ -44,7 +45,7 @@ def document_from_attachment(attachment: Attachment) -> Document:
     if local_path := getattr(attachment, "local_path", None):
         path = Path(local_path)
         if not path.is_absolute():
-            path = Path(__file__).resolve().parents[2] / path
+            path = DATA_ROOT / path
         document["local_path"] = str(path)
     return document
 

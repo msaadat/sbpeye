@@ -2,14 +2,13 @@ import os
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Callable, Protocol
 
 import numpy as np
 from openai import OpenAI
 from sqlalchemy import text
 
-from .env import load_app_env, resolve_env_value
+from .env import DATA_ROOT, load_app_env, resolve_env_value
 
 
 load_app_env()
@@ -71,14 +70,10 @@ class EmbeddingConfig:
         )
 
     @classmethod
-    def _project_root(cls) -> Path:
-        return Path(__file__).resolve().parents[2]
-
-    @classmethod
     def cache_dir(cls) -> str:
         return os.getenv(
             "FASTEMBED_CACHE_PATH",
-            str(cls._project_root() / "cache" / "models"),
+            str(DATA_ROOT / "cache" / "models"),
         )
 
     @classmethod

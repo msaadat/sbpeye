@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .documents import document_from_attachment, document_from_circular
+from .env import DATA_ROOT
 
 
 # Retained for the existing pdfplumber search extraction path. Checklist parsing
@@ -607,7 +608,7 @@ def reference_units_from_docling(
 # with `rm -rf cache/parses`. Entries are content-keyed, so the directory is bounded by
 # the corpus rather than by how often analysis is re-run — superseded editions leave an
 # orphan each, which is the cost of never having to reason about invalidation.
-PARSE_CACHE_DIR = Path(__file__).resolve().parents[2] / "cache" / "parses"
+PARSE_CACHE_DIR = DATA_ROOT / "cache" / "parses"
 # Bump when a change to `reference_units_from_docling` would produce different units for
 # the same bytes. Every cached entry then misses and is rebuilt on next use.
 PARSE_CACHE_VERSION = 1

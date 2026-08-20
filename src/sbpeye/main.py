@@ -2,13 +2,14 @@ from fastapi import FastAPI, Depends, Request, BackgroundTasks, Form, Body
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session, aliased
-from sqlalchemy import func, extract, and_, or_
+from sqlalchemy import func, extract, and_, or_, text
 from urllib.parse import urljoin, urlparse, urlencode
 from pathlib import Path
 from contextlib import asynccontextmanager
 import cloudscraper
 from bs4 import BeautifulSoup
 import re as _re
+import logging
 import os
 import json
 import uuid
@@ -661,6 +662,51 @@ ECODATA_CACHE_TTL_HOURS = 1
 @app.get("/ecodata")
 async def ecodata_page():
     return spa_index_response()
+
+
+@app.get("/healthz")
+def healthz():
+    """Readiness probe for the platform health check.
+
+    Green when both databases open and the vector store answers. Deliberately does
+    **not** probe the LLM provider: chat would degrade during a provider outage, but
+    search, browsing and the rest of the corpus keep working, and wiring the provider
+    into this endpoint would let someone else's outage roll the container.
+
+    Failures report the exception class, not its message. This endpoint is unauthenticated
+    and a SQLAlchemy error carries the database path in its text.
+    """
+    checks: dict[str, str] = {}
+    healthy = True
+
+    for name, factory in (("corpus_db", SessionLocal), ("app_db", AppSessionLocal)):
+        session = None
+        try:
+            session = factory()
+            session.execute(text("SELECT 1"))
+            checks[name] = "ok"
+        except Exception as exc:
+            logging.exception("Health check failed for %s", name)
+            checks[name] = f"error: {type(exc).__name__}"
+            healthy = False
+        finally:
+            if session is not None:
+                session.close()
+
+    # Responding is the check, not holding data: a store that opens but is empty is a
+    # deployment that has not been seeded yet, which is a legible state rather than a
+    # broken one. It is reported so the distinction is visible.
+    try:
+        checks["vector_store"] = "ok" if has_vector_store_data() else "ok (empty)"
+    except Exception as exc:
+        logging.exception("Health check failed for the vector store")
+        checks["vector_store"] = f"error: {type(exc).__name__}"
+        healthy = False
+
+    return JSONResponse(
+        {"status": "ok" if healthy else "unhealthy", "checks": checks},
+        status_code=200 if healthy else 503,
+    )
 
 
 @app.get("/api/app/status")

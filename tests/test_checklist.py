@@ -982,3 +982,32 @@ def test_run_entities_batch_propagates_rate_limit(monkeypatch):
         client._run_entities_batch(
             label="C", batch=[_make_block("u1"), _make_block("u2")]
         )
+
+
+def test_missing_docling_build_says_so_instead_of_raising_import_error():
+    """Docling is an optional extra and the deployment image builds without it.
+
+    A bare ModuleNotFoundError surfacing from a 500 reads like a bug; this has to read
+    like a build without a feature, and name the way to get the feature back.
+    """
+    import builtins
+
+    from sbpeye import checklist
+
+    checklist._document_converter.cache_clear()
+    real_import = builtins.__import__
+
+    def without_docling(name, *args, **kwargs):
+        if name.split(".")[0] in {"docling", "docling_core"}:
+            raise ModuleNotFoundError(f"No module named {name!r}")
+        return real_import(name, *args, **kwargs)
+
+    try:
+        builtins.__import__ = without_docling
+        with pytest.raises(checklist.DoclingUnavailable) as excinfo:
+            checklist._document_converter()
+    finally:
+        builtins.__import__ = real_import
+        checklist._document_converter.cache_clear()
+
+    assert "uv sync --extra checklist" in str(excinfo.value)

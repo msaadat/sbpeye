@@ -3484,7 +3484,6 @@ dependencies = [
     { name = "chromadb" },
     { name = "click" },
     { name = "cloudscraper" },
-    { name = "docling" },
     { name = "fastapi" },
     { name = "fastembed" },
     { name = "jinja2" },
@@ -3501,6 +3500,11 @@ dependencies = [
     { name = "uvicorn" },
 ]
 
+[package.optional-dependencies]
+checklist = [
+    { name = "docling" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
@@ -3512,7 +3516,7 @@ requires-dist = [
     { name = "chromadb", specifier = ">=1.5.9" },
     { name = "click", specifier = ">=8.1.0" },
     { name = "cloudscraper" },
-    { name = "docling", specifier = ">=2.104.0,<3" },
+    { name = "docling", marker = "extra == 'checklist'", specifier = ">=2.104.0,<3" },
     { name = "fastapi", specifier = ">=0.136.3" },
     { name = "fastembed", specifier = ">=0.7.4" },
     { name = "jinja2", specifier = ">=3.1.6" },
@@ -3528,6 +3532,7 @@ requires-dist = [
     { name = "sqlalchemy", specifier = ">=2.0.50" },
     { name = "uvicorn", specifier = ">=0.48.0" },
 ]
+provides-extras = ["checklist"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=9.1.1" }]

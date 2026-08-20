@@ -808,3 +808,49 @@ def test_law_file_refuses_when_the_live_file_is_a_different_edition(client, monk
         assert version.local_path is None
     finally:
         db.close()
+
+
+def test_healthz_reports_every_backing_store(client):
+    test_client, _ = client
+
+    resp = test_client.get("/healthz")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert set(body["checks"]) == {"corpus_db", "app_db", "vector_store"}
+    assert all(v.startswith("ok") for v in body["checks"].values())
+
+
+def test_healthz_survives_an_llm_provider_outage(client, monkeypatch):
+    """The platform health check must not be coupled to the model provider.
+
+    If it were, someone else's outage would fail the check and roll the container,
+    taking down search and browsing along with chat.
+    """
+    test_client, _ = client
+
+    def unreachable(*args, **kwargs):
+        raise RuntimeError("provider is down")
+
+    monkeypatch.setattr(main_module, "get_ai_client", unreachable)
+
+    assert test_client.get("/healthz").status_code == 200
+
+
+def test_healthz_is_unhealthy_when_the_vector_store_fails(client, monkeypatch):
+    test_client, _ = client
+
+    def broken():
+        raise RuntimeError("chroma segment is unreadable")
+
+    monkeypatch.setattr(main_module, "has_vector_store_data", broken)
+
+    resp = test_client.get("/healthz")
+
+    assert resp.status_code == 503
+    assert resp.json()["status"] == "unhealthy"
+    # The reason is the exception class only: this endpoint is unauthenticated and a
+    # store or database error carries filesystem paths in its message.
+    assert resp.json()["checks"]["vector_store"] == "error: RuntimeError"
+    assert "chroma segment" not in resp.text

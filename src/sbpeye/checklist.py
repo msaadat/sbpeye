@@ -98,12 +98,29 @@ def _unit_id(doc_id: str, source_ref: str, text: str) -> str:
     return f"{doc_id}:{digest}"
 
 
+class DoclingUnavailable(RuntimeError):
+    """Raised when checklist extraction is asked for in a build without Docling.
+
+    Docling is an optional extra (`uv sync --extra checklist`) because it carries torch
+    and the CUDA runtime. Every path into it funnels through `_document_converter`, so
+    this is the one place that has to notice it is missing — and it has to say so
+    plainly, since the alternative is a bare `ModuleNotFoundError` surfacing as a 500
+    that reads like a bug rather than a build without a feature.
+    """
+
+
 @lru_cache(maxsize=1)
 def _document_converter():
     """Create Docling lazily so normal API startup does not initialize its models."""
-    from docling.datamodel.base_models import InputFormat
-    from docling.datamodel.pipeline_options import PdfPipelineOptions
-    from docling.document_converter import DocumentConverter, PdfFormatOption
+    try:
+        from docling.datamodel.base_models import InputFormat
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
+        from docling.document_converter import DocumentConverter, PdfFormatOption
+    except ModuleNotFoundError as exc:
+        raise DoclingUnavailable(
+            "Checklist extraction needs Docling, which is not installed in this build. "
+            "Install it with `uv sync --extra checklist`."
+        ) from exc
 
     pdf_options = PdfPipelineOptions()
     pdf_options.do_ocr = True

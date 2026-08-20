@@ -1,0 +1,36 @@
+# Secrets. This file holds live provider API keys; baking it into an image layer
+# ships them to anyone who can pull the image. Nothing else in here is as important.
+.env
+.env.local
+
+# Application data. Uploaded to the Railway volume, never into the image (see the
+# deployment plan, 5.1) — and `files/` alone is ~1 GB.
+files/
+models/
+chroma_db/
+sbpeye.db
+sbpeye_app.db
+sbpeye_debug.db
+*.db.backup-*
+
+# Build inputs that the image builds for itself, or that would fight the build.
+.venv/
+frontend/node_modules/
+frontend/dist/
+src/sbpeye/static/spa/
+**/__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Local-only noise.
+.git/
+.github/
+.claude/
+.codex/
+benchmarks/results/
+tmp/
+docs/
+tests/

@@ -49,9 +49,17 @@ replaced edition can never be served as the archived one.
 The `DocumentCache` table was not built and is not needed (10.3, option C). Suite: 1 failed /
 578 passed, baseline failure only.
 
+**Section 9 (partial) — the container.** `Dockerfile`, `.dockerignore`, `GET /healthz` and
+the `PORT` binding are done, and the image is built and smoke-tested locally: it boots in
+~6 s, serves the SPA, and **returns correct vector search results from the store built on
+this machine** — retiring the chromadb format risk that 5.3 called the most likely thing
+here to fail. `docling` became an optional extra to get the image from 19.3 GB to 1.51 GB
+(9.1.3). Still to do in 9: the Railway service itself, the volume, and the environment.
+
 ### 0.2 Not started
 
-Sections 6 through 9. Section 5 needs no code (5.1).
+Sections 6, 7 and 8, and the Railway half of section 9 (9.2, 9.3). Section 5 needs no code
+(5.1).
 
 ### 0.3 Sequencing
 
@@ -909,7 +917,7 @@ the volume copy, which works but is slower and puts LLM cost on the deployment.
 
 ## 9. Railway deployment
 
-### 9.1 Container
+### 9.1 Container — written, and much larger than this section assumed
 
 Multi-stage `Dockerfile`:
 
@@ -925,6 +933,108 @@ measuring if build times become painful, but not worth doing pre-emptively.
 `.dockerignore` must exclude `.venv/`, `files/`, `models/`, `frontend/node_modules/`,
 `sbpeye_debug.db`, `benchmarks/results/` and — importantly — **`.env.local`**. That file
 currently contains live provider keys; baking it into an image layer would ship them.
+
+#### 9.1.1 Written
+
+`Dockerfile` and `.dockerignore` exist and the image builds. Structure is as described
+above: `node:20-slim` runs `npm ci && npm run build`, which vite writes straight to
+`../src/sbpeye/static/spa` (its configured `outDir`), and the python stage copies that
+bundle in already in the layout the app serves from.
+
+Beyond the plan:
+
+- **The embedding model is baked in** with a build-time `TextEmbedding(...)` call rather
+  than copied from `models/` — `models/` is gitignored, so a GitHub-sourced build has no
+  copy of it (the same trap as 5.5, in a different place). `FASTEMBED_CACHE_PATH=/opt/models`
+  points the app at it. This must stay in step with `EMBEDDING_MODEL`.
+- **`libgomp1` is required**, not optional: onnxruntime fails at import without it, and
+  fastembed is on the hot path. `libgl1` and `libglib2.0-0` are for opencv via docling and
+  matter only when a checklist is generated.
+- **No data ships.** `sbpeye.db` is excluded along with `chroma_db/` and `files/`, per 5.3.
+
+`.dockerignore` takes the build context from **7.5 GB to 17.9 MB**.
+
+#### 9.1.2 The image is 19.3 GB
+
+Two separate causes, measured rather than estimated. This section's "expect a large image"
+was an understatement by more than an order of magnitude.
+
+**1. A 5.5 GB uv cache was baked into the layer.** With `UV_LINK_MODE=copy`, `uv sync`
+leaves every downloaded wheel in `/root/.cache/uv`, and a later `rm` in its own `RUN`
+frees the files without shrinking the layer beneath. Fixed by deleting the cache inside
+the same `RUN`. This one was a Dockerfile bug, not a dependency problem.
+
+**2. The venv is 5.8 GB, and 4.9 GB of that is GPU tooling.** Measured inside the image:
+
+| Package | Size |
+|---|---|
+| `nvidia` (CUDA runtime) | 2.7 GB |
+| `torch` | 1.2 GB |
+| `triton` | 691 MB |
+| `opencv_python.libs` + `cv2` | 188 MB |
+| `transformers` | 108 MB |
+| `rapidocr` | 33 MB |
+| everything else | ~900 MB |
+
+`uv.lock` resolves the CUDA build of torch, so a machine with no GPU carries the whole
+CUDA runtime. **`docling` is the sole path to all of it** — confirmed from the lockfile:
+`torch <- docling-ibm-models, accelerate, torchvision`, `transformers <- docling-ibm-models`,
+`opencv-python <- rapidocr`. Nothing else in the tree needs any of them.
+
+#### 9.1.3 Options for the size
+
+1.1 already recorded that every `docling` import is function-local in `checklist.py`, and
+that still holds — verified again, ten imports, all inside functions, no module-level
+import anywhere in `src/`. So the package can be absent and the application starts
+normally; only checklist generation would fail, and it would fail with `ImportError`
+unless that path is given a clear message.
+
+| Option | Effect | Cost |
+|---|---|---|
+| **Drop `docling` from the deployment** | venv 5.8 GB -> ~0.9 GB | Loses checklist reference-unit extraction. 8.1 measured 4 of 3652 circulars with a checklist, so the feature is close to unexercised |
+| **Pin torch to the CPU wheel index** | Removes ~4.6 GB, keeps the feature | Changes `pyproject.toml` and re-locks `uv.lock`, which also changes the local venv. FastEmbed already reports `Backend: CPU` locally, so nothing is lost in practice |
+| **Accept it** | — | A multi-GB image on every deploy, against 1.1's whole reason for choosing Railway: that a fix reaches testers in two minutes |
+
+**Decided: drop `docling` from the deployment.** It is now a `[project.optional-dependencies]`
+extra rather than a base dependency, installed locally with `uv sync --extra checklist` and
+deliberately absent from the image.
+
+**Result: 19.3 GB -> 1.51 GB.** The deployment install resolves 112 packages with zero
+torch, CUDA, triton, transformers, opencv or rapidocr, and fastembed, onnxruntime, chromadb
+and pdfplumber all intact. `libgl1` and `libglib2.0-0` came out of the Dockerfile with
+opencv; `libgomp1` stays, because onnxruntime still needs it.
+
+The missing feature announces itself. Every route into Docling funnels through
+`checklist._document_converter`, which now raises `DoclingUnavailable` — "Checklist
+extraction needs Docling, which is not installed in this build. Install it with
+`uv sync --extra checklist`." A bare `ModuleNotFoundError` behind a 500 would read like a
+bug rather than a build without a feature. Covered by
+`test_missing_docling_build_says_so_instead_of_raising_import_error`.
+
+Note for anyone syncing locally: `uv sync` without `--extra checklist` will now *remove*
+docling from an existing virtualenv.
+
+#### 9.1.4 Smoke test — passed
+
+Built and run locally, no Railway involved. This is verification item 3.
+
+| Check | Result |
+|---|---|
+| Boot to first response | ~6 s |
+| `/healthz` with corpus + store on the volume | `{"status":"ok"}`, all three green |
+| **Vector search in the container** | Correct, semantically relevant hits |
+| SPA | 200, serving the built bundle |
+| FastEmbed | `Backend: CPU`, loaded from the baked-in model — no boot-time download |
+| Checklist path | `DoclingUnavailable` with the install hint |
+| Boot against an **empty** volume | 200, `vector_store: "ok (empty)"`; creates `sbpeye.db`, `sbpeye_app.db`, `sbpeye_debug.db`, `chroma_db/` |
+
+**The chromadb format risk is retired.** 5.3 called it "the single most likely thing in this
+plan to fail in a way that is annoying to diagnose", and 5.4 rule 3 kept it live under the
+upload route. A `python:3.12-slim` container running the pinned `chromadb>=1.5.9` opened the
+486 MB store built on the development machine and returned correct results from it.
+
+One hardening item noted, not done: the container runs as root, so files it creates on the
+volume are root-owned. Fine for a test deploy on Railway, wrong for production.
 
 ### 9.2 Volume
 
@@ -956,18 +1066,29 @@ the corpus alone. **Hobby is the floor and is the plan being taken**; see 5.3 fo
 Rotate the keys currently in `.env.local` before any of this goes near a deployed image.
 They have been sitting in a working tree, and at least one is a live-looking token.
 
-### 9.4 Health check
+### 9.4 Health check — done
 
-There is no health endpoint. Add `GET /healthz` returning 200 once both databases are
-openable and the Chroma collection responds. Point Railway's health check at it.
+`GET /healthz` returns `{"status", "checks"}` with `corpus_db`, `app_db` and
+`vector_store`; 200 when all three answer, 503 otherwise. Point Railway's health check
+at it.
 
-It must **not** depend on the LLM provider being reachable — a provider outage would
-otherwise take the container down.
+Three decisions worth keeping:
 
-### 9.5 Startup
+- **It does not touch the LLM provider.** Coupling them would let someone else's outage
+  roll the container and take search and browsing down with chat.
+  `test_healthz_survives_an_llm_provider_outage` pins this.
+- **An empty vector store is healthy**, reported as `ok (empty)`. A store that opens but
+  holds nothing is an un-uploaded deployment, which is a legible state rather than a
+  broken one.
+- **Failures report the exception class, not its message.** The endpoint is
+  unauthenticated and a SQLAlchemy or Chroma error carries filesystem paths in its text.
 
-`run.py` already avoids `reload` unless `--dev` or `SBPEYE_DEV=1`, so it is deployable as-is.
-Confirm the port binding matches Railway's injected `PORT` rather than the hardcoded 8000.
+### 9.5 Startup — done
+
+`run.py` already avoided `reload` unless `--dev` or `SBPEYE_DEV=1`. The port was hardcoded
+to 8000 and is now `int(os.environ.get("PORT") or 8000)`. This was a real blocker, not a
+tidy-up: Railway routes to the port it injects, so the health check would never have
+connected and the deploy would have been marked failed with the process running fine.
 
 ---
 
@@ -1021,15 +1142,16 @@ Done as proposed, including the durability split. Section 12.6.
 Before calling the deployment done:
 
 1. **Test suite** diffed against the baseline on clean `main`, not against zero, and
-   measured on the machine in use rather than taken from this document (0.4). ✔ as of the
-   section 4 work — 1 failed / 575 passed on Linux, identical to the stashed baseline.
+   measured on the machine in use rather than taken from this document (0.4). ✔ — 1 failed
+   / 582 passed, the baseline failure only.
 2. **Boundary test**: a corpus session must raise on app tables (section 2.5). ✔ confirmed
    against the live files and now covered by a test.
-3. **Cold-start test**: upload `sbpeye.db` and `chroma_db/` to a fresh volume, then boot.
-   `sbpeye_app.db` must be created, **vector search must return results** — which is the real
-   assertion, since it is the proof the container's chromadb opened a store built elsewhere
-   (5.4, rule 3) — and a PDF must download on demand (proves section 3 and the attachments
-   path).
+3. **Cold-start test**: ✔ locally (9.1.4). Booted the image against a volume holding
+   `sbpeye.db` and `chroma_db/`: health green and vector search returned correct results,
+   which is the proof the container's chromadb opened a store built elsewhere (5.4, rule 3).
+   Also booted against an empty volume: 200 with `vector_store: "ok (empty)"`. Still to
+   confirm on Railway itself, and the PDF-download-on-demand arm (section 3) is untested in
+   a container.
 4. **Redeploy test**: change a setting through the UI, redeploy the same image, confirm the
    setting survived and the uploaded corpus was untouched.
 5. **Auth test**: every endpoint in 7.3 returns 403 for a non-admin session and 401 for no

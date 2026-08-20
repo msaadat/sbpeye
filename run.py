@@ -16,7 +16,10 @@ if __name__ == "__main__":
     uvicorn.run(
         "sbpeye.main:app",
         host="0.0.0.0",
-        port=8000,
+        # Railway (and most PaaS) inject the port to listen on and route to it. A
+        # hardcoded 8000 means the health check never connects and the deploy is
+        # marked failed with the process running fine.
+        port=int(os.environ.get("PORT") or 8000),
         reload=dev_mode,
         reload_dirs=[str(Path(__file__).parent / "src")] if dev_mode else None,
     )

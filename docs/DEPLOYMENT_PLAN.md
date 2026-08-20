@@ -56,6 +56,10 @@ this machine** — retiring the chromadb format risk that 5.3 called the most li
 here to fail. `docling` became an optional extra to get the image from 19.3 GB to 1.51 GB
 (9.1.3). Still to do in 9: the Railway service itself, the volume, and the environment.
 
+**Section 6 — ecodata.** The refresh moved off the request path onto a scheduler owned by the
+application, with an admin-only forced refresh. The last un-gated corpus writer is now the app
+refreshing its own index on a timer rather than an arbitrary user's page load (6.4).
+
 **Section 7 — authentication, including the UI.** Email/password with signed HTTP-only cookies, no
 self-registration, admin-created accounts. The boundary is middleware with an allowlist so a
 new route is private by default; the admin gate is per-route. Chat is scoped per user;
@@ -70,8 +74,8 @@ write to the real `sbpeye_app.db`, and the data loss recorded with it.
 
 ### 0.2 Not started
 
-Sections 6 and 8, and the Railway half of section 9 (9.2, 9.3). Section 5 needs no code
-(5.1); the container half of 9 is done (9.1.1-9.1.4).
+Section 8, and the Railway half of section 9 (9.2, 9.3). Section 5 needs no code (5.1); the
+container half of 9 is done (9.1.1-9.1.4, 11.1).
 
 ### 0.3 Sequencing
 
@@ -83,7 +87,7 @@ is now in. Sections 6 and 8 are small and can be done in any order.
 2. DB split ✔ ──→ 4. data directory ✔ ──→ 3. cache paths ✔ ──→ 9. Railway
                                                   │              │
                                   5. corpus upload (no code) ────┤
-                                  6. ecodata refresh ────────────┤
+                                  6. ecodata refresh ✔ ──────────┤
                                   7. auth + admin gating ✔ ──────┤
                                   8. corpus content prep ────────┤
                                  12. tree consolidation ✔ ───────┘
@@ -769,7 +773,7 @@ assume it is alone; a rebuild inside the serving process has readers arriving mi
 
 ---
 
-## 6. Ecodata: scheduled refresh, not request-triggered
+## 6. Ecodata: scheduled refresh, not request-triggered — complete
 
 ### 6.1 The problem
 
@@ -794,6 +798,33 @@ Move the refresh to a background scheduler owned by the application:
 
 The existing `SyncStatus.ecodata_index_time` column continues to record the last successful
 refresh, so the UI needs no change.
+
+### 6.4 Landed
+
+| Change | Where |
+|---|---|
+| `GET /api/ecodata/entries` is a pure read; the TTL check is gone | `main.py` |
+| `refresh_ecodata_index()` — scrape plus timestamp, behind a non-blocking lock | `main.py` |
+| `_ecodata_refresh_loop()` on a thread started from `app_lifespan` | `main.py` |
+| `POST /api/ecodata/refresh`, admin-only, 409 if one is already running | `main.py` |
+| `SBPEYE_ECODATA_REFRESH_SECONDS` — default 3600, `0` disables | `main.py` |
+
+Three details worth keeping:
+
+- **The first scrape waits 30 seconds after boot**, and the loop is started rather than
+  awaited. A live round-trip to sbp.org.pk inside the lifespan would hold the container short
+  of ready for as long as SBP takes to answer, and a slow scrape would read as a slow start —
+  enough for a platform to roll a deploy that was fine.
+- **The loop survives a failed scrape.** SBP is intermittently unreachable and the next tick
+  is a perfectly good retry; an exception escaping would kill the scheduler for the life of
+  the process.
+- **Shutdown signals the thread** rather than relying on the daemon flag, so a development
+  reload does not leave a scraper writing to a database the next process owns.
+- **An unparseable interval falls back to the default** instead of disabling the refresh, so
+  a typo does not silently stop it.
+
+Five tests in `tests/test_routes_smoke.py`, including one that fails if the read path ever
+scrapes again.
 
 ### 6.3 Note
 
@@ -1250,10 +1281,59 @@ the corpus alone. **Hobby is the floor and is the plan being taken**; see 5.3 fo
 | Provider key (`OPENAI_API_KEY`, `GROQ_API_KEY`, …) | Per chosen provider |
 | `EMBEDDING_PROVIDER` | Keep `fastembed`. Must match the model the shipped Chroma index was built with (`BAAI/bge-base-en-v1.5`) or vector search returns nonsense |
 | `LLM_DEBUG_ALLOWED` | Set `false` unless actively debugging — traces store full prompts |
-| `SBPEYE_ECODATA_REFRESH_SECONDS` | Section 6 |
+| `SBPEYE_ECODATA_REFRESH_SECONDS` | Optional. Seconds between EcoData scrapes; default 3600, `0` disables (6.4) |
+
+**Only the first three rows are required.** Since 7.7 the AI variables are optional: the
+admin signs in, sets their own provider under Settings, and presses "Use my provider" in the
+admin console to copy it into the deployment configuration (7.10). That is fewer secrets in
+the platform's environment, and it is the same key either way.
+
+`EMBEDDING_PROVIDER` only needs setting if you intend to change it from the `fastembed`
+default — and you should not, because it must match the model the uploaded Chroma index was
+built with (`BAAI/bge-base-en-v1.5`) or search returns nonsense rather than an error.
 
 Rotate the keys currently in `.env.local` before any of this goes near a deployed image.
-They have been sitting in a working tree, and at least one is a live-looking token.
+They have been sitting in a working tree, and at least one is a live-looking token. Note this
+is now less urgent than it was: the deployment no longer needs those keys in its environment
+at all, so rotation is hygiene on the local file rather than a deployment prerequisite.
+
+### 9.6 Deployment runbook
+
+Volume sizes at time of writing: `sbpeye.db` 70 MB, `chroma_db/` 521 MB.
+
+1. **Create the service** from the GitHub repo. Railway detects the `Dockerfile` and builds
+   it; no Nixpacks configuration is involved.
+2. **Upgrade to Hobby** before adding the volume. Free/Trial caps volumes at 0.5 GB, which
+   does not fit the corpus alone (5.3).
+3. **Add a volume, mount path `/data`.**
+4. **Set three variables:** `SBPEYE_DATA_DIR=/data`, `SBPEYE_SECRET_KEY` (generate with
+   `python -c "import secrets; print(secrets.token_urlsafe(48))"` — 32 characters minimum,
+   and the container refuses to start without it), and `SBPEYE_ADMIN_EMAIL` /
+   `SBPEYE_ADMIN_PASSWORD` for the first admin.
+5. **Point the health check at `/healthz`.**
+6. **Deploy, and let the first boot finish.** It will come up with an empty corpus and report
+   `vector_store: "ok (empty)"` — that is the un-uploaded state, not a fault.
+7. **Stop the service**, then upload the corpus. Stopping matters: Chroma's `PersistentClient`
+   is single-process and writing into `chroma_db/` while the app holds the HNSW segment open
+   is the one way to corrupt the store on this route (5.4).
+
+   ```bash
+   railway volume -v <volume> files upload ./sbpeye.db /sbpeye.db
+   railway volume -v <volume> files upload ./chroma_db /chroma_db
+   ```
+
+8. **Start it again** and confirm `/healthz` reports `vector_store: "ok"` rather than
+   `"ok (empty)"`. A search returning results is the proof the container's chromadb opened a
+   store built elsewhere — the risk 5.4 rule 3 keeps alive on this route, and the one thing
+   here most likely to fail.
+9. **Sign in as the admin**, set your own provider key under Settings, then press **Use my
+   provider** in the admin console so corpus generation has credentials too.
+10. **Add testers** from the admin console. Each sets their own provider key on first sign-in;
+    chat does not work for them until they do, by design (7.7).
+
+Then the two verification items that need a live deployment: change a setting through the UI
+and redeploy to confirm it survived (11.4), and check `git status` in a local checkout is
+clean after a session of real use (11.6).
 
 ### 9.4 Health check — done
 
@@ -1343,14 +1423,33 @@ Before calling the deployment done:
    a container.
 4. **Redeploy test**: change a setting through the UI, redeploy the same image, confirm the
    setting survived and the uploaded corpus was untouched.
-5. **Auth test**: every endpoint in 7.3 returns 403 for a non-admin session and 401 for no
-   session.
+5. **Auth test**: ✔ in a container (11.1). A tester gets 403 on `/api/settings`,
+   `/api/admin/users`, `/api/debug/status` and `POST /api/circulars/sync`, and 200 on their
+   own `/api/settings/ai`. Unauthenticated: 401 on the API, 303 to `/login` on a page.
 6. **Git cleanliness**: after a full session of use against a deployed instance, `git status`
    in a local checkout must show `sbpeye.db` unmodified. That was the original symptom; it is
    the clearest single signal the split worked.
 7. **Data-directory test**: boot with `SBPEYE_DATA_DIR` set and confirm nothing mutable was
    written under the source tree. `grep -rn "parents\[2\]" src/` returning more than the
    single `CODE_ROOT` hit means a path has escaped `DATA_ROOT` (4.4).
+
+### 11.1 Container smoke test, with authentication
+
+Re-run after section 7, because the image verified in 9.1.4 predated all of it and the
+dependency set changed (`argon2-cffi`, `itsdangerous`). Still 1.51 GB.
+
+| Check | Result |
+|---|---|
+| Boot with no `SBPEYE_SECRET_KEY` | Refuses, naming the variable and how to generate one |
+| Boot with one | Healthy in ~4 s |
+| `/healthz` | `corpus_db`, `app_db`, `vector_store` all ok |
+| Unauthenticated API / page / `/login` | 401 / 303 to `/login?next=…` / 200 |
+| First-admin seeding from env | Created, and signs in |
+| **Vector search, authenticated** | Correct results — the container's chromadb opens the store built on this machine |
+| Admin creates a tester | Works; that tester is then refused on all four admin surfaces |
+
+What this does **not** cover: the redeploy test (item 4) and git cleanliness after real use
+(item 6), both of which need a running deployment.
 
 ---
 

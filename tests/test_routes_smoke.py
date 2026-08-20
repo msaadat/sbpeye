@@ -860,3 +860,76 @@ def test_healthz_is_unhealthy_when_the_vector_store_fails(client, monkeypatch):
     # store or database error carries filesystem paths in its message.
     assert resp.json()["checks"]["vector_store"] == "error: RuntimeError"
     assert "chroma segment" not in resp.text
+
+
+def test_ecodata_entries_never_scrapes(client, monkeypatch):
+    """The read path is pure.
+
+    It used to refresh on a TTL from whichever request found the data stale, so an
+    arbitrary user's page load blocked on a live scrape of sbp.org.pk and wrote the
+    corpus with nobody to attribute the write to.
+    """
+    test_client, _ = client
+
+    def unexpected_scrape(db):
+        raise AssertionError("GET /api/ecodata/entries must not scrape")
+
+    monkeypatch.setattr(main_module, "scrape_ecodata_index", unexpected_scrape)
+
+    assert test_client.get("/api/ecodata/entries").status_code == 200
+
+
+def test_ecodata_refresh_is_admin_only(client, db_factory):
+    from conftest import sign_in, sign_out
+
+    test_client, _ = client
+    sign_out(test_client)
+    sign_in(test_client, db_factory, is_admin=False)
+
+    assert test_client.post("/api/ecodata/refresh").status_code == 403
+
+
+def test_ecodata_refresh_scrapes_and_stamps_the_time(client, monkeypatch):
+    test_client, db = client
+    calls = []
+    monkeypatch.setattr(main_module, "scrape_ecodata_index", lambda db: calls.append(1))
+
+    response = test_client.post("/api/ecodata/refresh")
+
+    assert response.status_code == 200
+    assert calls == [1]
+    session = db()
+    try:
+        stamped = session.query(SyncStatus).order_by(SyncStatus.id.desc()).first()
+        assert stamped is not None and stamped.ecodata_index_time is not None
+    finally:
+        session.close()
+
+
+def test_a_refresh_already_running_is_reported_not_queued(client, monkeypatch):
+    """Two concurrent scrapes would race on the same rows; the second is told to wait."""
+    test_client, _ = client
+    main_module._ECODATA_REFRESH_LOCK.acquire()
+    try:
+        response = test_client.post("/api/ecodata/refresh")
+    finally:
+        main_module._ECODATA_REFRESH_LOCK.release()
+
+    assert response.status_code == 409
+    assert "already running" in response.json()["error"]
+
+
+def test_the_refresh_interval_is_configurable_and_disablable(monkeypatch):
+    monkeypatch.delenv("SBPEYE_ECODATA_REFRESH_SECONDS", raising=False)
+    assert main_module._ecodata_refresh_interval_seconds() == 3600
+
+    monkeypatch.setenv("SBPEYE_ECODATA_REFRESH_SECONDS", "120")
+    assert main_module._ecodata_refresh_interval_seconds() == 120
+
+    # Zero disables the scheduler outright, which the loop checks before its first wait.
+    monkeypatch.setenv("SBPEYE_ECODATA_REFRESH_SECONDS", "0")
+    assert main_module._ecodata_refresh_interval_seconds() == 0
+
+    # A typo falls back to the default rather than disabling the refresh silently.
+    monkeypatch.setenv("SBPEYE_ECODATA_REFRESH_SECONDS", "hourly")
+    assert main_module._ecodata_refresh_interval_seconds() == 3600

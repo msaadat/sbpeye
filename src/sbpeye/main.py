@@ -355,7 +355,21 @@ async def app_lifespan(_app: FastAPI):
     fail_interrupted_ai_jobs()
     fail_interrupted_sync_jobs()
     threading.Thread(target=_warm_up_search_index, daemon=True).start()
-    yield
+    # Started here rather than run here: the first scrape is a live HTTP round-trip to
+    # sbp.org.pk, and doing it inside the lifespan would hold the container short of
+    # ready for as long as SBP takes to answer.
+    _ecodata_stop.clear()
+    ecodata_thread = threading.Thread(
+        target=_ecodata_refresh_loop, name="ecodata-refresh", daemon=True
+    )
+    ecodata_thread.start()
+    try:
+        yield
+    finally:
+        # Signalled rather than left to the daemon flag, so a reload in development does
+        # not leave a scraper running against a database the next process owns.
+        _ecodata_stop.set()
+        ecodata_thread.join(timeout=5)
 
 
 # Create all tables
@@ -728,7 +742,18 @@ async def about_page():
 
 
 
-ECODATA_CACHE_TTL_HOURS = 1
+# How often the scheduler re-scrapes SBP's EcoData index. `0` disables the refresh
+# entirely, which is what a deployment wants if it would rather the index stay put.
+ECODATA_REFRESH_DEFAULT_SECONDS = 3600
+# The first scrape waits this long after boot. Not zero: the container has to answer its
+# health check before spending a live HTTP round-trip to sbp.org.pk, or a slow scrape
+# looks like a slow start and the platform rolls a deploy that was fine.
+ECODATA_FIRST_REFRESH_DELAY_SECONDS = 30
+
+# One refresh at a time. The scheduler is the only caller in normal operation, but the
+# admin route can trigger one alongside it.
+_ECODATA_REFRESH_LOCK = threading.Lock()
+_ecodata_stop = threading.Event()
 
 @app.get("/ecodata")
 async def ecodata_page():
@@ -828,35 +853,81 @@ async def get_llm_status(db: Session = Depends(get_db)):
     return client.check_availability()
 
 
-def _get_ecodata_entries(db: Session, force_refresh: bool = False) -> list[dict]:
-    sync_status = (
-        db.query(SyncStatus)
-        .filter(circular_sync_only())
-        .order_by(SyncStatus.id.desc())
-        .first()
-    )
-    ecodata_time = sync_status.ecodata_index_time if sync_status else None
+def _ecodata_refresh_interval_seconds() -> int:
+    raw = os.getenv("SBPEYE_ECODATA_REFRESH_SECONDS")
+    if raw is None or not raw.strip():
+        return ECODATA_REFRESH_DEFAULT_SECONDS
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logging.warning(
+            "SBPEYE_ECODATA_REFRESH_SECONDS=%r is not a number; using the %ds default.",
+            raw, ECODATA_REFRESH_DEFAULT_SECONDS,
+        )
+        return ECODATA_REFRESH_DEFAULT_SECONDS
 
-    needs_refresh = force_refresh or ecodata_time is None
-    if not needs_refresh and ecodata_time:
-        age = datetime.now() - ecodata_time
-        if age > timedelta(hours=ECODATA_CACHE_TTL_HOURS):
-            needs_refresh = True
 
-    if needs_refresh:
+def refresh_ecodata_index(db: Session) -> bool:
+    """Re-scrape SBP's EcoData index and record when it happened.
+
+    This writes the corpus. It used to run from whichever `GET /api/ecodata/entries`
+    request happened to find the data stale, which meant an arbitrary user's page load
+    blocked on a live scrape of sbp.org.pk and wrote the corpus with no identity to
+    attribute the write to — the one corpus writer the admin gate in 1.3 could not reach.
+    It is now the application refreshing its own scraped index on a schedule, which is a
+    thing the application does rather than a thing a user did.
+
+    Returns whether the scrape ran; `False` means another one was already in progress.
+    """
+    if not _ECODATA_REFRESH_LOCK.acquire(blocking=False):
+        return False
+    try:
         scrape_ecodata_index(db)
+        sync_status = (
+            db.query(SyncStatus)
+            .filter(circular_sync_only())
+            .order_by(SyncStatus.id.desc())
+            .first()
+        )
         if sync_status:
             sync_status.ecodata_index_time = datetime.now()
-            db.commit()
         else:
-            new_status = SyncStatus(
+            db.add(SyncStatus(
                 last_sync_date=datetime.now(),
                 status="success",
-                ecodata_index_time=datetime.now()
-            )
-            db.add(new_status)
-            db.commit()
+                ecodata_index_time=datetime.now(),
+            ))
+        db.commit()
+        return True
+    finally:
+        _ECODATA_REFRESH_LOCK.release()
 
+
+def _ecodata_refresh_loop() -> None:
+    """The scheduler. Owns every routine EcoData refresh."""
+    interval = _ecodata_refresh_interval_seconds()
+    if interval <= 0:
+        logging.info("EcoData scheduled refresh is disabled.")
+        return
+
+    if _ecodata_stop.wait(ECODATA_FIRST_REFRESH_DELAY_SECONDS):
+        return
+    while True:
+        session = SessionLocal()
+        try:
+            refresh_ecodata_index(session)
+        except Exception:
+            # A scrape failure must not kill the scheduler: SBP is intermittently
+            # unreachable, and the next tick is a perfectly good retry.
+            logging.exception("Scheduled EcoData refresh failed")
+        finally:
+            session.close()
+        if _ecodata_stop.wait(interval):
+            return
+
+
+def _get_ecodata_entries(db: Session) -> list[dict]:
+    """A pure read. Never scrapes — see `refresh_ecodata_index`."""
     entries = db.query(EcoDataEntry).order_by(EcoDataEntry.sort_order).all()
     return [
         {
@@ -881,6 +952,23 @@ def _get_ecodata_entries(db: Session, force_refresh: bool = False) -> list[dict]
 @app.get("/api/ecodata/entries")
 def get_ecodata_entries(db: Session = Depends(get_db)):
     return _get_ecodata_entries(db)
+
+
+@app.post("/api/ecodata/refresh", dependencies=[Depends(require_admin)])
+def force_ecodata_refresh(db: Session = Depends(get_db)):
+    """Re-scrape now instead of waiting for the next scheduled tick.
+
+    Admin-only, because it writes the corpus and calls out to SBP. The scheduler covers
+    the routine case; this exists so an admin does not have to wait an hour to see a
+    change SBP published five minutes ago.
+    """
+    ran = refresh_ecodata_index(db)
+    if not ran:
+        return JSONResponse(
+            {"error": "A refresh is already running; try again shortly."},
+            status_code=409,
+        )
+    return {"ok": True, "entries": db.query(EcoDataEntry).count()}
 
 
 @app.get("/api/ecodata/pdf_summary")

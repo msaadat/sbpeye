@@ -2119,16 +2119,81 @@ async def settings_page():
     return spa_index_response()
 
 
+# Served to any signed-in user, unlike `/debug`, which is gated at the page. The console
+# itself renders an explanation for a non-admin and every API it calls is admin-gated, so
+# the worst a tester who types the URL sees is that explanation — which beats a raw 403
+# body from a page they navigated to.
+@app.get("/admin")
+async def admin_page():
+    return spa_index_response()
+
+
 @app.get("/debug", dependencies=[Depends(require_admin)])
 async def debug_page():
     return spa_index_response()
 
 
-@app.get("/api/settings")
+@app.get("/api/settings", dependencies=[Depends(require_admin)])
 async def get_settings(db: Session = Depends(get_app_db)):
     config = AIConfig.from_db(db) or AIConfig.from_env()
     embedding = EmbeddingConfig.from_db(db)
     return _settings_payload(config, embedding, db)
+
+
+@app.post("/api/settings/adopt-my-provider", dependencies=[Depends(require_admin)])
+def adopt_my_provider(request: Request, db: Session = Depends(get_app_db)):
+    """Copy the calling admin's own provider settings into the deployment configuration.
+
+    An admin otherwise types the same credentials twice: once under Settings for their
+    chat, once here for corpus generation. The two genuinely are separate — generation
+    runs in background threads with no user attached, and tying it to one account would
+    break the moment that account was deleted — but "separate" should not mean "entered
+    twice".
+
+    Copied server-side rather than in the browser because the personal key is write-only
+    through the API: `GET /api/settings/ai` reports whether one is stored, never its
+    value. A client-side copy would have to send the key back out to do it.
+
+    It is a copy, not a link. Changing your personal key afterwards leaves the deployment
+    on the old one, which is the safe direction: corpus generation keeps working when an
+    admin rotates their own credentials or leaves.
+    """
+    from .auth import decrypt_secret
+
+    user = request.state.user
+    chosen = (getattr(user, "ai_provider", "") or "").strip()
+    if not chosen:
+        return JSONResponse(
+            {"error": "Set your own AI provider under Settings first, then copy it here."},
+            status_code=400,
+        )
+
+    provider = normalize_provider(chosen)
+    definition = get_provider_definition(provider)
+    api_key = decrypt_secret(getattr(user, "ai_api_key_encrypted", None))
+    if not api_key and not definition.default_api_key:
+        return JSONResponse(
+            {"error": "Your provider settings have no API key stored to copy."},
+            status_code=400,
+        )
+
+    _save_ai_secret(provider=provider, api_key=api_key or None, clear_secret=False)
+
+    existing = AIConfig.from_db(db)
+    config = AIConfig(
+        provider=provider,
+        base_url=(user.ai_base_url or definition.default_base_url),
+        api_key="",
+        model=(user.ai_model or definition.default_model),
+        chat_model=(user.ai_chat_model or ""),
+        # Carried over rather than re-detected: detection calls the provider, and this
+        # route should not fail because the vendor is briefly unreachable.
+        max_context_tokens=(existing.max_context_tokens if existing else 4000),
+    )
+    config.api_key, _ = get_provider_api_key(provider)
+    config.save_to_db(db)
+    logging.warning("%s copied their provider settings to the deployment", user.email)
+    return {"ok": True, "provider": provider}
 
 
 @app.post("/api/settings", dependencies=[Depends(require_admin)])

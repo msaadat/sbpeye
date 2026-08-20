@@ -56,12 +56,14 @@ this machine** — retiring the chromadb format risk that 5.3 called the most li
 here to fail. `docling` became an optional extra to get the image from 19.3 GB to 1.51 GB
 (9.1.3). Still to do in 9: the Railway service itself, the volume, and the environment.
 
-**Section 7 — authentication.** Email/password with signed HTTP-only cookies, no
+**Section 7 — authentication, including the UI.** Email/password with signed HTTP-only cookies, no
 self-registration, admin-created accounts. The boundary is middleware with an allowlist so a
 new route is private by default; the admin gate is per-route. Chat is scoped per user;
 workspaces stay shared (10.2). **Each user supplies their own encrypted provider API key**,
 which closes 7.5 rather than mitigating it, and the default provider is now Mistral rather
-than a localhost LM Studio (7.8). 34 boundary tests. Suite: 1 failed / 616 passed.
+than a localhost LM Studio (7.8). The SPA now handles sessions, and there is an admin console
+at `/admin` carrying user management and the LLM tracing toggle (7.10), verified end to end in
+a browser. 36 boundary tests. Suite: 1 failed / 619 passed.
 
 Two things to read before continuing: 7.9, a dependency-override bug that let the test suite
 write to the real `sbpeye_app.db`, and the data loss recorded with it.
@@ -971,6 +973,71 @@ One knock-on: the LM Studio default carried a placeholder API key that satisfied
 SDK constructor, and Mistral has none. `AIClient` now substitutes a placeholder when no key
 is set, so an unset key surfaces as a provider 401 with a readable message instead of an
 exception while building the client.
+
+### 7.10 Frontend integration and the admin console
+
+§7 built a boundary the SPA knew nothing about. Backend-complete is not usable: without
+this, a tester could sign in and then had no way to enter the API key that chat requires.
+
+**Session handling.** `lib/api.ts` now redirects to `/login?next=…` on any 401, guarded so
+that a view firing several requests at once starts one redirect rather than a race. A session
+expiring mid-use sends the user to sign in instead of leaving a page of failed requests.
+`useCurrentUser` holds the signed-in user once and shares it, because the sidebar, settings
+and admin console all need it and three fetches would be three chances to disagree.
+
+**Sidebar.** Signed-in address and a sign-out control; `Admin` appears only for admins.
+
+**Admin console** (`/admin`, `AdminView.vue`):
+
+- Users table — role, last sign-in, created — with delete. The control is disabled with the
+  reason in its tooltip for your own account and for the only remaining admin, matching the
+  server's rules rather than letting the user discover them through an error.
+- Create a user, with the reason self-registration is closed stated on the form.
+- **The LLM tracing toggle moved here from Settings.** Traces contain other users' chat
+  turns, so the setting belongs with the console it controls, and both are admin-only.
+
+**Settings and the deployment configuration were separated onto different pages.** They
+first shared one screen, and that read as a duplicate: two provider forms, visually identical,
+differing only in scope, with the second one unlabelled. `/settings` is now the signed-in
+user's own provider and nothing else; the deployment's provider and the embedding settings
+moved into the admin console as `components/DeploymentAiSettings.vue`. Each configuration now
+sits beside the thing it governs — your key next to your chat, the deployment's key next to
+the corpus work it pays for. The API key field says "Stored — leave blank to keep", so
+changing a model does not silently clear a key.
+
+**"Use my provider"** (`POST /api/settings/adopt-my-provider`, admin-only) copies the calling
+admin's own provider, model and key into the deployment configuration. Without it an admin
+types the same credentials twice, which is a fair thing to object to. The copy happens
+**server-side** because the personal key is write-only through the API — a browser-side copy
+would have to send the key back out to perform it.
+
+It is a copy, not a link: changing your personal key afterwards leaves the deployment on the
+old one. That is the safe direction, because corpus generation has to keep working when an
+admin rotates their credentials or leaves, which is also why the two configurations stay
+separate rather than the deployment simply borrowing an admin's.
+
+`GET /api/settings` was gated on admin to match the POST. The payload carries no credential
+(`api_key` is blanked, only a `configured` flag is exposed), but which provider the
+deployment runs on is the admin's configuration.
+
+**Verified in a browser**, against a throwaway data directory so the developer's own database
+was never touched: unauthenticated `/` redirects to the login form; signing in as the seeded
+admin shows the Admin item and the console; creating a tester works and the self-delete guard
+is disabled with its reason; signing in as that tester shows **no** Admin item and a Settings
+page with only their own provider card, defaulting to Mistral; saving an API key reports "A
+key is stored. It is never shown again", and the value is Fernet ciphertext on disk with the
+plaintext absent from the file. Console clean.
+
+Two presentation bugs the browser pass caught, both from stacking a new card above an old
+one: the deployment card had no title of its own, so the two provider forms looked like a
+duplicate rather than two scopes; and the explanation under the moved card inherited the
+`.page-heading p` eyebrow rule and rendered as a paragraph of capitals.
+
+One functional bug: `App.vue` probed `/api/debug/status` for every user, which became a
+guaranteed 403 and an unhandled rejection in every tester's console once the trace console was
+gated. It is now admin-only, and `useLlmDebugState` resolves to a default instead of rejecting
+— callers use it to decide whether to show a panel, and "could not ask" and "not enabled" lead
+to the same UI.
 
 ### 7.9 A real bug found on the way, and real data lost
 

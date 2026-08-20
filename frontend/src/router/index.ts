@@ -66,6 +66,12 @@ const router = createRouter({
       component: () => import('@/views/SettingsView.vue'),
     },
     {
+      // Admin-only server-side too; the view explains itself rather than 403-ing blankly.
+      path: '/admin',
+      name: 'admin',
+      component: () => import('@/views/AdminView.vue'),
+    },
+    {
       path: '/debug',
       name: 'debug',
       component: () => import('@/views/DebugView.vue'),

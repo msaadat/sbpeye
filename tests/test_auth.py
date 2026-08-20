@@ -178,6 +178,35 @@ def test_corpus_writers_refuse_a_tester(client, db_factory, path):
     assert response.status_code == 403
 
 
+@pytest.mark.parametrize("path", ["/api/settings", "/api/admin/users"])
+def test_deployment_configuration_is_admin_only_to_read(client, db_factory, path):
+    """Reading is gated as well as writing.
+
+    The payload carries no credential (`api_key` is blanked and only a `configured` flag
+    is exposed), but which provider and model the deployment runs on is still the admin's
+    configuration, and the settings UI hides those cards from a tester anyway.
+    """
+    test_client, _ = client
+    sign_out(test_client)
+    sign_in(test_client, db_factory, is_admin=False)
+
+    assert test_client.get(path).status_code == 403
+
+
+def test_a_tester_can_read_and_write_their_own_provider_settings(client, db_factory):
+    """The counterpart: the credential they pay with is theirs to set."""
+    test_client, _ = client
+    sign_out(test_client)
+    sign_in(test_client, db_factory, is_admin=False)
+
+    assert test_client.get("/api/settings/ai").status_code == 200
+    saved = test_client.put("/api/settings/ai", json={
+        "provider": "mistral", "api_key": "sk-theirs",
+    })
+    assert saved.status_code == 200
+    assert saved.json()["api_key_set"] is True
+
+
 def test_link_discovery_explains_itself_rather_than_bare_403(client, db_factory):
     """A tester pasting an SBP link should read a policy, not what looks like a bug."""
     test_client, _ = client
@@ -370,6 +399,51 @@ def test_changing_the_model_keeps_the_stored_key(client, db_factory):
     shown = test_client.get("/api/settings/ai").json()
     assert shown["api_key_set"] is True
     assert shown["model"] == "big"
+
+
+def test_an_admin_can_copy_their_own_provider_to_the_deployment(client, db_factory, monkeypatch):
+    """An admin should not have to type the same credentials twice.
+
+    Server-side because the personal key is write-only through the API: a browser-side
+    copy would have to send the key back out to perform it.
+    """
+    test_client, db = client
+    saved: dict = {}
+    monkeypatch.setattr(
+        main_module, "_save_ai_secret",
+        lambda provider, api_key, clear_secret=False: saved.update(
+            provider=provider, api_key=api_key
+        ),
+    )
+
+    test_client.put("/api/settings/ai", json={
+        "provider": "mistral", "model": "mistral-large-latest", "api_key": "sk-admins-own",
+    })
+
+    response = test_client.post("/api/settings/adopt-my-provider")
+
+    assert response.status_code == 200
+    assert response.json()["provider"] == "mistral"
+    # The key reaches the deployment secret store without ever passing through a response.
+    assert saved == {"provider": "mistral", "api_key": "sk-admins-own"}
+    assert "sk-admins-own" not in response.text
+
+
+def test_copying_a_provider_that_was_never_set_explains_itself(client, db_factory):
+    test_client, _ = client
+
+    response = test_client.post("/api/settings/adopt-my-provider")
+
+    assert response.status_code == 400
+    assert "Settings first" in response.json()["error"]
+
+
+def test_copying_the_provider_is_admin_only(client, db_factory):
+    test_client, _ = client
+    sign_out(test_client)
+    sign_in(test_client, db_factory, is_admin=False)
+
+    assert test_client.post("/api/settings/adopt-my-provider").status_code == 403
 
 
 def test_a_user_without_a_key_is_told_to_add_one(client, db_factory):

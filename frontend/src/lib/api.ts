@@ -679,6 +679,14 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   })
 
   if (!response.ok) {
+    // A 401 means the session is gone — expired, signed out in another tab, or the
+    // server's signing key was rotated. There is nothing a view can usefully do with
+    // that, and letting it surface as an inline error leaves the page looking broken
+    // while every subsequent request fails the same way. Send them to sign in instead,
+    // remembering where they were.
+    if (response.status === 401) {
+      redirectToLogin()
+    }
     const payload = await readErrorPayload(response)
     const error = new Error(payload?.error || payload?.message || `Request failed with ${response.status}`) as ApiError
     error.status = response.status
@@ -687,6 +695,97 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   return (await response.json()) as T
+}
+
+let redirecting = false
+
+function redirectToLogin(): void {
+  // Guarded: a view that fires several requests at once would otherwise start a
+  // redirect per failure, and the last one wins with a nonsense `next`.
+  if (redirecting) return
+  redirecting = true
+  const next = encodeURIComponent(window.location.pathname + window.location.search)
+  window.location.assign(`/login?next=${next}`)
+}
+
+export interface CurrentUser {
+  id: string
+  email: string
+  is_admin: boolean
+  last_login_at?: string | null
+}
+
+export async function getCurrentUser(): Promise<CurrentUser> {
+  return requestJson<CurrentUser>('/auth/me')
+}
+
+export async function logout(): Promise<void> {
+  await requestJson<{ ok: boolean }>('/auth/logout', { method: 'POST' })
+}
+
+/** The signed-in user's own provider credentials. `api_key` is never returned. */
+export interface MyAiSettings {
+  provider: string
+  base_url: string
+  model: string
+  chat_model: string
+  api_key_set: boolean
+  configured: boolean
+}
+
+export async function getMyAiSettings(): Promise<MyAiSettings> {
+  return requestJson<MyAiSettings>('/settings/ai')
+}
+
+export async function saveMyAiSettings(payload: {
+  provider: string
+  base_url?: string
+  model?: string
+  chat_model?: string
+  /** Omit to keep the stored key; pass '' to clear it. */
+  api_key?: string
+}): Promise<{ ok: boolean; provider: string; api_key_set: boolean }> {
+  return requestJson('/settings/ai', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+/** Copy the calling admin's own provider settings into the deployment configuration. */
+export async function adoptMyProviderForDeployment(): Promise<{ ok: boolean; provider: string }> {
+  return requestJson('/settings/adopt-my-provider', { method: 'POST' })
+}
+
+export interface AdminUser {
+  id: string
+  email: string
+  is_admin: boolean
+  created_at?: string | null
+  last_login_at?: string | null
+}
+
+export async function listUsers(): Promise<AdminUser[]> {
+  const result = await requestJson<{ items: AdminUser[] }>('/admin/users')
+  return result.items
+}
+
+export async function createUser(payload: {
+  email: string
+  password: string
+  is_admin?: boolean
+}): Promise<AdminUser> {
+  return requestJson<AdminUser>('/admin/users', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function deleteUser(id: string): Promise<void> {
+  await requestJson<{ ok: boolean }>(`/admin/users/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  })
 }
 
 export async function getAppStatus(): Promise<AppStatus> {

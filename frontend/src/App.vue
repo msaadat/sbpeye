@@ -7,12 +7,14 @@ import Message from 'primevue/message'
 import Toast from 'primevue/toast'
 import { useToast } from 'primevue/usetoast'
 import SbpNewsPanel from '@/components/SbpNewsPanel.vue'
-import { getAppStatus, getLlmStatus, startCircularSync, type ApiError, type AppStatus, type CircularSyncStatus, type LlmStatus } from '@/lib/api'
+import { getAppStatus, getLlmStatus, logout, startCircularSync, type ApiError, type AppStatus, type CircularSyncStatus, type LlmStatus } from '@/lib/api'
+import { useCurrentUser } from '@/lib/useCurrentUser'
 import { useLlmDebugState } from '@/lib/useLlmDebugState'
 
 const route = useRoute()
 const toast = useToast()
 const { state: llmDebugState, refreshLlmDebugState } = useLlmDebugState()
+const { email: userEmail, isAdmin, load: loadCurrentUser, clear: clearCurrentUser } = useCurrentUser()
 const darkMode = ref(localStorage.getItem('sbpeye-theme') === 'dark')
 const status = ref<AppStatus | null>(null)
 const statusLoading = ref(false)
@@ -60,13 +62,30 @@ const navItems = computed(() => [
     route: '/settings',
     active: route.path.startsWith('/settings'),
   },
-  ...(llmDebugState.value.effective ? [{
+  ...(isAdmin.value ? [{
+    label: 'Admin',
+    icon: 'pi pi-users',
+    route: '/admin',
+    active: route.path.startsWith('/admin'),
+  }] : []),
+  ...(llmDebugState.value.effective && isAdmin.value ? [{
     label: 'Debug',
     icon: 'pi pi-desktop',
     route: '/debug',
     active: route.path.startsWith('/debug'),
   }] : []),
 ])
+
+async function signOut(): Promise<void> {
+  try {
+    await logout()
+  } catch {
+    // Even if the call fails the cookie may already be gone; the redirect below is what
+    // actually matters, and the login page is the right place to end up either way.
+  }
+  clearCurrentUser()
+  window.location.assign('/login')
+}
 
 const statusLabel = computed(() => {
   if (statusLoading.value) {
@@ -331,11 +350,17 @@ function toggleTheme() {
   syncThemeClass()
 }
 
-onMounted(() => {
+onMounted(async () => {
   syncThemeClass()
   void loadStatus()
   void loadLlmStatus()
-  void refreshLlmDebugState()
+  // Awaited: the nav needs to know whether to show Admin, and the debug probe below is
+  // admin-only. Firing it for a tester is a guaranteed 403 and an unhandled rejection in
+  // their console for a panel they cannot open anyway.
+  await loadCurrentUser()
+  if (isAdmin.value) {
+    void refreshLlmDebugState()
+  }
 })
 
 onBeforeUnmount(() => {
@@ -415,6 +440,17 @@ onBeforeUnmount(() => {
           :aria-label="darkMode ? 'Use light theme' : 'Use dark theme'"
           :title="darkMode ? 'Use light theme' : 'Use dark theme'"
           @click="toggleTheme"
+        />
+
+        <Button
+          v-if="userEmail"
+          text
+          rounded
+          icon="pi pi-sign-out"
+          class="sign-out-button"
+          :aria-label="`Sign out of ${userEmail}`"
+          :title="`Signed in as ${userEmail} — sign out`"
+          @click="signOut"
         />
       </div>
     </nav>

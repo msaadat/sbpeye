@@ -1,3 +1,4 @@
+from conftest import TEST_ADMIN_ID
 import json
 import threading
 from pathlib import Path
@@ -441,7 +442,7 @@ def test_relocate_moves_legacy_runtime_state_and_drops_it(tmp_path):
         workspace_id="ws-1", circular_id="circular-1", role="pinned",
         added_at=llm_debug.datetime.utcnow(),
     ))
-    seed.add(ChatSession(id="cs-1", title="MCR question"))
+    seed.add(ChatSession(user_id=TEST_ADMIN_ID, id="cs-1", title="MCR question"))
     seed.add(ChatMessage(
         id="cm-1", session_id="cs-1", role="user", content="What is the MCR?",
     ))

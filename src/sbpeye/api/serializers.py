@@ -551,17 +551,37 @@ def _workspace_payload(
     }
 
 
-def _workspace_chat_session_id(workspace_id: str) -> str:
-    return f"{WORKSPACE_CHAT_SESSION_PREFIX}{workspace_id}"
+def _workspace_chat_session_id(workspace_id: str, user_id: str) -> str:
+    """The deterministic chat session id for one user's conversation in a workspace.
+
+    The owner is in the id because workspaces are shared and chat is not (deployment
+    plan, 10.2). Derived from the workspace alone — as this was before authentication —
+    every tester in a shared workspace would compute the same session id and land in one
+    another's conversation. The id is a convenience, not the access check: ownership is
+    still enforced by `user_id` on the row.
+    """
+    return f"{WORKSPACE_CHAT_SESSION_PREFIX}{user_id}:{workspace_id}"
 
 
 def _workspace_id_from_chat_session(session_id: str | None) -> str | None:
+    """The workspace a chat session id refers to, or None if it refers to none.
+
+    Accepts the pre-authentication form (`workspace:<workspace_id>`) as well as the
+    owned form (`workspace:<user_id>:<workspace_id>`), so sessions created before this
+    column existed still resolve to their workspace instead of silently becoming
+    ordinary chats.
+    """
     if not isinstance(session_id, str):
         return None
     if not session_id.startswith(WORKSPACE_CHAT_SESSION_PREFIX):
         return None
-    workspace_id = session_id[len(WORKSPACE_CHAT_SESSION_PREFIX):]
-    return workspace_id or None
+    rest = session_id[len(WORKSPACE_CHAT_SESSION_PREFIX):]
+    if not rest:
+        return None
+    head, separator, tail = rest.partition(":")
+    if not separator:
+        return head or None
+    return tail or None
 
 
 def _workspace_circular_ids(
@@ -596,9 +616,10 @@ def _workspace_chat_session_payload(
     workspace: ResearchWorkspace,
     circulars: dict[str, Circular],
     session: ChatSession | None = None,
+    user_id: str = "",
 ) -> dict:
     return {
-        "id": _workspace_chat_session_id(workspace.id),
+        "id": _workspace_chat_session_id(workspace.id, user_id),
         "title": workspace.name,
         "session_type": "workspace",
         "workspace_id": workspace.id,

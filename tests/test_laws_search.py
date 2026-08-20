@@ -14,8 +14,9 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+import sbpeye.auth_routes as auth_routes_module
 import sbpeye.main as main_module
-from sbpeye.database import Base, get_db
+from sbpeye.database import AppBase, Base, get_db
 from sbpeye.models import Circular, RegDocument, RegDocumentLink, RegDocumentVersion
 from sbpeye.search import (
     SearchEngine,
@@ -43,6 +44,9 @@ def make_session():
         poolclass=StaticPool,
     )
     Base.metadata.create_all(engine)
+    # Runtime-state tables too: authentication puts `users` in the request path of every
+    # route, so a corpus-only database now fails at the middleware rather than the query.
+    AppBase.metadata.create_all(engine)
     with engine.begin() as conn:
         conn.execute(text(
             "CREATE VIRTUAL TABLE IF NOT EXISTS laws_fts USING fts5("
@@ -367,9 +371,17 @@ def client(monkeypatch):
         "sbpeye.search.embedding_backend.embed_queries", lambda queries: [[0.0]]
     )
     main_module.app.dependency_overrides[get_db] = override_get_db
+    # `resolve_request_user` opens its own session, so it has to be pointed at this DB
+    # too or the middleware looks the signed-in user up in the developer's real one.
+    monkeypatch.setattr(auth_routes_module, "AppSessionLocal", factory)
     from fastapi.testclient import TestClient
 
     with TestClient(main_module.app) as test_client:
+        # This fixture builds its own client rather than using conftest's, so it has to
+        # establish a session itself; every route sits behind the auth middleware.
+        from conftest import sign_in
+
+        sign_in(test_client, factory, is_admin=True)
         yield test_client, db
     main_module.app.dependency_overrides.clear()
 

@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+from conftest import TEST_ADMIN_ID
 import asyncio
 import json
 from datetime import datetime
@@ -558,6 +560,7 @@ def test_session_context_is_authoritative_including_empty_selection():
     add_circular(db, "one", "One")
     add_circular(db, "two", "Two")
     session = ChatSession(
+        user_id=TEST_ADMIN_ID,
         id="session",
         title="Test",
         circular_ids=json.dumps(["one"]),
@@ -573,20 +576,28 @@ def test_session_context_is_authoritative_including_empty_selection():
     db.commit()
 
     # Corpus and application sessions; this module collapses both onto one engine.
-    payload = asyncio.run(get_chat_session(session.id, db, db))
+    # Called directly rather than over HTTP, so the owner the route would get from
+    # the request has to be supplied here.
+    payload = asyncio.run(
+        get_chat_session(session.id, db, db, SimpleNamespace(id=TEST_ADMIN_ID))
+    )
     assert [item["id"] for item in payload["circulars"]] == ["one"]
 
     session.circular_ids = "[]"
     db.commit()
     # Corpus and application sessions; this module collapses both onto one engine.
-    payload = asyncio.run(get_chat_session(session.id, db, db))
+    # Called directly rather than over HTTP, so the owner the route would get from
+    # the request has to be supplied here.
+    payload = asyncio.run(
+        get_chat_session(session.id, db, db, SimpleNamespace(id=TEST_ADMIN_ID))
+    )
     assert payload["circulars"] == []
 
 
 def test_chat_session_returns_each_messages_context_snapshot():
     db = make_session()
     add_circular(db, "one", "One")
-    session = ChatSession(id="session", title="Test", circular_ids="[]")
+    session = ChatSession(user_id=TEST_ADMIN_ID, id="session", title="Test", circular_ids="[]")
     message = ChatMessage(
         id="message",
         session_id=session.id,
@@ -598,14 +609,18 @@ def test_chat_session_returns_each_messages_context_snapshot():
     db.commit()
 
     # Corpus and application sessions; this module collapses both onto one engine.
-    payload = asyncio.run(get_chat_session(session.id, db, db))
+    # Called directly rather than over HTTP, so the owner the route would get from
+    # the request has to be supplied here.
+    payload = asyncio.run(
+        get_chat_session(session.id, db, db, SimpleNamespace(id=TEST_ADMIN_ID))
+    )
 
     assert payload["messages"][0]["circular_ids"] == ["one"]
 
 
 def test_truncate_chat_messages_can_preserve_and_edit_target_turn():
     db = make_session()
-    session = ChatSession(id="session", title="Test", circular_ids="[]")
+    session = ChatSession(user_id=TEST_ADMIN_ID, id="session", title="Test", circular_ids="[]")
     messages = [
         ChatMessage(id="01", session_id=session.id, role="user", content="First"),
         ChatMessage(id="02", session_id=session.id, role="assistant", content="Answer"),
@@ -631,7 +646,7 @@ def test_truncate_chat_messages_can_preserve_and_edit_target_turn():
 
 def test_truncate_chat_messages_can_delete_target_and_following_history():
     db = make_session()
-    session = ChatSession(id="session", title="Test", circular_ids="[]")
+    session = ChatSession(user_id=TEST_ADMIN_ID, id="session", title="Test", circular_ids="[]")
     messages = [
         ChatMessage(id="01", session_id=session.id, role="user", content="First"),
         ChatMessage(id="02", session_id=session.id, role="assistant", content="Answer"),

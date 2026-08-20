@@ -532,7 +532,11 @@ def test_default_chat_auto_scopes_unpinned_circular_for_one_turn(client, monkeyp
             captured.update(kwargs)
             return "scoped reply"
 
-    monkeypatch.setattr(main_module, "get_ai_client", lambda db=None: CapturingAIClient())
+    # Chat resolves the requesting user's own credentials (7.5), so the capture has
+    # to be installed on that resolver rather than the deployment-level one.
+    monkeypatch.setattr(
+        main_module, "get_ai_client_for_user", lambda user: CapturingAIClient()
+    )
 
     response = test_client.post("/api/chat", json={
         "message": "Check BPRD Circular Letter No. 09 of 2026 for the limit",
@@ -632,7 +636,9 @@ def test_chat_stream_records_one_complete_trace(client, monkeypatch):
                     stage="chat.iteration.1",
                 )
 
-    monkeypatch.setattr(main_module, "get_ai_client", lambda db=None: TracingAIClient())
+    monkeypatch.setattr(
+        main_module, "get_ai_client_for_user", lambda user: TracingAIClient()
+    )
 
     with test_client.stream("POST", "/api/chat/stream", json={"message": "Trace me"}) as resp:
         assert resp.status_code == 200

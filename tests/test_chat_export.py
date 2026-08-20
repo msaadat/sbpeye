@@ -1,3 +1,4 @@
+from conftest import TEST_ADMIN_ID
 """Whole-conversation markdown export.
 
 The property under test throughout is that the file stands on its own: both sides of
@@ -183,7 +184,7 @@ def test_export_route_serves_a_markdown_attachment(client):
     test_client, db_factory = client
     db = db_factory()
     make_circular(db)
-    db.add(ChatSession(id="s-1", title="Capital rules"))
+    db.add(ChatSession(user_id=TEST_ADMIN_ID, id="s-1", title="Capital rules"))
     db.add(ChatMessage(id="m-0", session_id="s-1", role="user", content="What changed?",
                        created_at=datetime(2026, 8, 19, 9, 0)))
     db.add(ChatMessage(id="m-1", session_id="s-1", role="assistant",

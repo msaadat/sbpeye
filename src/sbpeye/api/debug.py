@@ -10,10 +10,19 @@ from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from ..database import get_app_db, get_debug_db
+from ..auth_routes import require_admin
 from ..llm_debug import debug_allowed, debug_setting_enabled
 from ..models import LLMTrace, LLMTraceEvent
 
-router = APIRouter(prefix="/api/debug", tags=["llm-debug"])
+# Admin on top of the existing `LLM_DEBUG_ALLOWED` gate, per the deployment plan (7.3).
+# Traces store whole prompts and responses, including other users' chat turns, so this is
+# the most sensitive read surface in the application — the debug flag alone is a
+# deployment-wide switch, not an authorization check.
+router = APIRouter(
+    prefix="/api/debug",
+    tags=["llm-debug"],
+    dependencies=[Depends(require_admin)],
+)
 
 
 def _parsed(value: str, fallback: Any) -> Any:

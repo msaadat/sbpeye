@@ -489,6 +489,7 @@ def law_client(monkeypatch):
     from fastapi.testclient import TestClient
     from sqlalchemy.orm import sessionmaker
 
+    import sbpeye.auth_routes as auth_routes_module
     import sbpeye.main as main_module
     from sbpeye.database import get_db
     from test_laws_search import EmptyCollection, make_session
@@ -509,7 +510,15 @@ def law_client(monkeypatch):
     monkeypatch.setattr(main_module, "run_law_generation_job", started.append)
     monkeypatch.setattr("sbpeye.search.collection", EmptyCollection())
     main_module.app.dependency_overrides[get_db] = override_get_db
+    # `resolve_request_user` opens its own session, so it has to be pointed at this DB
+    # too or the middleware looks the signed-in user up in the developer's real one.
+    monkeypatch.setattr(auth_routes_module, "AppSessionLocal", factory)
     with TestClient(main_module.app) as test_client:
+        # This fixture builds its own client rather than using conftest's, so it has to
+        # establish a session itself; every route sits behind the auth middleware.
+        from conftest import sign_in
+
+        sign_in(test_client, factory, is_admin=True)
         yield test_client, db, started
     main_module.app.dependency_overrides.clear()
 

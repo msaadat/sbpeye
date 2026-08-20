@@ -363,7 +363,7 @@ PROVIDER_DEFINITIONS = {
 
 
 def normalize_provider(provider: str | None) -> str:
-    value = (provider or "lmstudio").strip().lower()
+    value = (provider or "mistral").strip().lower()
     aliases = {
         "gemini": "google",
         "lm_studio": "lmstudio",
@@ -383,6 +383,10 @@ GENERIC_CHAT_ERROR = (
 )
 
 
+class MissingUserAIConfig(RuntimeError):
+    """This user has not supplied provider credentials of their own."""
+
+
 def friendly_chat_error(exc: Exception) -> str:
     """Translate a provider/SDK exception into a clear, user-facing message.
 
@@ -394,6 +398,12 @@ def friendly_chat_error(exc: Exception) -> str:
 
     def has(*needles: str) -> bool:
         return any(needle in text for needle in needles)
+
+    # Not a provider failure at all: this user has no credentials of their own. Handled
+    # first so it never falls through to the generic "provider is unreachable" message,
+    # which would send someone debugging a network problem they do not have.
+    if isinstance(exc, MissingUserAIConfig):
+        return str(exc)
 
     # The provider was reachable and accepted the request but sent back no completion.
     # Measured as intermittent on OpenRouter free tiers, so "try again" is genuinely
@@ -742,10 +752,14 @@ class OllamaCloudClient:
 
 @dataclass
 class AIConfig:
-    provider: str = "lmstudio"
-    base_url: str = "http://localhost:1234/v1"
-    api_key: str = "lm-studio"
-    model: str = "local-model"
+    # Kept in step with PROVIDER_DEFINITIONS["mistral"]. Mistral rather than LM Studio
+    # because LM Studio's default points at localhost:1234, which exists on a developer's
+    # machine and nowhere else: a deployment falling back to it fails every call with a
+    # connection error instead of the configuration error it actually is.
+    provider: str = "mistral"
+    base_url: str = "https://api.mistral.ai/v1"
+    api_key: str = ""
+    model: str = "mistral-small-latest"
     chat_model: str = ""
     max_context_tokens: int = 4000
 
@@ -754,8 +768,41 @@ class AIConfig:
         return self.chat_model or self.model
 
     @staticmethod
+    def for_user(user) -> "AIConfig | None":
+        """This user's own provider configuration, or None if they have not set one.
+
+        Returns None rather than falling back to the deployment config. The fallback is
+        exactly what per-user keys exist to prevent: a tester who never sets a key would
+        otherwise spend the admin's budget silently, which is the situation 7.5
+        describes. "Not configured" has to be a state the caller can see and report.
+        """
+        from .auth import decrypt_secret
+
+        api_key = decrypt_secret(getattr(user, "ai_api_key_encrypted", None))
+        # Tested before normalizing: `normalize_provider("")` answers with the default
+        # provider, so normalizing first would turn "never configured" into a usable
+        # lmstudio config pointed at a localhost that does not exist in the cloud.
+        chosen = (getattr(user, "ai_provider", "") or "").strip()
+        if not chosen:
+            return None
+        provider = normalize_provider(chosen)
+        definition = get_provider_definition(provider)
+        # A local provider ships a placeholder credential (`default_api_key`); a hosted
+        # one has none, and is unusable without a real key. Reporting that here beats a
+        # 401 from the vendor halfway through a chat turn.
+        if not definition.default_api_key and not api_key:
+            return None
+        return AIConfig(
+            provider=provider,
+            base_url=(getattr(user, "ai_base_url", "") or definition.default_base_url),
+            api_key=api_key or definition.default_api_key,
+            model=(getattr(user, "ai_model", "") or definition.default_model),
+            chat_model=(getattr(user, "ai_chat_model", "") or ""),
+        )
+
+    @staticmethod
     def from_env() -> "AIConfig":
-        provider = normalize_provider(os.getenv("AI_PROVIDER", "lmstudio"))
+        provider = normalize_provider(os.getenv("AI_PROVIDER", "mistral"))
         definition = get_provider_definition(provider)
         api_key, _ = get_provider_api_key(provider)
         return AIConfig(
@@ -777,7 +824,7 @@ class AIConfig:
             kv = {r.key: r.value for r in rows}
             if "ai_provider" not in kv:
                 return None
-            provider = normalize_provider(kv.get("ai_provider", "lmstudio"))
+            provider = normalize_provider(kv.get("ai_provider", "mistral"))
             env_config = AIConfig.from_env()
             api_key, _ = get_provider_api_key(provider)
             return AIConfig(
@@ -1008,7 +1055,13 @@ class AIClient:
             )
         kwargs: dict[str, Any] = {
             "base_url": self.config.base_url,
-            "api_key": self.config.api_key,
+            # The SDK refuses to construct without *some* credential, so an unset key
+            # becomes a placeholder here rather than an exception at construction. The
+            # result is a 401 from the provider, which `friendly_chat_error` turns into
+            # an "check your API key" message — a far better report than a crash while
+            # building the client. Callers that must not reach a provider keyless check
+            # first: `AIConfig.for_user` returns None instead of a keyless config.
+            "api_key": self.config.api_key or "not-configured",
             # Bound each request so a stuck connection cannot hang generation for
             # the SDK default (~10 min) and then retry. Matches OllamaCloudClient.
             "timeout": 120.0,
@@ -4045,4 +4098,30 @@ def get_ai_client(db=None) -> AIClient:
         session.close()
     if config is None:
         config = AIConfig.from_env()
+    return AIClient(config)
+
+
+def encrypt_key_for_storage(api_key: str) -> str:
+    """Wrapper so routes do not import `auth` for one call, and so the encryption used
+    for stored provider keys has exactly one entry point."""
+    from .auth import encrypt_secret
+
+    return encrypt_secret(api_key)
+
+
+def get_ai_client_for_user(user) -> AIClient:
+    """The client for a user-initiated request, built from that user's own credentials.
+
+    Separate from `get_ai_client` on purpose. That one resolves the deployment-level
+    config and drives admin-triggered corpus generation, which is the admin's spend under
+    1.3. This one drives chat, which is per-user and unmetered, and it refuses to fall
+    back — a tester without a key gets told to add one rather than quietly billing
+    somebody else.
+    """
+    config = AIConfig.for_user(user)
+    if config is None:
+        raise MissingUserAIConfig(
+            "Add your own AI provider API key in Settings before using chat. "
+            "Each account uses its own credentials on this deployment."
+        )
     return AIClient(config)

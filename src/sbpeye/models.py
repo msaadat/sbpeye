@@ -616,10 +616,59 @@ def upsert_settings(db, values: dict[str, str]) -> None:
             db.add(Settings(key=key, value=value))
     db.commit()
 
+class User(AppBase):
+    """A person who can sign in.
+
+    On ``AppBase``: users are per-deployment runtime state, like workspaces and chat.
+    Shipping them with the corpus would put one deployment's accounts into every other
+    one, and a corpus update would revert every password change.
+
+    There is no sessions table to go with this. A session is a signed cookie (see
+    ``auth``), so signing out is a client-side cookie clear and there is no server-side
+    record to revoke. That is a deliberate trade for a test deploy, not an oversight.
+    """
+
+    __tablename__ = "users"
+
+    id = Column(String, primary_key=True)
+    # Lowercased on write by `auth.normalize_email`, so uniqueness is real rather than
+    # case-sensitive: without that, Alice@x.com and alice@x.com are two accounts.
+    email = Column(String, nullable=False, unique=True, index=True)
+    password_hash = Column(String, nullable=False)
+    # An integer flag, not a role table. Two roles is all this needs; RBAC here would be
+    # scaffolding for a requirement nobody has.
+    is_admin = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_login_at = Column(DateTime, nullable=True)
+
+    # Each user brings their own provider credentials. Chat is the one path where cost
+    # scales with how much a tester uses the app and admin gating cannot reach it
+    # (deployment plan, 7.5); per-user keys make each tester's usage their own bill
+    # instead of a shared budget anyone with an account can spend.
+    #
+    # The deployment-level config in `settings` is unaffected and still drives
+    # admin-triggered corpus generation, which is the admin's own spend under 1.3.
+    ai_provider = Column(String, nullable=True)
+    ai_base_url = Column(String, nullable=True)
+    ai_model = Column(String, nullable=True)
+    ai_chat_model = Column(String, nullable=True)
+    # Fernet ciphertext, never the key itself. See `auth.encrypt_secret` for what that
+    # does and does not protect against.
+    ai_api_key_encrypted = Column(Text, nullable=True)
+
+
 class ChatSession(AppBase):
     __tablename__ = "chat_sessions"
 
     id = Column(String, primary_key=True)
+    # Chat is per-user; workspaces are shared (deployment plan, 10.2). This is the only
+    # ownership column in the schema, and it is where the privacy expectation sits.
+    #
+    # Nullable because rows predating authentication have no owner. Those are adopted by
+    # the first admin at seed time rather than left dangling — see
+    # `auth_routes.adopt_orphaned_chat_sessions`. A NULL that survives is invisible to
+    # every user, which is the safe direction to fail.
+    user_id = Column(String, index=True, nullable=True)
     title = Column(String, nullable=True)
     circular_ids = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)

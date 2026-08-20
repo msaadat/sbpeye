@@ -1,9 +1,14 @@
 from fastapi import FastAPI, Depends, Request, BackgroundTasks, Form, Body
-from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session, aliased
 from sqlalchemy import func, extract, and_, or_, text
-from urllib.parse import urljoin, urlparse, urlencode
+from urllib.parse import quote, urljoin, urlparse, urlencode
 from pathlib import Path
 from contextlib import asynccontextmanager
 import cloudscraper
@@ -16,7 +21,7 @@ import uuid
 import threading
 
 from .database import PROJECT_ROOT, AppSessionLocal, engine, Base, get_app_db, get_db, SessionLocal, has_vector_store_data
-from .models import AIGenerationJob, Attachment, CachedDocument, SyncStatus, circular_sync_only, Circular, CircularEntity, CircularRelationship, EcoDataSeries, EcoDataEntry, RegDocument, RegDocumentVersion, Settings, ChatSession, ChatMessage, ResearchWorkspace, WorkspaceCircular, upsert_settings
+from .models import AIGenerationJob, Attachment, CachedDocument, SyncStatus, circular_sync_only, Circular, CircularEntity, CircularRelationship, EcoDataSeries, EcoDataEntry, RegDocument, RegDocumentVersion, Settings, ChatSession, ChatMessage, ResearchWorkspace, User, WorkspaceCircular, upsert_settings
 from .api.debug import router as debug_router
 from .llm_debug import (
     bind_context,
@@ -25,7 +30,7 @@ from .llm_debug import (
     trace_operation,
 )
 from .search import backfill_fts, backfill_laws_fts, index_circular_fts, resolve_metric_terms, search_engine
-from .ai import AIClient, AIConfig, classify_provider_state, friendly_chat_error, get_ai_client, get_provider_api_key, get_provider_definition, normalize_provider
+from .ai import AIClient, AIConfig, MissingUserAIConfig, classify_provider_state, friendly_chat_error, get_ai_client, get_ai_client_for_user, get_provider_api_key, get_provider_definition, normalize_provider
 from .circular_ai import GENERATION_ACTIONS, generation_job_payload, run_generation_job
 from .laws_ai import (
     CONTAINER_FEATURES,
@@ -62,6 +67,16 @@ from .scraper.circulars import (
     process_attachment,
     process_circular,
     scrape_circulars,
+)
+from .auth_routes import (
+    bootstrap_admin,
+    current_user,
+    is_public_path,
+    admin_only,
+    require_admin,
+    resolve_request_user,
+    router as auth_router,
+    verify_auth_configuration,
 )
 from .env import CIRCULAR_FILES_DIR, LAWS_ARCHIVE_DIR
 from .scraper.laws import download_law_file
@@ -331,6 +346,11 @@ def _ensure_law_version_cached(
 
 @asynccontextmanager
 async def app_lifespan(_app: FastAPI):
+    # Before anything else: a deployment that cannot sign cookies cannot authenticate
+    # anyone, and finding that out at boot beats finding it out when a tester tries to
+    # sign in. Raising here fails the container rather than serving an open door.
+    verify_auth_configuration()
+    bootstrap_admin()
     fail_interrupted_traces()
     fail_interrupted_ai_jobs()
     fail_interrupted_sync_jobs()
@@ -350,7 +370,58 @@ app = FastAPI(
 # project defers ``app.include_router`` behind an internal placeholder, which would
 # make literal-route shadow checks see the placeholder instead of the API routes.
 app.router.routes.extend(debug_router.routes)
+app.router.routes.extend(auth_router.routes)
 app.router._mark_routes_changed()
+
+
+def _bind_dependency_overrides(routes) -> None:
+    """Let `app.dependency_overrides` reach routes that were extended in, not included.
+
+    `include_router` passes its `dependency_overrides_provider` down to each route, and
+    `APIRoute` captures it in the request handler it builds during `__init__`. Routes
+    copied off a bare `APIRouter` never got one, so overriding `get_db` or `get_app_db`
+    silently missed them and they went on using the process-wide session factories.
+
+    That is not only a test-harness inconvenience: it is why the suite was writing live
+    rows into the developer's real `sbpeye_app.db`. The handler has to be rebuilt after
+    the attribute is set, because it closes over the value it had at construction.
+    """
+    from fastapi.routing import APIRoute, request_response
+
+    for route in routes:
+        if isinstance(route, APIRoute):
+            route.dependency_overrides_provider = app
+            route.app = request_response(route.get_route_handler())
+
+
+_bind_dependency_overrides(debug_router.routes)
+_bind_dependency_overrides(auth_router.routes)
+
+
+@app.middleware("http")
+async def require_authentication(request: Request, call_next):
+    """The authentication boundary for the whole application.
+
+    Everything is closed unless `auth_routes.is_public_path` opens it. Doing this as
+    middleware rather than a `Depends` on each route means a route added later is private
+    by default: the cost of forgetting is a login prompt somebody notices immediately,
+    not a public endpoint nobody does.
+    """
+    if is_public_path(request.url.path):
+        return await call_next(request)
+
+    user = resolve_request_user(request)
+    if user is None:
+        if request.url.path.startswith("/api/"):
+            return JSONResponse({"error": "Sign in to continue."}, status_code=401)
+        # A browser navigation, so send them somewhere useful and bring them back after.
+        target = request.url.path
+        if request.url.query:
+            target = f"{target}?{request.url.query}"
+        return RedirectResponse(f"/login?next={quote(target, safe='')}", status_code=303)
+
+    request.state.user = user
+    return await call_next(request)
 
 # Setup SPA static files
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -842,7 +913,7 @@ def get_circular_sync_status(db: Session = Depends(get_db)):
     return _sync_status_payload(_latest_sync_status(db), _latest_successful_sync(db))
 
 
-@app.post("/api/circulars/sync")
+@app.post("/api/circulars/sync", dependencies=[Depends(require_admin)])
 def start_circular_sync(data: dict | None = Body(default=None), db: Session = Depends(get_db)):
     try:
         options = _sync_options_from_payload(data or {})
@@ -1013,7 +1084,13 @@ async def get_circular_by_url(url: str, db: Session = Depends(get_db)):
     return _circular_summary(c)
 
 
-@app.post("/api/circulars/open")
+@app.post(
+    "/api/circulars/open",
+    dependencies=[Depends(admin_only(
+        "Indexing a new circular from a link is limited to administrators on this "
+        "deployment, because it writes to the shared corpus. Ask an admin to add it."
+    ))],
+)
 def open_circular_by_url(
     url: str,
     background_tasks: BackgroundTasks,
@@ -1065,7 +1142,7 @@ def open_circular_by_url(
     return _circular_summary(circular)
 
 
-@app.post("/api/circulars/{circular_id}/refresh")
+@app.post("/api/circulars/{circular_id}/refresh", dependencies=[Depends(require_admin)])
 def refresh_circular(
     circular_id: str,
     background_tasks: BackgroundTasks,
@@ -1442,7 +1519,7 @@ async def query_circular_entities(
     }
 
 
-@app.post("/api/circulars/{circular_id}/generate")
+@app.post("/api/circulars/{circular_id}/generate", dependencies=[Depends(require_admin)])
 async def generate_circular_intelligence(
     circular_id: str,
     request: Request,
@@ -1574,8 +1651,21 @@ async def resolve_document(
     url: str | None = None,
     circular_id: str | None = None,
     refresh: bool = False,
+    request: Request = None,
     db: Session = Depends(get_db),
 ):
+    # Reading a document is open to everyone; re-ingesting one is not. `refresh=True`
+    # runs the full pipeline, rewriting `content_text` and resetting `is_vectorized`
+    # (3.5.2), which is a corpus write and so belongs to the admin under 1.3.
+    if refresh:
+        actor = getattr(getattr(request, "state", None), "user", None)
+        if actor is None or not actor.is_admin:
+            return JSONResponse(
+                {"error": "Re-fetching a document rewrites the shared corpus and is "
+                          "limited to administrators on this deployment."},
+                status_code=403,
+            )
+
     attachment = db.query(Attachment).filter(Attachment.id == id).first() if id else None
     standalone = db.query(CachedDocument).filter(CachedDocument.id == id).first() if id and not attachment else None
     if standalone:
@@ -1767,7 +1857,7 @@ def get_law(document_id: str, db: Session = Depends(get_db)):
     return _law_detail(document)
 
 
-@app.post("/api/laws/{document_id}/generate")
+@app.post("/api/laws/{document_id}/generate", dependencies=[Depends(require_admin)])
 async def generate_law_intelligence(
     document_id: str,
     request: Request,
@@ -2029,7 +2119,7 @@ async def settings_page():
     return spa_index_response()
 
 
-@app.get("/debug")
+@app.get("/debug", dependencies=[Depends(require_admin)])
 async def debug_page():
     return spa_index_response()
 
@@ -2041,7 +2131,7 @@ async def get_settings(db: Session = Depends(get_app_db)):
     return _settings_payload(config, embedding, db)
 
 
-@app.post("/api/settings")
+@app.post("/api/settings", dependencies=[Depends(require_admin)])
 def save_settings(data: dict = Body(...), db: Session = Depends(get_app_db)):
     provider = normalize_provider(data.get("provider", data.get("ai_provider", "lmstudio")))
     provider_definition = get_provider_definition(provider)
@@ -2101,7 +2191,7 @@ def save_settings(data: dict = Body(...), db: Session = Depends(get_app_db)):
     }
 
 
-@app.post("/api/settings/models")
+@app.post("/api/settings/models", dependencies=[Depends(require_admin)])
 async def list_settings_models(request: Request):
     data = await request.json()
     provider = normalize_provider(data.get("provider", data.get("ai_provider", "lmstudio")))
@@ -2137,7 +2227,7 @@ async def list_settings_models(request: Request):
         }
 
 
-@app.post("/api/settings/embeddings/test")
+@app.post("/api/settings/embeddings/test", dependencies=[Depends(require_admin)])
 def test_embedding_connection(db: Session = Depends(get_app_db)):
     try:
         config = EmbeddingConfig.from_db(db)
@@ -2148,7 +2238,7 @@ def test_embedding_connection(db: Session = Depends(get_app_db)):
         return {"success": False, "error": str(e)}
 
 
-@app.post("/api/settings/test")
+@app.post("/api/settings/test", dependencies=[Depends(require_admin)])
 def test_ai_connection(db: Session = Depends(get_db)):
     try:
         client = get_ai_client(db)
@@ -2296,9 +2386,20 @@ async def delete_research_workspace(workspace_id: str, app_db: Session = Depends
         return JSONResponse({"error": "Workspace not found"}, status_code=404)
     if workspace.is_default:
         return JSONResponse({"error": "Default workspace cannot be deleted"}, status_code=400)
-    workspace_session_id = _workspace_chat_session_id(workspace.id)
-    app_db.query(ChatMessage).filter(ChatMessage.session_id == workspace_session_id).delete()
-    app_db.query(ChatSession).filter(ChatSession.id == workspace_session_id).delete()
+    doomed = [
+        session.id
+        for session in app_db.query(ChatSession).filter(
+            ChatSession.id.startswith(WORKSPACE_CHAT_SESSION_PREFIX)
+        ).all()
+        if _workspace_id_from_chat_session(session.id) == workspace.id
+    ]
+    if doomed:
+        app_db.query(ChatMessage).filter(
+            ChatMessage.session_id.in_(doomed)
+        ).delete(synchronize_session=False)
+        app_db.query(ChatSession).filter(
+            ChatSession.id.in_(doomed)
+        ).delete(synchronize_session=False)
     app_db.delete(workspace)
     app_db.commit()
     return {"success": True}
@@ -2388,7 +2489,9 @@ async def chat_spa_fallback(path: str):
 
 @app.get("/api/chat/sessions")
 async def list_chat_sessions(
-    db: Session = Depends(get_db), app_db: Session = Depends(get_app_db)
+    db: Session = Depends(get_db),
+    app_db: Session = Depends(get_app_db),
+    user: User = Depends(current_user),
 ):
     _ensure_default_workspace(app_db)
     workspaces = app_db.query(ResearchWorkspace).order_by(
@@ -2396,24 +2499,33 @@ async def list_chat_sessions(
         func.coalesce(ResearchWorkspace.updated_at, ResearchWorkspace.created_at).desc()
     ).all()
     circulars = _load_workspace_circulars(db, *workspaces)
+    # Workspaces are shared, so every user sees the same list of them; the conversation
+    # inside each one is their own, which is why the id carries the owner.
     workspace_session_ids = [
-        _workspace_chat_session_id(workspace.id) for workspace in workspaces
+        _workspace_chat_session_id(workspace.id, user.id) for workspace in workspaces
     ]
     workspace_sessions = app_db.query(ChatSession).filter(
-        ChatSession.id.in_(workspace_session_ids)
+        ChatSession.id.in_(workspace_session_ids),
+        ChatSession.user_id == user.id,
     ).all() if workspace_session_ids else []
     workspace_session_by_id = {
         session.id: session for session in workspace_sessions
     }
     sessions = app_db.query(ChatSession).order_by(
         func.coalesce(ChatSession.updated_at, ChatSession.created_at).desc()
-    ).filter(~ChatSession.id.in_(workspace_session_ids)).limit(50).all()
+    ).filter(
+        ChatSession.user_id == user.id,
+        ~ChatSession.id.in_(workspace_session_ids),
+    ).limit(50).all()
     return [
         *[
             _workspace_chat_session_payload(
                 workspace,
                 circulars,
-                workspace_session_by_id.get(_workspace_chat_session_id(workspace.id)),
+                workspace_session_by_id.get(
+                    _workspace_chat_session_id(workspace.id, user.id)
+                ),
+                user_id=user.id,
             )
             for workspace in workspaces
         ],
@@ -2426,14 +2538,17 @@ async def get_chat_session(
     session_id: str,
     db: Session = Depends(get_db),
     app_db: Session = Depends(get_app_db),
+    user: User = Depends(current_user),
 ):
     workspace = _get_workspace_for_chat_session(app_db, session_id)
     if workspace:
         circulars = _load_workspace_circulars(db, workspace)
-        session = app_db.query(ChatSession).filter(ChatSession.id == session_id).first()
+        session = _owned_chat_session(app_db, session_id, user)
         messages = _ordered_chat_messages(app_db, session_id) if session else []
         return {
-            **_workspace_chat_session_payload(workspace, circulars, session),
+            **_workspace_chat_session_payload(
+                workspace, circulars, session, user_id=user.id
+            ),
             "messages": [
                 {
                     "id": m.id,
@@ -2449,7 +2564,7 @@ async def get_chat_session(
     if _workspace_id_from_chat_session(session_id):
         return JSONResponse({"error": "Workspace not found"}, status_code=404)
 
-    session = app_db.query(ChatSession).filter(ChatSession.id == session_id).first()
+    session = _owned_chat_session(app_db, session_id, user)
     if not session:
         return JSONResponse({"error": "Session not found"}, status_code=404)
     messages = app_db.query(ChatMessage).filter(
@@ -2485,6 +2600,7 @@ async def export_chat_session(
     session_id: str,
     db: Session = Depends(get_db),
     app_db: Session = Depends(get_app_db),
+    user: User = Depends(current_user),
 ):
     """The whole conversation as one markdown file, both sides, citations linked to SBP.
 
@@ -2497,7 +2613,7 @@ async def export_chat_session(
     elif _workspace_id_from_chat_session(session_id):
         return JSONResponse({"error": "Workspace not found"}, status_code=404)
     else:
-        session = app_db.query(ChatSession).filter(ChatSession.id == session_id).first()
+        session = _owned_chat_session(app_db, session_id, user)
         if not session:
             return JSONResponse({"error": "Session not found"}, status_code=404)
         title = session.title
@@ -2517,12 +2633,15 @@ async def export_chat_session(
 
 @app.patch("/api/chat/sessions/{session_id}")
 async def rename_chat_session(
-    session_id: str, request: Request, app_db: Session = Depends(get_app_db)
+    session_id: str,
+    request: Request,
+    app_db: Session = Depends(get_app_db),
+    user: User = Depends(current_user),
 ):
     if _workspace_id_from_chat_session(session_id):
         return JSONResponse({"error": "Workspace chat sessions use the workspace name"}, status_code=400)
 
-    session = app_db.query(ChatSession).filter(ChatSession.id == session_id).first()
+    session = _owned_chat_session(app_db, session_id, user)
     if not session:
         return JSONResponse({"error": "Session not found"}, status_code=404)
 
@@ -2538,11 +2657,17 @@ async def rename_chat_session(
 
 
 @app.delete("/api/chat/sessions/{session_id}")
-async def delete_chat_session(session_id: str, app_db: Session = Depends(get_app_db)):
+async def delete_chat_session(
+    session_id: str,
+    app_db: Session = Depends(get_app_db),
+    user: User = Depends(current_user),
+):
     workspace = _get_workspace_for_chat_session(app_db, session_id)
     if workspace:
         app_db.query(ChatMessage).filter(ChatMessage.session_id == session_id).delete()
-        app_db.query(ChatSession).filter(ChatSession.id == session_id).delete()
+        app_db.query(ChatSession).filter(
+            ChatSession.id == session_id, ChatSession.user_id == user.id
+        ).delete()
         if workspace.is_default:
             app_db.query(WorkspaceCircular).filter(
                 WorkspaceCircular.workspace_id == workspace.id
@@ -2556,13 +2681,33 @@ async def delete_chat_session(session_id: str, app_db: Session = Depends(get_app
     if _workspace_id_from_chat_session(session_id):
         return JSONResponse({"error": "Workspace not found"}, status_code=404)
 
-    session = app_db.query(ChatSession).filter(ChatSession.id == session_id).first()
+    session = _owned_chat_session(app_db, session_id, user)
     if not session:
         return JSONResponse({"error": "Session not found"}, status_code=404)
     app_db.query(ChatMessage).filter(ChatMessage.session_id == session_id).delete()
     app_db.delete(session)
     app_db.commit()
     return {"success": True}
+
+
+def _owned_chat_session(
+    app_db: Session, session_id: str, user: User
+) -> ChatSession | None:
+    """A chat session, but only if it belongs to this user.
+
+    Every route that loads a session by id goes through here. Filtering by owner at each
+    call site instead would work right up until someone adds the eleventh route and
+    forgets, and the failure mode of that omission is one tester reading another's
+    conversation.
+
+    Returns None for both "no such session" and "not yours", which the routes turn into
+    the same 404. A 403 would confirm the id exists.
+    """
+    return (
+        app_db.query(ChatSession)
+        .filter(ChatSession.id == session_id, ChatSession.user_id == user.id)
+        .first()
+    )
 
 
 def _ordered_chat_messages(app_db: Session, session_id: str) -> list[ChatMessage]:
@@ -2602,8 +2747,9 @@ async def truncate_chat_session(
     session_id: str,
     message_id: str,
     app_db: Session = Depends(get_app_db),
+    user: User = Depends(current_user),
 ):
-    session = app_db.query(ChatSession).filter(ChatSession.id == session_id).first()
+    session = _owned_chat_session(app_db, session_id, user)
     if not session:
         return JSONResponse({"error": "Session not found"}, status_code=404)
     if not _truncate_chat_messages(
@@ -2646,7 +2792,7 @@ def _chat_turn_circular_ids(
 
 
 def get_or_create_chat_session(
-    app_db, session_id, message, circular_ids, workspace, workspace_circulars=None
+    app_db, session_id, message, circular_ids, workspace, user, workspace_circulars=None
 ):
     """Resolve (and persist) the ChatSession for a chat turn.
 
@@ -2660,10 +2806,11 @@ def get_or_create_chat_session(
     """
     if workspace:
         circular_ids = _workspace_circular_ids(workspace, workspace_circulars or {})
-        session = app_db.query(ChatSession).filter(ChatSession.id == session_id).first()
+        session = _owned_chat_session(app_db, session_id, user)
         if not session:
             session = ChatSession(
                 id=session_id,
+                user_id=user.id,
                 title=workspace.name,
                 circular_ids=json.dumps(circular_ids),
             )
@@ -2674,16 +2821,18 @@ def get_or_create_chat_session(
         session_id = str(uuid.uuid4())
         session = ChatSession(
             id=session_id,
+            user_id=user.id,
             title=message[:80],
             circular_ids=json.dumps(circular_ids),
         )
         app_db.add(session)
     else:
-        session = app_db.query(ChatSession).filter(ChatSession.id == session_id).first()
+        session = _owned_chat_session(app_db, session_id, user)
         if not session:
             session_id = str(uuid.uuid4())
             session = ChatSession(
                 id=session_id,
+                user_id=user.id,
                 title=message[:80],
                 circular_ids=json.dumps(circular_ids),
             )
@@ -2698,6 +2847,7 @@ async def chat_message(
     request: Request,
     db: Session = Depends(get_db),
     app_db: Session = Depends(get_app_db),
+    user: User = Depends(current_user),
 ):
     data = await request.json()
     message = data.get("message", "")
@@ -2711,7 +2861,7 @@ async def chat_message(
         return JSONResponse({"error": "Workspace not found"}, status_code=404)
 
     session, session_id, circular_ids = get_or_create_chat_session(
-        app_db, session_id, message, circular_ids, workspace,
+        app_db, session_id, message, circular_ids, workspace, user,
         _load_workspace_circulars(db, workspace) if workspace else None,
     )
     turn_circular_ids = _chat_turn_circular_ids(db, circular_ids, message)
@@ -2744,7 +2894,7 @@ async def chat_message(
             }, stage="chat.context")
             messages = _ordered_chat_messages(app_db, session_id)
             chat_messages = [{"role": m.role, "content": m.content} for m in messages]
-            client = get_ai_client()
+            client = get_ai_client_for_user(user)
             circulars_context = _build_chat_circulars_context(
                 db, turn_circular_ids, message, client.config.max_context_tokens
             )
@@ -2782,6 +2932,7 @@ async def chat_message_stream(
     request: Request,
     db: Session = Depends(get_db),
     app_db: Session = Depends(get_app_db),
+    user: User = Depends(current_user),
 ):
     data = await request.json()
     message = data.get("message", "")
@@ -2801,7 +2952,7 @@ async def chat_message_stream(
         )
 
     session, session_id, circular_ids = get_or_create_chat_session(
-        app_db, session_id, message, circular_ids, workspace,
+        app_db, session_id, message, circular_ids, workspace, user,
         _load_workspace_circulars(db, workspace) if workspace else None,
     )
     turn_circular_ids = _chat_turn_circular_ids(db, circular_ids, message)
@@ -2854,7 +3005,7 @@ async def chat_message_stream(
             )
             stream_app_db.add(assistant_msg)
             stream_session = stream_app_db.query(ChatSession).filter(
-                ChatSession.id == session_id
+                ChatSession.id == session_id, ChatSession.user_id == user.id
             ).first()
             if stream_session:
                 stream_session.updated_at = datetime.utcnow()
@@ -2885,7 +3036,7 @@ async def chat_message_stream(
 
                 rows = _ordered_chat_messages(stream_app_db, session_id)
                 chat_messages = [{"role": m.role, "content": m.content} for m in rows]
-                client = get_ai_client()
+                client = get_ai_client_for_user(user)
                 circulars_context = _build_chat_circulars_context(
                     stream_db, turn_circular_ids, message,
                     client.config.max_context_tokens,

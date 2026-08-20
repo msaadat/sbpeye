@@ -504,6 +504,30 @@ def _ensure_app_columns(bind=None):
                     "UPDATE chat_sessions SET updated_at = created_at "
                     "WHERE updated_at IS NULL"
                 ))
+            # Added with authentication. Existing rows have no owner and are left NULL
+            # here rather than guessed at; the first admin adopts them at seed time.
+            if "user_id" not in existing:
+                conn.execute(text(
+                    "ALTER TABLE chat_sessions ADD COLUMN user_id VARCHAR"
+                ))
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_chat_sessions_user_id "
+                    "ON chat_sessions (user_id)"
+                ))
+
+        if "users" in table_names:
+            existing = {c["name"] for c in insp.get_columns("users")}
+            for column, ddl in (
+                ("ai_provider", "VARCHAR"),
+                ("ai_base_url", "VARCHAR"),
+                ("ai_model", "VARCHAR"),
+                ("ai_chat_model", "VARCHAR"),
+                ("ai_api_key_encrypted", "TEXT"),
+            ):
+                if column not in existing:
+                    conn.execute(text(
+                        f"ALTER TABLE users ADD COLUMN {column} {ddl}"
+                    ))
 
         if "research_workspaces" in table_names:
             existing = {c["name"] for c in insp.get_columns("research_workspaces")}

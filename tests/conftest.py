@@ -8,7 +8,13 @@ Every test also runs against an in-memory vector store — see `isolated_vector_
 """
 
 import math
+import os
 from datetime import datetime
+
+# Set before the application is imported: `auth.secret_key()` refuses to invent one, and
+# the lifespan check runs the moment a TestClient starts. Tests need a stable value so a
+# cookie minted in one request is still valid in the next.
+os.environ.setdefault("SBPEYE_SECRET_KEY", "test-secret-key-not-used-anywhere-real-0123")
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,10 +23,12 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from sbpeye.database import AppBase, Base, DebugBase, get_app_db, get_db, get_debug_db
-from sbpeye.models import Circular
+from sbpeye.models import Circular, User
 import sbpeye.ai as ai_module
+import sbpeye.auth_routes as auth_routes_module
 import sbpeye.llm_debug as llm_debug_module
 import sbpeye.main as main_module
+from sbpeye.auth import SESSION_COOKIE, hash_password, issue_session
 
 
 # Modules that bind `collection` at import time from `sbpeye.database`. Each one is a
@@ -251,7 +259,13 @@ def client(db_factory, monkeypatch):
     monkeypatch.setattr(llm_debug_module, "DebugSessionLocal", db_factory)
     # `get_ai_client` reads the provider settings from its own application session.
     monkeypatch.setattr(ai_module, "AppSessionLocal", db_factory)
+    # `resolve_request_user` opens its own application session per request, for the same
+    # reason the stream and the trace recorder do: the request's is not available to it.
+    monkeypatch.setattr(auth_routes_module, "AppSessionLocal", db_factory)
     monkeypatch.setattr(main_module, "get_ai_client", lambda db=None: FakeAIClient())
+    # Chat resolves the *requesting user's* credentials now, so the stub has to cover
+    # this too or every chat test asks a real provider for a key it does not have.
+    monkeypatch.setattr(main_module, "get_ai_client_for_user", lambda user: FakeAIClient())
     monkeypatch.setattr(main_module, "_build_chat_circulars_context", lambda *a, **k: "")
 
     def override_get_db():
@@ -265,8 +279,47 @@ def client(db_factory, monkeypatch):
     main_module.app.dependency_overrides[get_app_db] = override_get_db
     main_module.app.dependency_overrides[get_debug_db] = override_get_db
     with TestClient(main_module.app) as test_client:
+        # Signed in as an admin by default. These tests characterize behaviour, not the
+        # authentication boundary, and making each of them log in first would say nothing
+        # about the thing under test. The boundary has its own tests, which sign in as a
+        # tester or not at all - see `test_auth.py`.
+        sign_in(test_client, db_factory, is_admin=True)
         yield test_client, db_factory
     main_module.app.dependency_overrides.clear()
+
+
+# Deterministic, so a test can build a chat session owned by the signed-in user without
+# having to thread the fixture's return value through to wherever the row is made.
+TEST_ADMIN_ID = "test-admin"
+TEST_TESTER_ID = "test-tester"
+
+
+def sign_in(test_client, db_factory, *, user_id=None, email=None, is_admin=False):
+    """Create a user and attach their session cookie to the client. Returns the user.
+
+    Builds the row directly rather than through `auth.create_user` so the id is fixed;
+    the validation that helper does is its own subject and is tested separately.
+    """
+    app_db = db_factory()
+    try:
+        user = User(
+            id=user_id or (TEST_ADMIN_ID if is_admin else TEST_TESTER_ID),
+            email=email or ("admin@example.com" if is_admin else "tester@example.com"),
+            password_hash=hash_password("correct-horse-battery-staple"),
+            is_admin=1 if is_admin else 0,
+        )
+        app_db.add(user)
+        app_db.commit()
+        token = issue_session(user)
+        app_db.expunge(user)
+    finally:
+        app_db.close()
+    test_client.cookies.set(SESSION_COOKIE, token)
+    return user
+
+
+def sign_out(test_client):
+    test_client.cookies.delete(SESSION_COOKIE)
 
 
 def make_circular(circular_id: str = "circular-1", **overrides) -> Circular:

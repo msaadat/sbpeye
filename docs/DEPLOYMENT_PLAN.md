@@ -56,23 +56,33 @@ this machine** — retiring the chromadb format risk that 5.3 called the most li
 here to fail. `docling` became an optional extra to get the image from 19.3 GB to 1.51 GB
 (9.1.3). Still to do in 9: the Railway service itself, the volume, and the environment.
 
+**Section 7 — authentication.** Email/password with signed HTTP-only cookies, no
+self-registration, admin-created accounts. The boundary is middleware with an allowlist so a
+new route is private by default; the admin gate is per-route. Chat is scoped per user;
+workspaces stay shared (10.2). **Each user supplies their own encrypted provider API key**,
+which closes 7.5 rather than mitigating it, and the default provider is now Mistral rather
+than a localhost LM Studio (7.8). 34 boundary tests. Suite: 1 failed / 616 passed.
+
+Two things to read before continuing: 7.9, a dependency-override bug that let the test suite
+write to the real `sbpeye_app.db`, and the data loss recorded with it.
+
 ### 0.2 Not started
 
-Sections 6, 7 and 8, and the Railway half of section 9 (9.2, 9.3). Section 5 needs no code
-(5.1).
+Sections 6 and 8, and the Railway half of section 9 (9.2, 9.3). Section 5 needs no code
+(5.1); the container half of 9 is done (9.1.1-9.1.4).
 
 ### 0.3 Sequencing
 
 Sections 2-4 are prerequisites for everything else and are independent of the auth design;
-both are now in and were verified locally. Section 7 (auth) is the largest single piece.
-Sections 6-8 are small and can be done in any order.
+both are now in and were verified locally. Section 7 (auth) was the largest single piece and
+is now in. Sections 6 and 8 are small and can be done in any order.
 
 ```
 2. DB split ✔ ──→ 4. data directory ✔ ──→ 3. cache paths ✔ ──→ 9. Railway
                                                   │              │
                                   5. corpus upload (no code) ────┤
                                   6. ecodata refresh ────────────┤
-                                  7. auth + admin gating ────────┤
+                                  7. auth + admin gating ✔ ──────┤
                                   8. corpus content prep ────────┤
                                  12. tree consolidation ✔ ───────┘
 ```
@@ -791,7 +801,7 @@ scraper writing one small table, and it is serialised by being the only thread t
 
 ---
 
-## 7. Authentication and admin gating
+## 7. Authentication and admin gating — complete
 
 ### 7.1 Scope
 
@@ -808,12 +818,15 @@ On `AppBase`, in `sbpeye_app.db`:
 |---|---|
 | `id` | UUID |
 | `email` | Unique, lowercased on write |
-| `password_hash` | Argon2 or bcrypt — **never** a bare hash. Adds one dependency |
+| `password_hash` | Argon2 (`argon2-cffi`) — never a bare hash |
 | `is_admin` | Integer flag. Two roles is all this needs; no RBAC |
 | `created_at`, `last_login_at` | |
 
-Sessions: signed HTTP-only cookies, so no sessions table. `itsdangerous` is already an
-indirect dependency via Starlette. Set a `SBPEYE_SECRET_KEY` env var; refuse to start
+Sessions: signed HTTP-only cookies, so no sessions table.
+
+> **Correction.** This section said `itsdangerous` "is already an indirect dependency via
+> Starlette". It is not — Starlette only pulls it with the `[full]` extra, and it was not
+> installed. It is now a direct dependency, alongside `argon2-cffi` for hashing. Set a `SBPEYE_SECRET_KEY` env var; refuse to start
 without it in production rather than defaulting to something guessable.
 
 First admin: seeded from `SBPEYE_ADMIN_EMAIL` / `SBPEYE_ADMIN_PASSWORD` on startup if no
@@ -858,9 +871,16 @@ The fix: real UUIDs per user, `is_default` unique per user rather than globally,
 `_ensure_default_workspace(db, user_id)`. Do it in the same pass as adding `user_id`, not
 after.
 
-**Recommendation: shared workspaces for the test deploy**, per-user chat. Chat is where the
-privacy expectation actually sits, and it avoids the `DEFAULT_WORKSPACE_ID` rework until it
-buys something. Revisit before any wider release.
+**Decided: shared workspaces, per-user chat** (10.2 closed). Chat is where the privacy
+expectation actually sits, and it avoids the `DEFAULT_WORKSPACE_ID` rework until it buys
+something. Revisit before any wider release.
+
+That combination has a consequence this section did not anticipate. `_workspace_chat_session_id`
+derived a session id from the workspace alone, so with workspaces shared and chat private,
+**every tester in the default workspace computed the same session id** and would have landed
+in one another's conversation. The id now carries the owner
+(`workspace:<user_id>:<workspace_id>`), and the pre-authentication form still parses so
+existing rows are not orphaned.
 
 ### 7.5 Cost exposure that admin gating does not cover
 
@@ -868,12 +888,114 @@ Chat is user-triggered, writes only to the app database, and is therefore outsid
 entirely. Every tester conversation hits the configured provider, and with LM Studio
 unavailable in the cloud that is a paid API.
 
+**Resolved by 7.7:** each user now supplies their own provider key, so chat spend is theirs
+rather than a shared budget. The rest of this section is kept as the reasoning that led there.
+
 Chat is likely the largest per-user cost in the deployment. If spend matters, it needs its
 own control — a per-user daily message quota, a cheaper model for chat than for generation
 (`AI_CHAT_MODEL` already exists and is separately configurable), or both. This is not
 optional if registration is ever opened.
 
 ---
+
+### 7.6 What landed
+
+| Area | Where |
+|---|---|
+| Password hashing, session cookies, secret-at-rest encryption, first-admin seeding | `auth.py` |
+| Middleware guard, login page, auth + admin-user routes, per-user AI settings | `auth_routes.py` |
+| `User` model, `ChatSession.user_id`, per-user AI columns | `models.py`, `database.py` |
+| Admin gates, per-user chat scoping | `main.py`, `api/serializers.py`, `api/debug.py` |
+| 34 boundary tests | `tests/test_auth.py` |
+
+**The authentication boundary is middleware with an allowlist, not a `Depends` per route.**
+With 74 routes and more coming, per-route opt-in means the cost of forgetting one is a public
+endpoint found by someone else; inverted, it is a login prompt found immediately by whoever
+added the route. Only the second is safe to get wrong. The allowlist is `/healthz`, `/login`,
+the login/logout APIs and static assets — a probe cannot present a cookie, and a login page
+behind a login is a locked door with the key inside.
+
+The **admin** gate stays per-route, because it genuinely varies per route. `/api/circulars/open`
+carries a specific message rather than a bare 403, per 7.3.
+
+Other decisions worth keeping:
+
+- **No self-registration.** The admin creates testers. There is no public signup route.
+- **Failures are indistinguishable.** A wrong password and an unknown address return the same
+  status and body, so the form cannot be used to enumerate accounts. `authenticate` hashes a
+  throwaway value on a miss so timing does not leak it either.
+- **404, not 403, for another user's chat.** A 403 confirms the session exists.
+- **The last admin cannot delete themselves**, or the deployment locks itself out.
+- **Passwords have a length floor and no composition rules.** Requiring a digit, a symbol
+  and a capital pushes people towards `Password1!` and buys less than length does.
+
+**The floor is 8 characters** (`auth.MIN_PASSWORD_LENGTH`), relaxed from 12 on request.
+Twelve is the better number and eight is a knowing trade for a test deploy with a handful of
+known accounts — it belongs back at 12 before this stops being a test, and it is one constant
+to change. Note there is no separate admin rule: this governs every account including the
+seeded one, which is the right way round, since a weaker floor on the most privileged account
+would be exactly backwards.
+
+### 7.7 Per-user provider keys
+
+Added beyond the original scope, and it closes 7.5 rather than mitigating it.
+
+Each user holds their own `ai_provider` / `ai_base_url` / `ai_model` / `ai_chat_model` and an
+**encrypted** `ai_api_key`. Chat runs on the requesting user's credentials via
+`get_ai_client_for_user`, which **refuses to fall back** to the deployment key — a tester
+without their own gets "add your API key in Settings", not somebody else's bill. The
+deployment-level config still drives admin-triggered corpus generation, which is the admin's
+own spend under 1.3.
+
+`GET`/`PUT /api/settings/ai` is available to every signed-in user, unlike admin-gated
+`/api/settings`, because it is the credential they pay with. The key is **write-only through
+the API**: the response reports `api_key_set`, never the value.
+
+Encryption is Fernet keyed off a SHA-256 of `SBPEYE_SECRET_KEY`, so there is one secret to
+manage. Two consequences, both deliberate: it protects a leaked `sbpeye_app.db` **without**
+the environment variable, and nothing more; and **rotating `SBPEYE_SECRET_KEY` makes every
+stored key unreadable**, so each user re-enters theirs. Rotation already logs everyone out,
+so it is the same event. An unreadable key is treated as unset rather than raised on.
+
+`cryptography` was already in the dependency tree, so this cost no image size.
+
+### 7.8 Default provider is now Mistral
+
+`AIConfig` defaults, `normalize_provider("")`, `from_env` and `from_db` all default to
+`mistral` (`mistral-small-latest`, `https://api.mistral.ai/v1`) instead of `lmstudio`. LM
+Studio's default is `localhost:1234`, which exists on a developer's machine and nowhere else:
+a deployment falling back to it fails every call with a connection error rather than the
+configuration error it actually is (9.3).
+
+One knock-on: the LM Studio default carried a placeholder API key that satisfied the OpenAI
+SDK constructor, and Mistral has none. `AIClient` now substitutes a placeholder when no key
+is set, so an unset key surfaces as a provider 401 with a readable message instead of an
+exception while building the client.
+
+### 7.9 A real bug found on the way, and real data lost
+
+**Routes added with `app.router.routes.extend(...)` never received a
+`dependency_overrides_provider`.** `include_router` passes one to each route and `APIRoute`
+captures it in the handler it builds during `__init__`; routes copied off a bare `APIRouter`
+had `None`. So `app.dependency_overrides[get_app_db]` — the mechanism the whole test suite
+relies on for isolation — **silently missed every route on `auth_router` and `debug_router`**,
+and those routes used the process-wide session factory instead.
+
+This is not only a harness problem. It means **the test suite was writing to the developer's
+real `sbpeye_app.db`**. A user row created by `test_a_duplicate_address_is_refused` was found
+there and removed.
+
+Fixed in `main.py` by setting the provider and rebuilding each route's handler
+(`_bind_dependency_overrides`), which also closes the same latent hole on the trace console.
+Verified: the file's hash is unchanged across a full suite run.
+
+**Data loss.** `sbpeye_app.db` now holds 0 chat sessions, 0 chat messages, 0 workspace pins
+and 1 workspace, against the 11 / 30 / 12 / 4 recorded in 0.1 when the split was verified.
+There is no backup, and 2.1 dropped the tables from `sbpeye.db`, so there is no second copy.
+**When this happened is not established** — the destructive route on the leaking router
+deletes chat by `user_id`, and the lost rows had none, so the arithmetic does not obviously
+work — but the leak was real and unnoticed, so it cannot be ruled out either. Worth a backup
+of `sbpeye_app.db` before further work.
 
 ## 8. Prepare corpus content before deploying
 
@@ -1056,8 +1178,8 @@ the corpus alone. **Hobby is the floor and is the plan being taken**; see 5.3 fo
 |---|---|
 | `SBPEYE_DATA_DIR` | `/data` |
 | `SBPEYE_SECRET_KEY` | Cookie signing. Refuse to start without it |
-| `SBPEYE_ADMIN_EMAIL` / `SBPEYE_ADMIN_PASSWORD` | First-admin seeding |
-| `AI_PROVIDER`, `AI_BASE_URL`, `AI_MODEL`, `AI_CHAT_MODEL` | **Must be set.** Default is `lmstudio` at `localhost:1234`, which does not exist in the cloud |
+| `SBPEYE_ADMIN_EMAIL` / `SBPEYE_ADMIN_PASSWORD` | First-admin seeding. Only consulted when no admin exists, so leaving them set does not resurrect a deleted account |
+| `AI_PROVIDER`, `AI_BASE_URL`, `AI_MODEL`, `AI_CHAT_MODEL` | Deployment-level config for admin corpus generation. The default is now `mistral` (7.8), so a missing value is no longer a localhost connection error - but a key is still needed for generation. Testers' chat uses their own keys (7.7) |
 | Provider key (`OPENAI_API_KEY`, `GROQ_API_KEY`, …) | Per chosen provider |
 | `EMBEDDING_PROVIDER` | Keep `fastembed`. Must match the model the shipped Chroma index was built with (`BAAI/bge-base-en-v1.5`) or vector search returns nonsense |
 | `LLM_DEBUG_ALLOWED` | Set `false` unless actively debugging — traces store full prompts |
@@ -1100,10 +1222,10 @@ Corpus (current) or app database. Corpus means build-machine job history ships i
 app means reworking transaction boundaries in three job runners that currently commit job
 rows and corpus rows together. Low consequence. Section 2.3.
 
-### 10.2 Workspace sharing model
+### 10.2 Workspace sharing model — closed
 
-Shared or per-user. Determines whether the `DEFAULT_WORKSPACE_ID` rework is needed now.
-Section 7.4.
+Shared workspaces, per-user chat. The `DEFAULT_WORKSPACE_ID` rework is not needed; the
+workspace chat session id carries the owner instead. Section 7.4.
 
 ### 10.3 `local_path` — whether to move it at all, and how — closed
 

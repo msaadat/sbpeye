@@ -25,7 +25,7 @@ from sbpeye.models import (
 )
 from sbpeye.scraper.circulars import circular_identity
 
-from conftest import FakeAIClient, make_circular
+from conftest import FakeAIClient, make_circular, use_tmp_data_root
 
 
 def _seed_circular(db_factory, **overrides):
@@ -235,9 +235,8 @@ def _unexpected_reingest(*args, **kwargs):
 
 def test_document_content_redownloads_missing_attachment_file(client, monkeypatch, tmp_path):
     test_client, db_factory = client
-    monkeypatch.setattr(main_module, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(database_module, "PROJECT_ROOT", tmp_path)
-    repaired_path = tmp_path / "attachments" / "c1" / "att-1.pdf"
+    use_tmp_data_root(monkeypatch, tmp_path)
+    repaired_path = tmp_path / "files" / "circulars" / "c1" / "att-1.pdf"
 
     db = db_factory()
     try:
@@ -249,7 +248,7 @@ def test_document_content_redownloads_missing_attachment_file(client, monkeypatc
                 circular_id="c1",
                 filename="rules.pdf",
                 original_url="https://www.sbp.org.pk/files/rules.pdf",
-                local_path="attachments/c1/missing.pdf",
+                local_path="files/circulars/c1/missing.pdf",
                 file_type="pdf",
                 extraction_status="extracted",
                 content_text="original extracted text",
@@ -278,7 +277,7 @@ def test_document_content_redownloads_missing_attachment_file(client, monkeypatc
     db = db_factory()
     try:
         attachment = db.query(Attachment).filter(Attachment.id == "att-1").one()
-        assert attachment.local_path == "attachments/c1/att-1.pdf"
+        assert attachment.local_path == "files/circulars/c1/att-1.pdf"
         # The pointer is the only thing the read is allowed to change. The text the
         # vector store was built from, and the ledger saying it is in there, both stand.
         assert attachment.content_text == "original extracted text"
@@ -289,9 +288,8 @@ def test_document_content_redownloads_missing_attachment_file(client, monkeypatc
 
 def test_document_content_redownloads_missing_standalone_file(client, monkeypatch, tmp_path):
     test_client, db_factory = client
-    monkeypatch.setattr(main_module, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(database_module, "PROJECT_ROOT", tmp_path)
-    repaired_path = tmp_path / "attachments" / "standalone" / "doc-1.pdf"
+    use_tmp_data_root(monkeypatch, tmp_path)
+    repaired_path = tmp_path / "files" / "circulars" / "standalone" / "doc-1.pdf"
 
     db = db_factory()
     try:
@@ -300,7 +298,7 @@ def test_document_content_redownloads_missing_standalone_file(client, monkeypatc
                 id="doc-1",
                 filename="rules.pdf",
                 original_url="https://www.sbp.org.pk/files/rules.pdf",
-                local_path="attachments/standalone/missing.pdf",
+                local_path="files/circulars/standalone/missing.pdf",
                 file_type="pdf",
             )
         )
@@ -324,7 +322,7 @@ def test_document_content_redownloads_missing_standalone_file(client, monkeypatc
     db = db_factory()
     try:
         document = db.query(CachedDocument).filter(CachedDocument.id == "doc-1").one()
-        assert document.local_path == "attachments/standalone/doc-1.pdf"
+        assert document.local_path == "files/circulars/standalone/doc-1.pdf"
         assert document.error is None
     finally:
         db.close()
@@ -332,8 +330,7 @@ def test_document_content_redownloads_missing_standalone_file(client, monkeypatc
 
 def test_document_content_reports_failed_redownload(client, monkeypatch, tmp_path):
     test_client, db_factory = client
-    monkeypatch.setattr(main_module, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(database_module, "PROJECT_ROOT", tmp_path)
+    use_tmp_data_root(monkeypatch, tmp_path)
 
     db = db_factory()
     try:
@@ -345,7 +342,7 @@ def test_document_content_reports_failed_redownload(client, monkeypatch, tmp_pat
                 circular_id="c1",
                 filename="rules.pdf",
                 original_url="https://www.sbp.org.pk/files/rules.pdf",
-                local_path="attachments/c1/missing.pdf",
+                local_path="files/circulars/c1/missing.pdf",
                 file_type="pdf",
                 extraction_status="extracted",
             )
@@ -376,9 +373,8 @@ def test_document_content_reports_failed_redownload(client, monkeypatch, tmp_pat
 
 
 def test_ensure_document_cached_redownloads_missing_attachment(db_factory, monkeypatch, tmp_path):
-    monkeypatch.setattr(main_module, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(database_module, "PROJECT_ROOT", tmp_path)
-    repaired_path = tmp_path / "attachments" / "c1" / "att-1.pdf"
+    use_tmp_data_root(monkeypatch, tmp_path)
+    repaired_path = tmp_path / "files" / "circulars" / "c1" / "att-1.pdf"
 
     db = db_factory()
     try:
@@ -390,7 +386,7 @@ def test_ensure_document_cached_redownloads_missing_attachment(db_factory, monke
                 circular_id="c1",
                 filename="rules.pdf",
                 original_url="https://www.sbp.org.pk/files/rules.pdf",
-                local_path="attachments/c1/missing.pdf",
+                local_path="files/circulars/c1/missing.pdf",
                 file_type="pdf",
                 extraction_status="extracted",
                 is_vectorized=1,
@@ -414,16 +410,15 @@ def test_ensure_document_cached_redownloads_missing_attachment(db_factory, monke
 
         assert repaired.id == "att-1"
         assert path == repaired_path
-        assert repaired.local_path == "attachments/c1/att-1.pdf"
+        assert repaired.local_path == "files/circulars/c1/att-1.pdf"
         assert repaired.is_vectorized == 1
     finally:
         db.close()
 
 
 def test_ensure_document_cached_redownloads_missing_standalone(db_factory, monkeypatch, tmp_path):
-    monkeypatch.setattr(main_module, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(database_module, "PROJECT_ROOT", tmp_path)
-    repaired_path = tmp_path / "attachments" / "standalone" / "doc-1.pdf"
+    use_tmp_data_root(monkeypatch, tmp_path)
+    repaired_path = tmp_path / "files" / "circulars" / "standalone" / "doc-1.pdf"
 
     db = db_factory()
     try:
@@ -431,7 +426,7 @@ def test_ensure_document_cached_redownloads_missing_standalone(db_factory, monke
             id="doc-1",
             filename="rules.pdf",
             original_url="https://www.sbp.org.pk/files/rules.pdf",
-            local_path="attachments/standalone/missing.pdf",
+            local_path="files/circulars/standalone/missing.pdf",
             file_type="pdf",
         )
         db.add(document)
@@ -450,7 +445,7 @@ def test_ensure_document_cached_redownloads_missing_standalone(db_factory, monke
 
         assert repaired.id == "doc-1"
         assert path == repaired_path
-        assert repaired.local_path == "attachments/standalone/doc-1.pdf"
+        assert repaired.local_path == "files/circulars/standalone/doc-1.pdf"
         assert repaired.error is None
     finally:
         db.close()
@@ -688,8 +683,7 @@ def test_chat_session_get_missing_returns_404(client):
 
 def test_ensure_document_cached_refresh_reingests(db_factory, monkeypatch, tmp_path):
     """The counterpart to the tests above: an explicit refresh *is* a re-ingest."""
-    monkeypatch.setattr(main_module, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(database_module, "PROJECT_ROOT", tmp_path)
+    use_tmp_data_root(monkeypatch, tmp_path)
 
     db = db_factory()
     try:
@@ -700,7 +694,7 @@ def test_ensure_document_cached_refresh_reingests(db_factory, monkeypatch, tmp_p
                 circular_id="c1",
                 filename="rules.pdf",
                 original_url="https://www.sbp.org.pk/files/rules.pdf",
-                local_path="attachments/c1/att-1.pdf",
+                local_path="files/circulars/c1/att-1.pdf",
                 file_type="pdf",
                 extraction_status="extracted",
                 is_vectorized=1,
@@ -754,9 +748,8 @@ def _add_law_version(db, *, content_hash, local_path=None):
 def test_law_file_redownloads_when_the_hash_matches(client, monkeypatch, tmp_path):
     """A missing archive file is refetched, and accepted because it is the same bytes."""
     test_client, db_factory = client
-    monkeypatch.setattr(main_module, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(database_module, "PROJECT_ROOT", tmp_path)
-    archived = tmp_path / "attachments" / "laws" / "d1" / "hash-a-act.pdf"
+    use_tmp_data_root(monkeypatch, tmp_path)
+    archived = tmp_path / "files" / "laws" / "d1" / "hash-a-act.pdf"
 
     db = db_factory()
     try:
@@ -779,7 +772,7 @@ def test_law_file_redownloads_when_the_hash_matches(client, monkeypatch, tmp_pat
     db = db_factory()
     try:
         version = db.query(RegDocumentVersion).filter(RegDocumentVersion.id == "d1-v1").one()
-        assert version.local_path == "attachments/laws/d1/hash-a-act.pdf"
+        assert version.local_path == "files/laws/d1/hash-a-act.pdf"
     finally:
         db.close()
 
@@ -788,9 +781,8 @@ def test_law_file_refuses_when_the_live_file_is_a_different_edition(client, monk
     """SBP replaces law PDFs in place. Bytes that do not hash to this version's hash are
     a different edition, and must not be served as though they were the archived one."""
     test_client, db_factory = client
-    monkeypatch.setattr(main_module, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(database_module, "PROJECT_ROOT", tmp_path)
-    fetched = tmp_path / "attachments" / "laws" / "d1" / "hash-b-act.pdf"
+    use_tmp_data_root(monkeypatch, tmp_path)
+    fetched = tmp_path / "files" / "laws" / "d1" / "hash-b-act.pdf"
 
     db = db_factory()
     try:

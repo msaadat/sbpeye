@@ -413,12 +413,12 @@ def _law_detail(document: RegDocument) -> dict:
 
 def _document_payload(attachment: Attachment | CachedDocument) -> dict:
     from ..database import PROJECT_ROOT
+    from ..env import CIRCULAR_FILES_DIR
 
     local_path = None
     if attachment.local_path:
         candidate_path = (PROJECT_ROOT / attachment.local_path).resolve()
-        attachments_root = (PROJECT_ROOT / "attachments").resolve()
-        if attachments_root in candidate_path.parents and candidate_path.is_file():
+        if CIRCULAR_FILES_DIR.resolve() in candidate_path.parents and candidate_path.is_file():
             local_path = candidate_path
     return {
         "id": attachment.id,

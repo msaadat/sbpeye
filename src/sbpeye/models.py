@@ -234,7 +234,7 @@ class RegDocumentVersion(Base):
     """One captured state of a `RegDocument`, identified by content hash.
 
     SBP keeps no history of its own — superseded PDFs simply vanish from the site — so
-    every fetched file is archived immutably under `attachments/laws/<document_id>/` and
+    every fetched file is archived immutably under `files/laws/<document_id>/` and
     never overwritten. Hashes are the only trustworthy change detector: URLs, titles and
     listing dates all stay put across revisions.
 

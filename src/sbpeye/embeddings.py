@@ -8,7 +8,7 @@ import numpy as np
 from openai import OpenAI
 from sqlalchemy import text
 
-from .env import DATA_ROOT, load_app_env, resolve_env_value
+from .env import MODEL_CACHE_DIR, load_app_env, resolve_env_value
 
 
 load_app_env()
@@ -73,7 +73,7 @@ class EmbeddingConfig:
     def cache_dir(cls) -> str:
         return os.getenv(
             "FASTEMBED_CACHE_PATH",
-            str(DATA_ROOT / "cache" / "models"),
+            str(MODEL_CACHE_DIR),
         )
 
     @classmethod

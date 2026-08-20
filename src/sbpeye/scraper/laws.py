@@ -5,7 +5,7 @@ Phase 2 of docs/LAWS_REGULATIONS_PLAN.md: the listing's flat, directly-linked do
 Unlike circulars — immutable dated events — these are living documents. SBP replaces the
 PDF in place at the same URL and keeps no history, so nothing about a URL, title or listing
 date is a reliable change signal; only the content hash is. Every distinct hash becomes a
-`RegDocumentVersion` archived immutably under `attachments/laws/`, which makes SBPEye the
+`RegDocumentVersion` archived immutably under `files/laws/`, which makes SBPEye the
 historical record the site itself does not keep.
 
 Rows that link to a subpage or to a circular are recorded here as metadata-only stubs;
@@ -25,6 +25,7 @@ from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
 
 from ..database import PROJECT_ROOT
+from ..env import LAWS_ARCHIVE_DIR
 from ..laws_links import law_label, link_document_to_circular
 from ..link_routing import DOCUMENT_EXTENSIONS, find_circular_by_url, is_allowed_sbp_url
 from ..models import RegDocument, RegDocumentVersion
@@ -43,7 +44,8 @@ from .clean_html import extract_sbp_text
 from ..search import NON_TEXT_LAW_FILE_TYPES, index_law_fts
 
 LAWS_LISTING_URL = f"{BASE_URL}/laws-regulations"
-LAWS_ARCHIVE_DIR = ATTACHMENTS_DIR / "laws"
+# Imported, not derived from the attachments tree: the archive is a different kind of
+# data than a downloaded attachment and no longer lives inside it. See `env`.
 
 # The listing's `data-type` attribute (also the values in its "Filter By Type" panel)
 # mapped to the `RegDocument.doc_type` vocabulary. Gazette Notifications and Licensing

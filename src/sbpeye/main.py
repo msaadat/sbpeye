@@ -62,6 +62,7 @@ from .scraper.circulars import (
     process_circular,
     scrape_circulars,
 )
+from .env import CIRCULAR_FILES_DIR, LAWS_ARCHIVE_DIR
 from .scraper.laws import download_law_file
 from .scraper.ecodata import scrape_ecodata
 from .scraper.clean_html import clean_sbp_html, extract_sbp_text
@@ -186,8 +187,7 @@ def _cached_document_path(document: Attachment | CachedDocument) -> Path | None:
     if not document.local_path:
         return None
     path = (PROJECT_ROOT / document.local_path).resolve()
-    attachments_root = (PROJECT_ROOT / "attachments").resolve()
-    if attachments_root not in path.parents:
+    if CIRCULAR_FILES_DIR.resolve() not in path.parents:
         return None
     return path if path.is_file() else None
 
@@ -262,8 +262,10 @@ def _law_archive_path(version: RegDocumentVersion) -> Path | None:
     if not version.local_path:
         return None
     candidate = (PROJECT_ROOT / version.local_path).resolve()
-    archive_root = (PROJECT_ROOT / "attachments").resolve()
-    if archive_root not in candidate.parents:
+    # Guarded against the archive specifically. Before the trees were split these two
+    # guards shared one root, so an attachment path satisfied the law guard and vice
+    # versa; they now each admit only their own tree.
+    if LAWS_ARCHIVE_DIR.resolve() not in candidate.parents:
         return None
     return candidate if candidate.is_file() else None
 

@@ -35,6 +35,11 @@ The change was six functional lines, not the ~40 call sites this section origina
 estimated — see 4.4 for why, and for the four inline re-derivations that were the actual
 trap. Test suite unchanged against the true baseline (0.4).
 
+**Section 12 — the file tree.** `attachments/` and `cache/` are one `files/` tree split by
+cost to lose: `laws/` (archive, never deleted), `circulars/` (re-fetchable), `cache/`
+(disposable). Model weights moved out to `models/`. Migrated with `sbpeye cache
+migrate-layout`; reconciliation clean, and `--prune` can no longer reach the archive.
+
 **Section 3 — the cache write paths.** A cache miss on an ordinary document view no longer
 runs a re-ingest: it fetches the bytes and writes `local_path` alone, leaving `content_text`
 and the `is_vectorized` ledger intact. Law versions gained the opposite change — they refetch
@@ -46,7 +51,7 @@ The `DocumentCache` table was not built and is not needed (10.3, option C). Suit
 
 ### 0.2 Not started
 
-Sections 6 through 9, and section 12. Section 5 needs no code (5.1).
+Sections 6 through 9. Section 5 needs no code (5.1).
 
 ### 0.3 Sequencing
 
@@ -61,7 +66,7 @@ Sections 6-8 are small and can be done in any order.
                                   6. ecodata refresh ────────────┤
                                   7. auth + admin gating ────────┤
                                   8. corpus content prep ────────┤
-                                 12. tree consolidation ─────────┘
+                                 12. tree consolidation ✔ ───────┘
 ```
 
 Sections 2, 3 and 4 are in. Section 7 (auth) is now the largest remaining piece, and section
@@ -103,7 +108,7 @@ The measurements that would matter if this is revisited:
 | `docling` imports | **All function-local** (`checklist.py` only) — droppable, costs one feature |
 | `fastembed` | Lazily imported but on the hot path (`embed_queries` per search and per chat turn) |
 | Shippable corpus | `sbpeye.db` 69 MB + `chroma_db/` 486 MB (was recorded as 395 MB; re-measured) |
-| Not shippable | `attachments/` 638 MB, `cache/` 736 MB |
+| Not shippable | `files/` 963 MB (see 12.6), `models/` 209 MB |
 
 Desktop remains viable later; the work in sections 3 and 4 is a prerequisite for it too —
 and section 4 is now done, so that prerequisite is half paid.
@@ -655,8 +660,9 @@ is zero code.
 
 | On the volume | Not on the volume |
 |---|---|
-| `sbpeye.db` (69 MB) — uploaded | `attachments/` (645 MB) — fetched on demand |
-| `chroma_db/` (486 MB) — uploaded | `cache/models` (209 MB) — belongs in the image, see 5.4 |
+| `sbpeye.db` (69 MB) — uploaded | `files/circulars/` (570 MB) — fetched on demand |
+| `chroma_db/` (486 MB) — uploaded | `files/cache/` (318 MB) — regenerated |
+| | `models/` (209 MB) — belongs in the image, see 5.4 |
 | `sbpeye_app.db` — created empty on first boot | |
 | `sbpeye_debug.db` — created on demand | |
 | `.env.local` — written by the Settings UI (4.3) | |
@@ -680,7 +686,7 @@ cache is also allowed to fill — comfortably inside 5 GB.
    diagnose, and choosing upload over rebuild keeps that risk rather than removing it. Test
    one boot before relying on it. If it fails, 5.6 is the fallback.
 4. **Bake the FastEmbed model into the image.** `EmbeddingConfig.cache_dir()` resolves to
-   `DATA_ROOT/cache/models`, overridable with `FASTEMBED_CACHE_PATH`. Left on the volume it
+   `DATA_ROOT/models` (12.6), overridable with `FASTEMBED_CACHE_PATH`. Left on the volume it
    is 209 MB of third-party weights being treated as application data; unset, first boot
    downloads them before it can embed anything. Point `FASTEMBED_CACHE_PATH` at a baked-in
    image path.
@@ -916,7 +922,7 @@ Expect a large image. `torch` (500 MB) arrives via `docling`, `onnxruntime` (291
 omits it would shed roughly 700 MB at the cost of checklist reference-unit extraction — worth
 measuring if build times become painful, but not worth doing pre-emptively.
 
-`.dockerignore` must exclude `.venv/`, `attachments/`, `cache/`, `frontend/node_modules/`,
+`.dockerignore` must exclude `.venv/`, `files/`, `models/`, `frontend/node_modules/`,
 `sbpeye_debug.db`, `benchmarks/results/` and — importantly — **`.env.local`**. That file
 currently contains live provider keys; baking it into an image layer would ship them.
 
@@ -1004,9 +1010,9 @@ no release asset, no rebuild-on-boot. Section 5.1.
 The residual risk is the chromadb on-disk format (5.4, rule 3), with `sbpeye reindex` as the
 documented fallback (5.6).
 
-### 10.6 File tree consolidation — proposed, not decided
+### 10.6 File tree consolidation — closed
 
-Merging `attachments/` and `cache/` into one tree. Section 12.
+Done as proposed, including the durability split. Section 12.6.
 
 ---
 
@@ -1037,7 +1043,7 @@ Before calling the deployment done:
 
 ---
 
-## 12. File tree consolidation — proposed
+## 12. File tree consolidation — complete
 
 `attachments/` and `cache/` are two top-level mutable trees where one would do. This section
 proposes the merge and, more importantly, records what the merge must not destroy.
@@ -1146,4 +1152,96 @@ Nothing here is required for Railway. Section 4 already puts both trees on the v
 neither is uploaded (5.3), so the deploy works either way. But once the deployment is running
 there are two attachment trees to migrate instead of one, so the cheap moment is now, and the
 blocker is 10.3 rather than anything in this section.
+
+### 12.6 Landed
+
+The layout is now:
+
+```
+DATA_ROOT/
+├── files/                963 MB
+│   ├── laws/              76 MB   archive - nothing may delete from here
+│   ├── circulars/        570 MB   re-fetchable
+│   └── cache/            318 MB   disposable
+│       ├── html/
+│       └── parses/
+└── models/               209 MB   third-party weights, not application data
+```
+
+**All seven roots are defined once, in `env.py`**, next to `DATA_ROOT`. That module imports
+only stdlib and `dotenv`, so every consumer can reach it without a cycle — which matters,
+because `documents.py` could not import `HTML_CACHE_DIR` from `scraper.circulars` (that would
+close `documents -> scraper.circulars -> checklist -> documents`). Folding that duplicate in
+was 12.4's loose end and it is gone.
+
+| File | Change |
+|---|---|
+| `env.py` | `FILES_ROOT`, `LAWS_ARCHIVE_DIR`, `CIRCULAR_FILES_DIR`, `FILES_CACHE_DIR`, `HTML_CACHE_DIR`, `PARSE_CACHE_DIR`, `MODEL_CACHE_DIR` |
+| `scraper/circulars.py` | `ATTACHMENTS_DIR` keeps its name — these are attachments whatever the directory is called — and is now an alias for `CIRCULAR_FILES_DIR` |
+| `scraper/laws.py` | `LAWS_ARCHIVE_DIR` imported, no longer derived from the attachments tree |
+| `checklist.py`, `embeddings.py`, `documents.py` | Import their root instead of deriving it |
+| `main.py`, `api/serializers.py` | Containment guards repointed |
+| `cli/commands.py` | `check-stale` restructured; `cache migrate-layout` added |
+| `.gitignore` | `/files/`, `/models/`; the old entries kept for unmigrated checkouts |
+
+**The guards now admit only their own tree.** They previously shared
+`PROJECT_ROOT / "attachments"`, so an attachment path satisfied the law guard and a law path
+satisfied the attachment guard. Verified after migration: 400/400 sampled attachments and
+108/108 law versions resolve, and each guard rejects the other tree's paths.
+
+**`check-stale` can no longer reach the archive.** It walks `CIRCULAR_FILES_DIR` and
+`HTML_CACHE_DIR` into a prunable list, and `LAWS_ARCHIVE_DIR` into a separate report-only
+list that `--prune` does not iterate. 3.4.3's near-miss was possible because safety depended
+on every law version being present in the expected set; it is now structural. Post-migration
+reconciliation: 0 orphaned attachments, 0 unreferenced archive files, 9 orphaned HTML cache
+files.
+
+#### 12.6.1 The migration
+
+Done by a one-shot `sbpeye cache migrate-layout` command: it moved the trees, then rewrote
+the stored paths — in that order, so an interrupted run finished on a re-run, the rewrite
+being driven by what the rows still said.
+
+**The command has since been removed.** The local corpus is migrated (1371 attachment paths
+and 108 law version paths under the new prefixes, none left under `attachments/`, no
+backslash separators), `sbpeye.db` carries those paths in git, and the Railway volume starts
+empty, so nothing left to run it against. `.gitignore` no longer carries `/attachments/` or
+`/cache/` either — an unmigrated checkout now surfaces them as untracked files, which is a
+more useful signal than silence.
+
+The one case it would still serve: a checkout that pulls the migrated `sbpeye.db` while
+holding an old tree on disk. `files/` is gitignored, so every path would resolve to nothing
+and ~645 MB would silently re-download. The corpus was built on Windows — the six backslash
+rows below are the evidence — so such a machine may exist. Recover the command from git
+history if one turns up; it is idempotent and safe to re-run.
+
+Two things its dry run caught that this section had not anticipated:
+
+1. **`attachments/laws` was being swept into `files/circulars/laws`.** Under `--dry-run`
+   nothing has moved, so the archive was still sitting in `attachments/` when the
+   per-circular sweep ran. A real run would have ordered correctly by luck. It is now
+   excluded by name rather than by ordering — 12.4's "order matters" warning showing up in a
+   form this section did not predict.
+2. **Six rows held Windows backslash separators** (`attachments\<id>\<file>.pdf`), written
+   when the corpus was built on Windows. On Linux those are a single filename and never
+   resolved, so they were already broken. The migration normalises them and reports the count
+   separately. One was a law version, which now resolves — the archive is 108/108 present.
+
+Final counts: 1371 attachment paths, 108 law version paths, 0 cached documents. The 5
+attachment rows still reporting a missing file are five of the six Windows rows, whose bytes
+were never on this machine; they now re-download correctly, and under 3.5.2 that is a
+single-column write.
+
+Suite: 1 failed / 578 passed, baseline failure only.
+
+#### 12.6.2 Test-side change
+
+Path roots are patched through a new `use_tmp_data_root(monkeypatch, tmp_path)` in
+`conftest.py`, replacing eight hand-rolled `PROJECT_ROOT` patch pairs.
+
+It exists because two binding styles have to be redirected together: modules that imported a
+root at import time hold their own reference, while `api/serializers.py` imports inside the
+function and reads `env` at call time. Patching one and not the other leaves a containment
+guard comparing against the developer's real tree — 4.2's "fail open or closed", reappearing
+in the test harness.
 

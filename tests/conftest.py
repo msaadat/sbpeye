@@ -154,6 +154,38 @@ def isolated_parse_cache(monkeypatch, tmp_path):
     monkeypatch.setattr(checklist_module, "PARSE_CACHE_DIR", tmp_path / "parses")
 
 
+def use_tmp_data_root(monkeypatch, tmp_path):
+    """Point every file-tree root at `tmp_path`, and return it.
+
+    Two binding styles have to be covered or the redirect is only half applied:
+    modules that imported a root at import time hold their own reference, while
+    `api.serializers` imports it inside the function and so reads `sbpeye.env` at call
+    time. Patching one and not the other leaves a path-containment guard comparing
+    against the developer's real tree, which fails open or closed depending on layout.
+    """
+    import sbpeye.database as database_module
+    import sbpeye.env as env_module
+    import sbpeye.main as main_module
+
+    files = tmp_path / "files"
+    roots = {
+        "FILES_ROOT": files,
+        "LAWS_ARCHIVE_DIR": files / "laws",
+        "CIRCULAR_FILES_DIR": files / "circulars",
+        "FILES_CACHE_DIR": files / "cache",
+        "HTML_CACHE_DIR": files / "cache" / "html",
+        "PARSE_CACHE_DIR": files / "cache" / "parses",
+        "MODEL_CACHE_DIR": tmp_path / "models",
+    }
+    for name, value in roots.items():
+        monkeypatch.setattr(env_module, name, value)
+    for name in ("CIRCULAR_FILES_DIR", "LAWS_ARCHIVE_DIR"):
+        monkeypatch.setattr(main_module, name, roots[name])
+    for module in (main_module, database_module):
+        monkeypatch.setattr(module, "PROJECT_ROOT", tmp_path)
+    return tmp_path
+
+
 class FakeAIConfig:
     max_context_tokens = 4000
 

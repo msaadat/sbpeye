@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .documents import document_from_attachment, document_from_circular
-from .env import DATA_ROOT
+from .env import PARSE_CACHE_DIR as _PARSE_CACHE_DIR
 
 
 # Retained for the existing pdfplumber search extraction path. Checklist parsing
@@ -605,10 +605,10 @@ def reference_units_from_docling(
 #
 # On disk rather than in SQLite: nothing ever queries these, they are only ever fetched
 # whole by exact key, and keeping them out of `sbpeye.db` means a stale cache is fixed
-# with `rm -rf cache/parses`. Entries are content-keyed, so the directory is bounded by
+# with `rm -rf files/cache/parses`. Entries are content-keyed, so the directory is bounded
 # the corpus rather than by how often analysis is re-run — superseded editions leave an
 # orphan each, which is the cost of never having to reason about invalidation.
-PARSE_CACHE_DIR = DATA_ROOT / "cache" / "parses"
+PARSE_CACHE_DIR = _PARSE_CACHE_DIR
 # Bump when a change to `reference_units_from_docling` would produce different units for
 # the same bytes. Every cached entry then misses and is rebuilt on next use.
 PARSE_CACHE_VERSION = 1

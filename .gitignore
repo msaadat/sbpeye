@@ -20,9 +20,13 @@ src/sbpeye/static/spa/
 # Local vector index
 /chroma_db/
 
-# Scraper caches
-/cache/
-/attachments/
+# Application file storage. One tree, split by how much it costs to lose the contents:
+# files/laws/ is the archive (irreplaceable), files/circulars/ is re-fetchable, and
+# files/cache/ is disposable. See src/sbpeye/env.py.
+/files/
+# Third-party embedding model weights, not application data.
+/models/
+
 
 # Local analysis and rendered QA artifacts
 /tmp/

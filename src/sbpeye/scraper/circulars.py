@@ -11,6 +11,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 from ..models import Attachment, Circular, CircularRelationship
 from ..database import PROJECT_ROOT, collection, embedding_backend
+from ..env import CIRCULAR_FILES_DIR, HTML_CACHE_DIR
 from ..checklist import PAGE_MARKER_RE, prepare_index_chunks, prepare_reference_chunks
 from ..search import index_circular_fts
 from .clean_html import extract_sbp_text
@@ -30,8 +31,10 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
-HTML_CACHE_DIR = PROJECT_ROOT / "cache" / "html"
-ATTACHMENTS_DIR = PROJECT_ROOT / "attachments"
+# `ATTACHMENTS_DIR` keeps its name: these are attachments, whatever the directory is
+# called. Both are re-exported here because this module is where the scraper and the
+# tests have always reached for them.
+ATTACHMENTS_DIR = CIRCULAR_FILES_DIR
 ATTACHMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx"}
 # Flat asset store the redesigned site consolidated most circular attachments into.
 ASSET_BASE_URL = f"{BASE_URL}/assets/documents/circulars/"

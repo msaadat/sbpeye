@@ -1690,13 +1690,20 @@ def cache():
 
 
 def _run_cache_check_stale(db, prune=False, verbose=False):
-    """Find disk cache files with no matching DB row, and DB rows whose
-    local_path file is missing, for the HTML cache and attachments dir."""
+    """Find disk files with no matching DB row, and DB rows whose local_path file is
+    missing, across the HTML cache, the circular attachments tree and the laws archive.
+
+    Only the first two are ever prunable. The archive is walked for reporting and is
+    excluded from `--prune` structurally, not by remembering to filter it: an "orphan"
+    there is a superseded edition whose row has not been synced, which is exactly the
+    file that exists nowhere else. That distinction used to depend on every law version
+    being present in the expected set, and a gap in it nearly deleted the whole archive.
+    """
     import uuid
-    from sbpeye.scraper.circulars import HTML_CACHE_DIR, ATTACHMENTS_DIR
+    from sbpeye.env import CIRCULAR_FILES_DIR, HTML_CACHE_DIR, LAWS_ARCHIVE_DIR
     from sbpeye.models import RegDocumentVersion
 
-    # --- HTML cache: cache/html/<uuid5(url)>.html ---
+    # --- HTML cache: files/cache/html/<uuid5(url)>.html ---
     expected_html_names = set()
     for (url,) in db.query(Circular.url).all():
         if url:
@@ -1711,7 +1718,7 @@ def _run_cache_check_stale(db, prune=False, verbose=False):
             if f.is_file() and f.name not in expected_html_names:
                 html_orphans.append(f)
 
-    # --- Attachments: attachments/<circular_id>/<attachment_id>.<ext> ---
+    # --- Attachments: files/circulars/<circular_id>/<attachment_id>.<ext> ---
     expected_attachment_paths = {}  # resolved path -> (kind, id, local_path)
     missing_attachment_refs = []
     for att_id, local_path in db.query(Attachment.id, Attachment.local_path).all():
@@ -1728,9 +1735,7 @@ def _run_cache_check_stale(db, prune=False, verbose=False):
         expected_attachment_paths[resolved] = ("cached_document", doc_id, local_path)
         if not resolved.is_file():
             missing_attachment_refs.append(("cached_document", doc_id, local_path))
-    # Law/regulation versions archive under attachments/laws/, inside the tree walked
-    # below. Leaving them out of the expected set makes every archived edition look like
-    # an orphan, and --prune deletes the whole laws corpus.
+    # Law versions live in their own tree now and are reported separately below.
     for version_id, local_path in db.query(
         RegDocumentVersion.id, RegDocumentVersion.local_path
     ).all():
@@ -1742,16 +1747,27 @@ def _run_cache_check_stale(db, prune=False, verbose=False):
             missing_attachment_refs.append(("law_version", version_id, local_path))
 
     attachment_orphans = []
-    if ATTACHMENTS_DIR.is_dir():
-        for f in ATTACHMENTS_DIR.rglob("*"):
+    if CIRCULAR_FILES_DIR.is_dir():
+        for f in CIRCULAR_FILES_DIR.rglob("*"):
             if f.is_file() and f.resolve() not in expected_attachment_paths:
                 attachment_orphans.append(f)
+
+    # Reported, never pruned. Kept in a separate list from `attachment_orphans` so that
+    # the prune below cannot reach it by construction rather than by a filter someone
+    # has to remember.
+    archive_unreferenced = []
+    if LAWS_ARCHIVE_DIR.is_dir():
+        for f in LAWS_ARCHIVE_DIR.rglob("*"):
+            if f.is_file() and f.resolve() not in expected_attachment_paths:
+                archive_unreferenced.append(f)
 
     print("\n--- Cache Reconciliation Report ---")
     html_bytes = sum(f.stat().st_size for f in html_orphans)
     print(f"  Orphaned HTML cache files:      {len(html_orphans)} ({html_bytes / 1024:.1f} KB)")
     attachment_bytes = sum(f.stat().st_size for f in attachment_orphans)
     print(f"  Orphaned attachment files:      {len(attachment_orphans)} ({attachment_bytes / 1024 / 1024:.1f} MB)")
+    archive_bytes = sum(f.stat().st_size for f in archive_unreferenced)
+    print(f"  Unreferenced archive files:     {len(archive_unreferenced)} ({archive_bytes / 1024 / 1024:.1f} MB) [never pruned]")
     print(f"  DB rows with missing local file: {len(missing_attachment_refs)}")
 
     if verbose:
@@ -1759,15 +1775,20 @@ def _run_cache_check_stale(db, prune=False, verbose=False):
             print(f"    [ORPHAN HTML] {f.relative_to(PROJECT_ROOT)}")
         for f in attachment_orphans:
             print(f"    [ORPHAN ATTACHMENT] {f.relative_to(PROJECT_ROOT)}")
+        for f in archive_unreferenced:
+            print(f"    [UNREFERENCED ARCHIVE] {f.relative_to(PROJECT_ROOT)}")
         for kind, ref_id, local_path in missing_attachment_refs:
             print(f"    [MISSING FILE] {kind} {ref_id} -> {local_path}")
 
     removed = 0
     if prune:
+        # `archive_unreferenced` is deliberately absent from this list.
         for f in html_orphans + attachment_orphans:
             f.unlink(missing_ok=True)
             removed += 1
         print(f"  Pruned {removed} orphaned file(s).")
+        if archive_unreferenced:
+            print(f"  Kept {len(archive_unreferenced)} unreferenced archive file(s) - the archive is never pruned.")
     print()
 
     return {

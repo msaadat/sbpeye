@@ -29,6 +29,31 @@ PROJECT_ROOT = DATA_ROOT
 
 MANAGED_ENV_FILE = DATA_ROOT / ".env.local"
 _ENV_FILES = (DATA_ROOT / ".env", MANAGED_ENV_FILE)
+
+# Every file the application stores lives under one root, divided by **how much it costs
+# to lose it** rather than by where the file came from. The old `attachments/` and
+# `cache/` split described provenance, which is not the property that matters when
+# something is about to delete a directory.
+#
+#   files/laws/       the archive. SBP replaces law PDFs in place and keeps no history,
+#                     so superseded editions exist nowhere else on earth. Nothing may
+#                     delete from here, ever — not eviction, not `--prune`, not cleanup.
+#   files/circulars/  downloaded attachments. Reproducible: losing one costs a re-fetch.
+#   files/cache/      derived and disposable. `rm -rf files/cache` is always safe.
+#
+# The invariant, in one line: **`files/cache/` is the only path under `files/` that any
+# code may delete.** `cli.commands._run_cache_check_stale` is where that is enforced.
+FILES_ROOT = DATA_ROOT / "files"
+LAWS_ARCHIVE_DIR = FILES_ROOT / "laws"
+CIRCULAR_FILES_DIR = FILES_ROOT / "circulars"
+FILES_CACHE_DIR = FILES_ROOT / "cache"
+HTML_CACHE_DIR = FILES_CACHE_DIR / "html"
+PARSE_CACHE_DIR = FILES_CACHE_DIR / "parses"
+
+# Not under `files/`: these are third-party model weights, not application data. On a
+# deployment `FASTEMBED_CACHE_PATH` should point this into the image instead, so 200 MB
+# of ONNX is not carried on the data volume (see the deployment plan, 5.4).
+MODEL_CACHE_DIR = DATA_ROOT / "models"
 _ORIGINAL_ENV = dict(os.environ)
 
 

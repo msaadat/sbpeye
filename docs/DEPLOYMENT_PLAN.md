@@ -653,14 +653,18 @@ The corpus and the vector store are uploaded to the Railway volume with the CLI,
 hand. Nothing is copied out of the image and **no seeding code is written**.
 
 ```bash
-railway volume -v <volume> files upload ./sbpeye.db /sbpeye.db
-railway volume -v <volume> files upload ./chroma_db /chroma_db
+railway volume files -v <volume> upload ./sbpeye.db /sbpeye.db
+railway volume files -v <volume> upload ./chroma_db /chroma_db
 ```
 
 `files upload` accepts a directory as well as a file (`--concurrency` defaults to 32), so the
 store goes up as a directory rather than a tarball — a tarball would have to be extracted
 inside the container, and Railway documents no shell for that. `/` is the volume root, which
-is the `/data` mount; confirm placement with `railway volume files list /`.
+is the `/data` mount; confirm placement with `railway volume files -v <volume> list /`.
+
+Note the flag position: `-v/--volume` is an option on `files`, not on `volume`, so it sits
+between the two. `railway volume <name> files …` and `railway volume -v <name> files …` are
+both rejected as an unrecognised subcommand.
 
 This works only because of section 4: `SBPEYE_DATA_DIR=/data` is what makes the application
 look on the volume instead of beside its own source. With that set, uploaded files are simply
@@ -1303,6 +1307,64 @@ They have been sitting in a working tree, and at least one is a live-looking tok
 is now less urgent than it was: the deployment no longer needs those keys in its environment
 at all, so rotation is hygiene on the local file rather than a deployment prerequisite.
 
+### 9.5.1 SBP blocks the deployment's IP
+
+Found on the first live deploy, and not anticipated anywhere in this plan. Opening a circular
+returned:
+
+```
+403 Client Error: Forbidden for url: https://www.sbp.org.pk/circulars/bprd-circular-letter-no-16-of-2026
+```
+
+Every outbound SBP request in the codebase goes through `cloudscraper` — `_get_sbp`
+(`scraper/circulars.py:78`) and `scrape_ecodata_index` both — and cloudscraper solves a
+JavaScript challenge, not an IP-reputation block. From a datacenter range there is nothing to
+solve. This is not a bug in the app and no amount of retrying fixes it.
+
+**What it takes out.** Everything that reaches sbp.org.pk at request time:
+
+| Path | Who reaches it |
+|---|---|
+| `GET /api/circulars/{id}/source` on a cache miss | Any user — this is the visible failure |
+| Attachment download-on-miss (3.5.2) | Any user opening a PDF not already on the volume |
+| Law archive refetch (3.5.3) | Any user opening a law document |
+| Circular sync, refresh, open-by-link | Admin only |
+| The scheduled EcoData refresh (6.4) | Nobody — it fails on a timer and logs |
+
+**The mitigation is to upload what would otherwise be fetched.** All three are already on the
+volume's sibling paths and none of them ship in the image:
+
+```bash
+railway volume files -v <volume> upload --overwrite ./files/cache/html /files/cache/html
+railway volume files -v <volume> upload --overwrite ./files/circulars /files/circulars
+railway volume files -v <volume> upload --overwrite ./files/laws /files/laws
+```
+
+`cache/html` covers **3649 of 3653 circulars** (99%), because `fetch_page_cached` consults the
+cache before the network and the key is `uuid5(NAMESPACE_URL, url)`, which is stable across
+machines. 318 MB in 3768 files, so it is the slow upload; `--concurrency 64` helps.
+
+Budget: 963 MB of file trees plus the 591 MB corpus is roughly 1.55 GB against Hobby's 5 GB.
+
+**Set `SBPEYE_ECODATA_REFRESH_SECONDS=0`** unless the block is lifted, or the scheduler throws
+hourly into the logs for a scrape that cannot succeed.
+
+#### The operating model this forces
+
+**The deployment is read-only with respect to SBP.** Corpus updates happen on a machine whose
+IP is not blocked — sync locally, then re-upload `sbpeye.db`, `chroma_db/` and whatever new
+cache and attachment files the sync produced.
+
+That is less of a departure than it sounds: 1.3 already made every corpus write admin-only,
+and this moves "admin" from a session on the deployment to a shell on the maintainer's
+machine. It does invalidate the parts of 6.2 and 7.3 that assumed an admin could sync from
+the deployed app, and it makes the re-upload procedure in 9.6 step 7 a routine operation
+rather than a one-off — so the staging-directory approach recorded there stops being a
+footnote.
+
+If the deployment should ever sync for itself, the options are an egress proxy with a
+residential or allowlisted IP, or asking SBP to allow the range. Neither is in scope here.
+
 ### 9.6 Deployment runbook
 
 Volume sizes at time of writing: `sbpeye.db` 70 MB, `chroma_db/` 521 MB.
@@ -1319,16 +1381,52 @@ Volume sizes at time of writing: `sbpeye.db` 70 MB, `chroma_db/` 521 MB.
 5. **Point the health check at `/healthz`.**
 6. **Deploy, and let the first boot finish.** It will come up with an empty corpus and report
    `vector_store: "ok (empty)"` — that is the un-uploaded state, not a fault.
-7. **Stop the service**, then upload the corpus. Stopping matters: Chroma's `PersistentClient`
-   is single-process and writing into `chroma_db/` while the app holds the HNSW segment open
-   is the one way to corrupt the store on this route (5.4).
+7. **Upload the corpus — with the service running.**
+
+   > **Correction.** An earlier version of this runbook said to stop the service first. That
+   > is not possible: `railway volume files` proxies through the container, and with no
+   > active deployment it refuses —
+   > *"Service … has no active deployment in environment production. Deploy or restart the
+   > service before using file commands."* The volume is only reachable through a running
+   > app.
+
+   This collides with 5.4's rule that Chroma must not be written underneath a running
+   process. `chromadb.PersistentClient` is constructed at import (`database.py:88`) and
+   `/healthz` calls `collection.count()`, so the store is open from the moment the container
+   is ready. It cannot be otherwise while the upload API needs that container alive.
+
+   **For a first deploy the exposure is acceptable**, and it is worth being precise about
+   why rather than hand-waving it. The hazard is a *concurrent write* to the HNSW segment.
+   Everything that writes Chroma — sync, indexing, generation — is admin-triggered (1.3), so
+   on a deployment with no users and no admin actions in flight, nothing writes during the
+   window. The uploaded files land intact; the running process is left holding replaced
+   files, which the redeploy in step 8 resolves by opening them fresh.
+
+   Do not browse the app while this runs, and redeploy immediately afterwards.
+
+   **`--overwrite` is required**, not optional. Step 6 has already booted once, and that boot
+   created an empty `sbpeye.db` and `chroma_db/` on the volume; without the flag the upload
+   refuses because the paths exist.
 
    ```bash
-   railway volume -v <volume> files upload ./sbpeye.db /sbpeye.db
-   railway volume -v <volume> files upload ./chroma_db /chroma_db
+   railway volume files -v <volume> upload --overwrite ./sbpeye.db /sbpeye.db
+   railway volume files -v <volume> upload --overwrite ./chroma_db /chroma_db
+   railway volume files -v <volume> list /
    ```
 
-8. **Start it again** and confirm `/healthz` reports `vector_store: "ok"` rather than
+   `/` is the volume root, which is the `/data` mount. 521 MB across 11 files takes a few
+   minutes.
+
+   **Re-uploading onto a live deployment later is a different problem.** With testers using
+   it, "nothing writes during the window" stops being true. The way to get the guarantee back
+   without a code change is to move the running app out of the way first: set
+   `SBPEYE_DATA_DIR=/data/_staging` and redeploy, so the process opens
+   `/data/_staging/chroma_db` and never touches the target; upload to `/chroma_db`; then set
+   `SBPEYE_DATA_DIR=/data` and redeploy onto the new store. Note the staging directory has to
+   exist — nothing creates `DATA_ROOT` — so upload a throwaway file into it first, or make
+   `DATA_ROOT` self-creating in `env.py`.
+
+8. **Redeploy** — same three-dot menu, `railway up`, or a push — and confirm `/healthz` reports `vector_store: "ok"` rather than
    `"ok (empty)"`. A search returning results is the proof the container's chromadb opened a
    store built elsewhere — the risk 5.4 rule 3 keeps alive on this route, and the one thing
    here most likely to fail.

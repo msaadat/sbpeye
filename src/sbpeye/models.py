@@ -3,7 +3,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship
 from datetime import datetime
-from .database import Base, DebugBase
+from .database import AppBase, Base, DebugBase, app_engine
 
 class Circular(Base):
     __tablename__ = "circulars"
@@ -425,14 +425,24 @@ class AIGenerationJob(Base):
     completed_at = Column(DateTime, nullable=True)
 
 
-class ResearchWorkspace(Base):
+class ResearchWorkspace(AppBase):
+    """A user's research workspace: a named selection of circulars plus its search state.
+
+    On ``AppBase``, not ``Base``: this is runtime state, created by whoever is using the
+    app, and lives in the application database alongside chat and settings rather than in
+    the shipped corpus.
+    """
+
     __tablename__ = "research_workspaces"
 
     id = Column(String, primary_key=True)
     name = Column(String, nullable=False)
     is_default = Column(Integer, nullable=False, default=0)
     search_state = Column(Text, nullable=True)
-    last_circular_id = Column(String, ForeignKey("circulars.id"), nullable=True)
+    # A circular id, but not a ForeignKey: circulars live in the corpus database, and
+    # SQLite cannot enforce a reference across files. Readers must tolerate an id whose
+    # circular is absent — a corpus rebuild can retire one out from under a workspace.
+    last_circular_id = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -444,20 +454,23 @@ class ResearchWorkspace(Base):
     )
 
 
-class WorkspaceCircular(Base):
+class WorkspaceCircular(AppBase):
     __tablename__ = "workspace_circulars"
 
     workspace_id = Column(
         String, ForeignKey("research_workspaces.id"), primary_key=True
     )
-    circular_id = Column(String, ForeignKey("circulars.id"), primary_key=True)
+    # Cross-database, so no ForeignKey and no `circular` relationship — the ORM cannot
+    # lazy-load across two engines. Callers resolve these ids against a corpus session
+    # themselves (see `_load_workspace_circulars` in api/serializers.py), which also
+    # turns what used to be one query per pinned row into a single batched lookup.
+    circular_id = Column(String, primary_key=True)
     role = Column(String, nullable=False, default="pinned")
     note = Column(Text, nullable=True)
     added_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     last_viewed_at = Column(DateTime, nullable=True)
 
     workspace = relationship("ResearchWorkspace", back_populates="pinned_circulars")
-    circular = relationship("Circular")
 
 class EcoDataSeries(Base):
     __tablename__ = "ecodata_series"
@@ -522,7 +535,13 @@ def circular_sync_only():
     return or_(SyncStatus.kind.is_(None), SyncStatus.kind == "circulars")
 
 
-class Settings(Base):
+class Settings(AppBase):
+    """Operator configuration written by the Settings UI — AI provider, embedding, debug.
+
+    On ``AppBase`` because it is written at runtime. Shipped with the corpus it would be
+    reverted to the build's values every time that file was replaced.
+    """
+
     __tablename__ = "settings"
 
     key = Column(String, primary_key=True, index=True)
@@ -597,7 +616,7 @@ def upsert_settings(db, values: dict[str, str]) -> None:
             db.add(Settings(key=key, value=value))
     db.commit()
 
-class ChatSession(Base):
+class ChatSession(AppBase):
     __tablename__ = "chat_sessions"
 
     id = Column(String, primary_key=True)
@@ -612,7 +631,7 @@ class ChatSession(Base):
         order_by="(ChatMessage.created_at, ChatMessage.id)",
     )
 
-class ChatMessage(Base):
+class ChatMessage(AppBase):
     __tablename__ = "chat_messages"
 
     id = Column(String, primary_key=True)
@@ -661,3 +680,10 @@ class SemanticIndexSource(Base):
     __table_args__ = (
         UniqueConstraint("source_kind", "source_id", name="uq_semantic_index_source"),
     )
+
+
+# Here rather than in `database`, for the same reason `llm_debug` creates the trace
+# tables: `database` runs its own `create_all` at import, before this module has been
+# imported, so `AppBase.metadata` is still empty at that point. This is the first place
+# it knows about the tables above.
+AppBase.metadata.create_all(bind=app_engine)

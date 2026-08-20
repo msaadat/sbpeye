@@ -3,13 +3,23 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import create_engine, inspect
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 from sbpeye.ai import AIClient, AIConfig
-from sbpeye.database import Base, DebugBase, _relocate_trace_tables
+from sbpeye.database import AppBase, Base, DebugBase, _relocate_app_tables, _relocate_trace_tables
 from sbpeye import llm_debug
-from sbpeye.models import LLMTrace, LLMTraceEvent, Settings
+from sbpeye.models import (
+    ChatMessage,
+    ChatSession,
+    LLMTrace,
+    LLMTraceEvent,
+    ResearchWorkspace,
+    Settings,
+    WorkspaceCircular,
+)
 from sbpeye.api import debug as debug_api
 
 
@@ -19,11 +29,12 @@ def _debug_database(tmp_path: Path, monkeypatch):
         connect_args={"check_same_thread": False},
     )
     Base.metadata.create_all(engine)
+    AppBase.metadata.create_all(engine)
     DebugBase.metadata.create_all(engine)
     factory = sessionmaker(bind=engine)
-    # Production splits these across two files; one factory here so a test can read
+    # Production splits these across three files; one factory here so a test can read
     # the `llm_debug_enabled` setting and the traces it produced from the same place.
-    monkeypatch.setattr(llm_debug, "SessionLocal", factory)
+    monkeypatch.setattr(llm_debug, "AppSessionLocal", factory)
     monkeypatch.setattr(llm_debug, "DebugSessionLocal", factory)
     monkeypatch.setenv("LLM_DEBUG_ALLOWED", "true")
     db = factory()
@@ -380,6 +391,82 @@ def test_relocate_moves_legacy_traces_and_drops_them(tmp_path):
 
     # Idempotent: a second start finds nothing left to move.
     assert _relocate_trace_tables(source, target, debug_path) == 0
+
+
+def test_runtime_tables_stay_out_of_the_corpus_metadata():
+    """`Base.metadata.create_all(engine)` must never recreate these in sbpeye.db."""
+    for table in (
+        "research_workspaces", "workspace_circulars",
+        "chat_sessions", "chat_messages", "settings",
+    ):
+        assert table not in Base.metadata.tables
+        assert table in AppBase.metadata.tables
+
+
+def test_corpus_session_cannot_see_runtime_tables(tmp_path):
+    """A corpus session must not resolve app tables — the failure mode of the split.
+
+    `Base.metadata.create_all` is what a corpus database is built from, so if an app
+    table ever drifts back onto `Base` this query starts succeeding. It surfaces in
+    production as a 500 from whichever route was handed the wrong session, which is
+    how `/api/debug/status` broke: it passed `Depends(get_db)` into a settings read.
+    """
+    corpus = create_engine(f"sqlite:///{tmp_path / 'corpus.db'}")
+    Base.metadata.create_all(corpus)
+    session = sessionmaker(bind=corpus)()
+    try:
+        for model in (ChatSession, ChatMessage, ResearchWorkspace, WorkspaceCircular, Settings):
+            with pytest.raises(OperationalError, match="no such table"):
+                session.query(model).first()
+            session.rollback()
+    finally:
+        session.close()
+
+
+def test_relocate_moves_legacy_runtime_state_and_drops_it(tmp_path):
+    """Workspaces, chat and settings move out of sbpeye.db with their rows intact."""
+    corpus_path, app_path = tmp_path / "corpus.db", tmp_path / "app.db"
+    source = create_engine(f"sqlite:///{corpus_path}")
+    target = create_engine(f"sqlite:///{app_path}")
+
+    # Seed the legacy layout: runtime state living in the corpus database.
+    AppBase.metadata.create_all(source)
+    seed = sessionmaker(bind=source)()
+    seed.add(ResearchWorkspace(
+        id="ws-1", name="Capital", is_default=1, search_state="{}",
+        created_at=llm_debug.datetime.utcnow(),
+        updated_at=llm_debug.datetime.utcnow(),
+    ))
+    seed.add(WorkspaceCircular(
+        workspace_id="ws-1", circular_id="circular-1", role="pinned",
+        added_at=llm_debug.datetime.utcnow(),
+    ))
+    seed.add(ChatSession(id="cs-1", title="MCR question"))
+    seed.add(ChatMessage(
+        id="cm-1", session_id="cs-1", role="user", content="What is the MCR?",
+    ))
+    seed.add(Settings(key="ai_provider", value="groq"))
+    seed.commit()
+    seed.close()
+
+    assert _relocate_app_tables(source, target, app_path) == 5
+
+    moved = sessionmaker(bind=create_engine(f"sqlite:///{app_path}"))()
+    assert moved.query(ResearchWorkspace).one().name == "Capital"
+    assert moved.query(WorkspaceCircular).one().circular_id == "circular-1"
+    assert moved.query(ChatMessage).one().content == "What is the MCR?"
+    assert moved.query(Settings).one().value == "groq"
+    moved.close()
+
+    with create_engine(f"sqlite:///{corpus_path}").connect() as conn:
+        names = set(inspect(conn).get_table_names())
+    assert not names & {
+        "research_workspaces", "workspace_circulars",
+        "chat_sessions", "chat_messages", "settings",
+    }
+
+    # Idempotent: a second start finds nothing left to move.
+    assert _relocate_app_tables(source, target, app_path) == 0
 
 
 def test_only_gateway_calls_chat_completions_create():

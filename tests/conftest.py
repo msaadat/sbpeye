@@ -16,8 +16,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from sbpeye.database import Base, DebugBase, get_db, get_debug_db
+from sbpeye.database import AppBase, Base, DebugBase, get_app_db, get_db, get_debug_db
 from sbpeye.models import Circular
+import sbpeye.ai as ai_module
 import sbpeye.llm_debug as llm_debug_module
 import sbpeye.main as main_module
 
@@ -193,8 +194,12 @@ def db_factory():
         poolclass=StaticPool,
     )
     Base.metadata.create_all(engine)
-    # Traces live in their own database in production; tests collapse both onto one
-    # in-memory file so a single factory can assert across app rows and trace rows.
+    # The corpus, runtime state, and traces live in three separate databases in
+    # production; tests collapse all of them onto one in-memory file so a single
+    # factory can assert across corpus rows, workspace/chat rows, and trace rows.
+    # Nothing in the app joins across the boundaries in SQL, so one engine serving
+    # all three metadata sets exercises the same queries the split code issues.
+    AppBase.metadata.create_all(engine)
     DebugBase.metadata.create_all(engine)
     return sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
@@ -203,11 +208,17 @@ def db_factory():
 def client(db_factory, monkeypatch):
     """A TestClient wired to the in-memory DB with the AI layer stubbed out."""
     monkeypatch.setattr(main_module, "SessionLocal", db_factory)
+    # `/api/chat/stream` opens its own application session for the generator, for the
+    # same reason it opens its own corpus one: the request's are closed by the time it
+    # runs. Unpatched, the streamed messages would land in the real sbpeye_app.db.
+    monkeypatch.setattr(main_module, "AppSessionLocal", db_factory)
     # The trace recorder opens its own sessions rather than joining the request's.
     # Left unpatched it resolves to the real sbpeye.db, so every chat-route test
     # wrote live rows into the user's debug log — five per run of this module.
-    monkeypatch.setattr(llm_debug_module, "SessionLocal", db_factory)
+    monkeypatch.setattr(llm_debug_module, "AppSessionLocal", db_factory)
     monkeypatch.setattr(llm_debug_module, "DebugSessionLocal", db_factory)
+    # `get_ai_client` reads the provider settings from its own application session.
+    monkeypatch.setattr(ai_module, "AppSessionLocal", db_factory)
     monkeypatch.setattr(main_module, "get_ai_client", lambda db=None: FakeAIClient())
     monkeypatch.setattr(main_module, "_build_chat_circulars_context", lambda *a, **k: "")
 
@@ -219,6 +230,7 @@ def client(db_factory, monkeypatch):
             db.close()
 
     main_module.app.dependency_overrides[get_db] = override_get_db
+    main_module.app.dependency_overrides[get_app_db] = override_get_db
     main_module.app.dependency_overrides[get_debug_db] = override_get_db
     with TestClient(main_module.app) as test_client:
         yield test_client, db_factory

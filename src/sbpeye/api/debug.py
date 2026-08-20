@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
-from ..database import get_db, get_debug_db
+from ..database import get_app_db, get_debug_db
 from ..llm_debug import debug_allowed, debug_setting_enabled
 from ..models import LLMTrace, LLMTraceEvent
 
@@ -43,18 +43,20 @@ def _summary(row: LLMTrace) -> dict[str, Any]:
     }
 
 
-def require_debug_enabled(db: Session = Depends(get_db)) -> None:
-    if not debug_allowed() or not debug_setting_enabled(db):
+def require_debug_enabled(app_db: Session = Depends(get_app_db)) -> None:
+    # The application database, not the corpus: `llm_debug_enabled` is a setting, and
+    # settings moved out of `sbpeye.db` when runtime state was split off.
+    if not debug_allowed() or not debug_setting_enabled(app_db):
         raise HTTPException(status_code=404, detail="Not found")
 
 
 @router.get("/status")
 def status(
-    db: Session = Depends(get_db),
+    app_db: Session = Depends(get_app_db),
     debug_db: Session = Depends(get_debug_db),
 ):
     allowed = debug_allowed()
-    enabled = debug_setting_enabled(db)
+    enabled = debug_setting_enabled(app_db)
     effective = allowed and enabled
     payload: dict[str, Any] = {
         "allowed": allowed, "enabled": enabled, "effective": effective,

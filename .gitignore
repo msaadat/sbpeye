@@ -29,6 +29,9 @@ src/sbpeye/static/spa/
 
 # LLM trace recorder — diagnostics, not corpus data (sbpeye.db itself is tracked)
 /sbpeye_debug.db
+# Runtime state — workspaces, chat, settings. Created per deployment, never shipped;
+# the corpus in sbpeye.db is the only database that belongs in git.
+/sbpeye_app.db
 *.db.backup-*
 
 # Benchmark runs — captured answers and scores. The methodology in benchmarks/ is

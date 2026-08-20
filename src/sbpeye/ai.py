@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from .checklist import compact_required_checklist
 from .citation_handles import CitationHandles, StreamExpander
+from .database import AppSessionLocal
 from .env import load_app_env, resolve_env_value
 from .llm_debug import (
     bind_context,
@@ -4029,9 +4030,19 @@ were not given. A source you have no handle for is named in prose and cited with
 
 
 def get_ai_client(db=None) -> AIClient:
-    config = None
-    if db is not None:
-        config = AIConfig.from_db(db)
+    """Build a client from the stored provider settings, falling back to the environment.
+
+    `db` is accepted but no longer read: `settings` moved to the runtime-state database,
+    while most of the seventeen call sites hold a corpus session. Rather than thread a
+    second session through all of them, the config is read from its own short-lived app
+    session here. The parameter stays so those call sites — and the tests that stub this
+    function — are unaffected.
+    """
+    session = AppSessionLocal()
+    try:
+        config = AIConfig.from_db(session)
+    finally:
+        session.close()
     if config is None:
         config = AIConfig.from_env()
     return AIClient(config)

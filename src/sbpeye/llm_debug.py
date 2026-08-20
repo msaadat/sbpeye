@@ -26,10 +26,11 @@ import uuid
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError, OperationalError
 
-# `SessionLocal` is the application database and is used for exactly one thing here:
-# reading the `llm_debug_enabled` setting, which lives with the rest of the settings.
-# Every trace write goes to `DebugSessionLocal` — a different file entirely.
-from .database import DebugBase, DebugSessionLocal, SessionLocal, debug_engine
+# `AppSessionLocal` is the runtime-state database and is used for exactly one thing
+# here: reading the `llm_debug_enabled` setting, which lives with the rest of the
+# settings. Every trace write goes to `DebugSessionLocal` — a different file entirely,
+# and neither of them is the corpus.
+from .database import AppSessionLocal, DebugBase, DebugSessionLocal, debug_engine
 from .models import LLMTrace, LLMTraceEvent, Settings
 
 logger = logging.getLogger(__name__)
@@ -139,7 +140,7 @@ def debug_allowed() -> bool:
 
 def debug_setting_enabled(db=None) -> bool:
     owns_session = db is None
-    session = db or SessionLocal()  # app DB: Settings lives there
+    session = db or AppSessionLocal()  # app DB: Settings lives there
     try:
         row = session.query(Settings).filter(Settings.key == "llm_debug_enabled").first()
         return bool(row and str(row.value).strip().lower() in {"1", "true", "yes", "on"})

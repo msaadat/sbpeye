@@ -439,11 +439,45 @@ def _workspace_search_state(value: str | None) -> dict:
     return _safe_json_object(value) or {}
 
 
-def _sorted_workspace_pinned_links(workspace: ResearchWorkspace) -> list[WorkspaceCircular]:
+def _load_workspace_circulars(
+    corpus_db: Session, *workspaces: ResearchWorkspace
+) -> dict[str, Circular]:
+    """Resolve the workspaces' pinned circular ids against the corpus database.
+
+    Workspaces live in the application database and circulars in the corpus, so the
+    ORM cannot walk from one to the other; every caller that needs circular data for a
+    workspace goes through here first and passes the result down. One batched query
+    replaces what the old `WorkspaceCircular.circular` relationship did per row, and
+    the varargs keep it at one query when a route lists every workspace at once.
+    """
+    ids = {
+        link.circular_id
+        for workspace in workspaces
+        for link in list(workspace.pinned_circulars or [])
+        if link.circular_id
+    }
+    if not ids:
+        return {}
+    return {
+        circular.id: circular
+        for circular in corpus_db.query(Circular).filter(Circular.id.in_(ids))
+    }
+
+
+def _sorted_workspace_pinned_links(
+    workspace: ResearchWorkspace, circulars: dict[str, Circular]
+) -> list[WorkspaceCircular]:
+    """Pinned links, newest circular first, dropping any whose circular is gone.
+
+    `circulars` comes from `_load_workspace_circulars`. A pin whose id is absent from it
+    is skipped rather than rendered — the same behaviour as before the split, when the
+    relationship simply returned None for a circular the corpus no longer held.
+    """
     def _sort_key(link: WorkspaceCircular) -> tuple:
-        circular_date = link.circular.date if link.circular and link.circular.date else datetime.min
+        circular = circulars.get(link.circular_id)
+        circular_date = circular.date if circular and circular.date else datetime.min
         added_at = link.added_at or datetime.min
-        title = (link.circular.title if link.circular and link.circular.title else "").lower()
+        title = (circular.title if circular and circular.title else "").lower()
         circular_id = link.circular_id or ""
         return (circular_date, added_at, title, circular_id)
 
@@ -451,21 +485,22 @@ def _sorted_workspace_pinned_links(workspace: ResearchWorkspace) -> list[Workspa
         [
             link
             for link in list(workspace.pinned_circulars or [])
-            if link.circular is not None
+            if circulars.get(link.circular_id) is not None
         ],
         key=_sort_key,
         reverse=True,
     )
 
 
-def _ensure_default_workspace(db: Session) -> ResearchWorkspace:
-    workspace = db.query(ResearchWorkspace).filter(
+def _ensure_default_workspace(app_db: Session) -> ResearchWorkspace:
+    """Workspaces live in the application database; `db` here would be the corpus."""
+    workspace = app_db.query(ResearchWorkspace).filter(
         ResearchWorkspace.is_default == 1
     ).first()
     if workspace:
         return workspace
 
-    workspace = db.query(ResearchWorkspace).filter(
+    workspace = app_db.query(ResearchWorkspace).filter(
         ResearchWorkspace.id == DEFAULT_WORKSPACE_ID
     ).first()
     if workspace:
@@ -473,8 +508,8 @@ def _ensure_default_workspace(db: Session) -> ResearchWorkspace:
         if not workspace.name:
             workspace.name = DEFAULT_WORKSPACE_NAME
         workspace.updated_at = datetime.utcnow()
-        db.commit()
-        db.refresh(workspace)
+        app_db.commit()
+        app_db.refresh(workspace)
         return workspace
 
     workspace = ResearchWorkspace(
@@ -483,16 +518,20 @@ def _ensure_default_workspace(db: Session) -> ResearchWorkspace:
         is_default=1,
         search_state=json.dumps({}),
     )
-    db.add(workspace)
-    db.commit()
-    db.refresh(workspace)
+    app_db.add(workspace)
+    app_db.commit()
+    app_db.refresh(workspace)
     return workspace
 
 
-def _workspace_payload(workspace: ResearchWorkspace, include_circulars: bool = True) -> dict:
-    pinned_links = _sorted_workspace_pinned_links(workspace)
+def _workspace_payload(
+    workspace: ResearchWorkspace,
+    circulars: dict[str, Circular],
+    include_circulars: bool = True,
+) -> dict:
+    pinned_links = _sorted_workspace_pinned_links(workspace, circulars)
     pinned_circulars = [
-        _circular_summary(link.circular)
+        _circular_summary(circulars[link.circular_id])
         for link in pinned_links
     ] if include_circulars else []
 
@@ -525,17 +564,21 @@ def _workspace_id_from_chat_session(session_id: str | None) -> str | None:
     return workspace_id or None
 
 
-def _workspace_circular_ids(workspace: ResearchWorkspace) -> list[str]:
+def _workspace_circular_ids(
+    workspace: ResearchWorkspace, circulars: dict[str, Circular]
+) -> list[str]:
     return [
         link.circular_id
-        for link in _sorted_workspace_pinned_links(workspace)
+        for link in _sorted_workspace_pinned_links(workspace, circulars)
     ]
 
 
-def _workspace_circular_summaries(workspace: ResearchWorkspace) -> list[dict]:
+def _workspace_circular_summaries(
+    workspace: ResearchWorkspace, circulars: dict[str, Circular]
+) -> list[dict]:
     return [
-        _circular_summary(link.circular)
-        for link in _sorted_workspace_pinned_links(workspace)
+        _circular_summary(circulars[link.circular_id])
+        for link in _sorted_workspace_pinned_links(workspace, circulars)
     ]
 
 
@@ -551,6 +594,7 @@ def _chat_session_payload(session: ChatSession) -> dict:
 
 def _workspace_chat_session_payload(
     workspace: ResearchWorkspace,
+    circulars: dict[str, Circular],
     session: ChatSession | None = None,
 ) -> dict:
     return {
@@ -560,7 +604,7 @@ def _workspace_chat_session_payload(
         "workspace_id": workspace.id,
         "is_default_workspace": bool(workspace.is_default),
         "pinned_count": len(list(workspace.pinned_circulars or [])),
-        "circular_ids": _workspace_circular_ids(workspace),
+        "circular_ids": _workspace_circular_ids(workspace, circulars),
         "created_at": _isoformat(session.created_at if session else workspace.created_at),
         "updated_at": _isoformat(
             (session.updated_at or session.created_at) if session else (workspace.updated_at or workspace.created_at)
@@ -569,28 +613,30 @@ def _workspace_chat_session_payload(
 
 
 def _get_workspace_for_chat_session(
-    db: Session,
+    app_db: Session,
     session_id: str | None,
 ) -> ResearchWorkspace | None:
     workspace_id = _workspace_id_from_chat_session(session_id)
     if not workspace_id:
         return None
     if workspace_id == DEFAULT_WORKSPACE_ID:
-        return _ensure_default_workspace(db)
-    return db.query(ResearchWorkspace).filter(
+        return _ensure_default_workspace(app_db)
+    return app_db.query(ResearchWorkspace).filter(
         ResearchWorkspace.id == workspace_id
     ).first()
 
 
 # --- Settings ---
 
-def _settings_payload(config: AIConfig, embedding: EmbeddingConfig, db=None) -> dict:
+def _settings_payload(
+    config: AIConfig, embedding: EmbeddingConfig, app_db=None
+) -> dict:
     from ..llm_debug import debug_allowed, debug_setting_enabled
 
     ai_secret = AIConfig.secret_state(config.provider)
     embedding_secret = EmbeddingConfig.secret_state(embedding.provider)
     debug_is_allowed = debug_allowed()
-    debug_is_enabled = debug_setting_enabled(db)
+    debug_is_enabled = debug_setting_enabled(app_db)
     return {
         "provider": config.provider,
         "base_url": config.base_url,

@@ -15,7 +15,7 @@ from sbpeye.chat_retrieval import (
     query_context_circular_ids,
     referenced_circular_ids,
 )
-from sbpeye.database import Base
+from sbpeye.database import AppBase, Base
 from sbpeye.main import (
     _chat_turn_circular_ids,
     _truncate_chat_messages,
@@ -28,6 +28,9 @@ from sbpeye.search import SearchEngine, backfill_fts
 def make_session():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
+    # Chat sessions and messages live in the application database in production; this
+    # module drives them alongside circulars, so both metadata sets land on one engine.
+    AppBase.metadata.create_all(engine)
     return sessionmaker(bind=engine)()
 
 
@@ -569,12 +572,14 @@ def test_session_context_is_authoritative_including_empty_selection():
     db.add_all([session, message])
     db.commit()
 
-    payload = asyncio.run(get_chat_session(session.id, db))
+    # Corpus and application sessions; this module collapses both onto one engine.
+    payload = asyncio.run(get_chat_session(session.id, db, db))
     assert [item["id"] for item in payload["circulars"]] == ["one"]
 
     session.circular_ids = "[]"
     db.commit()
-    payload = asyncio.run(get_chat_session(session.id, db))
+    # Corpus and application sessions; this module collapses both onto one engine.
+    payload = asyncio.run(get_chat_session(session.id, db, db))
     assert payload["circulars"] == []
 
 
@@ -592,7 +597,8 @@ def test_chat_session_returns_each_messages_context_snapshot():
     db.add_all([session, message])
     db.commit()
 
-    payload = asyncio.run(get_chat_session(session.id, db))
+    # Corpus and application sessions; this module collapses both onto one engine.
+    payload = asyncio.run(get_chat_session(session.id, db, db))
 
     assert payload["messages"][0]["circular_ids"] == ["one"]
 

@@ -22,6 +22,18 @@ DEBUG_DATABASE_PATH = Path(
 )
 DEBUG_DATABASE_URL = f"sqlite:///{DEBUG_DATABASE_PATH}"
 
+# Runtime state lives in its own file, for the mirror-image reason traces do. The
+# corpus above is generated once, shared by every user and shipped with the build;
+# workspaces, chat and settings are created by whoever is using the app and have to
+# survive a deployment that replaces the corpus. Keeping them in `sbpeye.db` meant
+# the shipped file was rewritten on nearly every request — it showed permanently
+# dirty in git — and any redeploy silently reverted whatever had been saved through
+# the Settings UI.
+APP_DATABASE_PATH = Path(
+    os.getenv("SBPEYE_APP_DB") or (PROJECT_ROOT / "sbpeye_app.db")
+)
+APP_DATABASE_URL = f"sqlite:///{APP_DATABASE_PATH}"
+
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
 )
@@ -34,10 +46,18 @@ DebugSessionLocal = sessionmaker(
     autocommit=False, autoflush=False, bind=debug_engine
 )
 
+app_engine = create_engine(
+    APP_DATABASE_URL, connect_args={"check_same_thread": False}
+)
+AppSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=app_engine)
+
 Base = declarative_base()
 # A separate metadata, so `Base.metadata.create_all(engine)` can never recreate the
 # trace tables inside the application database.
 DebugBase = declarative_base()
+# Likewise for runtime state: its own metadata keeps `create_all` on either of the
+# other two bases from resurrecting these tables in the wrong file.
+AppBase = declarative_base()
 
 def get_db():
     db = SessionLocal()
@@ -54,8 +74,13 @@ def get_debug_db():
     finally:
         db.close()
 
-embedding_config = EmbeddingConfig.from_database(engine)
-embedding_backend = create_embedding_backend(embedding_config)
+
+def get_app_db():
+    db = AppSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 chroma_client = chromadb.PersistentClient(path=str(CHROMA_DB_DIR))
 
@@ -202,21 +227,6 @@ def _ensure_columns(bind=None):
                         f"ALTER TABLE attachments ADD COLUMN {col_name} {col_type}"
                     ))
 
-        if "chat_sessions" in table_names:
-            existing = {c["name"] for c in insp.get_columns("chat_sessions")}
-            if "circular_ids" not in existing:
-                conn.execute(text(
-                    "ALTER TABLE chat_sessions ADD COLUMN circular_ids TEXT"
-                ))
-            if "updated_at" not in existing:
-                conn.execute(text(
-                    "ALTER TABLE chat_sessions ADD COLUMN updated_at DATETIME"
-                ))
-                conn.execute(text(
-                    "UPDATE chat_sessions SET updated_at = created_at "
-                    "WHERE updated_at IS NULL"
-                ))
-
         if "ai_generation_jobs" in table_names:
             columns = {c["name"]: c for c in insp.get_columns("ai_generation_jobs")}
             new_columns = [
@@ -323,13 +333,6 @@ def _ensure_columns(bind=None):
                     conn.execute(text(
                         f"ALTER TABLE sync_status ADD COLUMN {col_name} {col_type}"
                     ))
-
-        if "research_workspaces" in table_names:
-            existing = {c["name"] for c in insp.get_columns("research_workspaces")}
-            if "is_default" not in existing:
-                conn.execute(text(
-                    "ALTER TABLE research_workspaces ADD COLUMN is_default INTEGER DEFAULT 0"
-                ))
 
         # Laws & regulations (see docs/LAWS_REGULATIONS_PLAN.md). The tables themselves
         # come from create_all; these blocks add columns to databases created by an
@@ -472,37 +475,79 @@ def _ensure_columns(bind=None):
         ):
             conn.execute(text(statement))
 
+def _ensure_app_columns(bind=None):
+    """The `_ensure_columns` self-healing pass, for the runtime-state database.
+
+    These two tables were created by an earlier build inside `sbpeye.db`, so the
+    copies `_relocate_app_tables` carries across are built from that older DDL and
+    can be missing columns the models now declare. Both blocks no-op on a database
+    created fresh by `AppBase.metadata.create_all`, which already has them.
+    """
+    with (bind or app_engine).begin() as conn:
+        insp = inspect(conn)
+        table_names = insp.get_table_names()
+
+        if "chat_sessions" in table_names:
+            existing = {c["name"] for c in insp.get_columns("chat_sessions")}
+            if "circular_ids" not in existing:
+                conn.execute(text(
+                    "ALTER TABLE chat_sessions ADD COLUMN circular_ids TEXT"
+                ))
+            if "updated_at" not in existing:
+                conn.execute(text(
+                    "ALTER TABLE chat_sessions ADD COLUMN updated_at DATETIME"
+                ))
+                conn.execute(text(
+                    "UPDATE chat_sessions SET updated_at = created_at "
+                    "WHERE updated_at IS NULL"
+                ))
+
+        if "research_workspaces" in table_names:
+            existing = {c["name"] for c in insp.get_columns("research_workspaces")}
+            if "is_default" not in existing:
+                conn.execute(text(
+                    "ALTER TABLE research_workspaces ADD COLUMN is_default INTEGER DEFAULT 0"
+                ))
+
+
 _TRACE_TABLES = ("llm_traces", "llm_trace_events")
+# Runtime state, moved out of `sbpeye.db` for the reasons given at APP_DATABASE_PATH.
+# `settings` belongs here rather than with the corpus because the Settings UI writes
+# it at runtime: shipped with the corpus, every saved provider change would be lost
+# the next time the corpus file was replaced.
+_APP_TABLES = (
+    "research_workspaces",
+    "workspace_circulars",
+    "chat_sessions",
+    "chat_messages",
+    "settings",
+)
 
 
-def _relocate_trace_tables(
-    source=None, target=None, target_path: Path | None = None
+def _relocate_tables(
+    tables: tuple[str, ...], source, target, target_path: Path
 ) -> int:
-    """Move any trace rows still living in `sbpeye.db` into the debug database.
+    """Move `tables` out of `sbpeye.db` and into `target`, dropping the originals.
 
-    Traces used to share the application database. Copy them across, drop the old
-    tables and reclaim the pages, so an existing checkout keeps its history and
-    stops paying for it in `sbpeye.db`. A no-op once the tables are gone.
+    Both the trace split and the runtime-state split are the same migration: copy
+    the rows across, drop the old tables and reclaim the pages, so an existing
+    checkout keeps its data and stops paying for it in `sbpeye.db`. A no-op once
+    the tables are gone.
 
-    The schema is replayed from `sqlite_master` rather than from `DebugBase`: this
-    runs at module import, before `models` has been imported, so the ORM metadata
+    The schema is replayed from `sqlite_master` rather than from the ORM metadata:
+    this runs at module import, before `models` has been imported, so that metadata
     is still empty here. Copying the recorded DDL also carries the indexes across
     verbatim and keeps the migration correct if the model later changes.
 
-    The engines are parameters so the move can be exercised against throwaway files;
-    they default to this module's application and debug engines.
+    The engines are parameters so each move can be exercised against throwaway files.
     """
-    source = source if source is not None else engine
-    target = target if target is not None else debug_engine
-    target_path = target_path if target_path is not None else DEBUG_DATABASE_PATH
-
     with source.begin() as conn:
         legacy = [
             (row[0], row[1], row[2])
             for row in conn.execute(text(
                 "SELECT type, name, sql FROM sqlite_master "
                 "WHERE sql IS NOT NULL AND (name IN :names OR tbl_name IN :names)"
-            ).bindparams(bindparam("names", expanding=True)), {"names": list(_TRACE_TABLES)})
+            ).bindparams(bindparam("names", expanding=True)), {"names": list(tables)})
         ]
     legacy_tables = {name for kind, name, _ in legacy if kind == "table"}
     if not legacy_tables:
@@ -518,7 +563,7 @@ def _relocate_trace_tables(
             conn.execute(text(sql))
 
     # Release the pooled connection that just built the schema; the copy below needs
-    # the debug file free of other handles before it can be detached again.
+    # the target file free of other handles before it can be detached again.
     target.dispose()
 
     moved = 0
@@ -528,17 +573,17 @@ def _relocate_trace_tables(
     # autocommit and the transaction is opened by hand around the data statements.
     with source.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         conn.execute(
-            text("ATTACH DATABASE :path AS debugdb"), {"path": str(target_path)}
+            text("ATTACH DATABASE :path AS moved_db"), {"path": str(target_path)}
         )
         try:
             conn.execute(text("BEGIN"))
             try:
-                for table in _TRACE_TABLES:
+                for table in tables:
                     if table not in legacy_tables:
                         continue
                     # OR IGNORE: a half-finished earlier attempt must not abort the move.
                     result = conn.execute(text(
-                        f"INSERT OR IGNORE INTO debugdb.{table} SELECT * FROM main.{table}"
+                        f"INSERT OR IGNORE INTO moved_db.{table} SELECT * FROM main.{table}"
                     ))
                     moved += result.rowcount or 0
                     conn.execute(text(f"DROP TABLE main.{table}"))
@@ -547,7 +592,7 @@ def _relocate_trace_tables(
                 conn.execute(text("ROLLBACK"))
                 raise
         finally:
-            conn.execute(text("DETACH DATABASE debugdb"))
+            conn.execute(text("DETACH DATABASE moved_db"))
 
     # VACUUM needs its own connection outside a transaction. Reclaiming the pages is
     # the point of the move, so a failure here is worth a line in the log.
@@ -556,13 +601,47 @@ def _relocate_trace_tables(
             conn.execute(text("VACUUM"))
     except Exception:
         logging.getLogger(__name__).warning(
-            "sbpeye.db could not be vacuumed after moving traces out", exc_info=True
+            "sbpeye.db could not be vacuumed after relocating tables out", exc_info=True
         )
     return moved
 
 
+def _relocate_trace_tables(
+    source=None, target=None, target_path: Path | None = None
+) -> int:
+    """Move any trace rows still living in `sbpeye.db` into the debug database."""
+    return _relocate_tables(
+        _TRACE_TABLES,
+        source if source is not None else engine,
+        target if target is not None else debug_engine,
+        target_path if target_path is not None else DEBUG_DATABASE_PATH,
+    )
+
+
+def _relocate_app_tables(
+    source=None, target=None, target_path: Path | None = None
+) -> int:
+    """Move workspaces, chat, and settings out of `sbpeye.db` into the app database."""
+    return _relocate_tables(
+        _APP_TABLES,
+        source if source is not None else engine,
+        target if target is not None else app_engine,
+        target_path if target_path is not None else APP_DATABASE_PATH,
+    )
+
+
 Base.metadata.create_all(bind=engine)
-# The debug tables are created by `llm_debug`, which imports `models` and so is the
-# first point where `DebugBase.metadata` actually knows about them.
+# The debug tables are created by `llm_debug`, and the runtime-state tables at the
+# foot of `models`; both import `models` and so are the first point where their
+# metadata actually knows about them.
 _relocate_trace_tables()
+_relocate_app_tables()
 _ensure_columns()
+_ensure_app_columns()
+
+# Last, because it reads `settings` — which the relocation above has just moved into
+# the application database. Any earlier and a checkout migrating for the first time
+# would look for the table before it arrived and silently fall back to environment
+# defaults for the rest of the process.
+embedding_config = EmbeddingConfig.from_database(app_engine)
+embedding_backend = create_embedding_backend(embedding_config)

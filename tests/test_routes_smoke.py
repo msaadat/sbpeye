@@ -18,6 +18,8 @@ from sbpeye.models import (
     CircularRelationship,
     LLMTrace,
     LLMTraceEvent,
+    RegDocument,
+    RegDocumentVersion,
     Settings,
     SyncStatus,
 )
@@ -225,6 +227,12 @@ def test_app_status_includes_remote_circular_fields(client, monkeypatch):
     assert body["remote_new_count"] == 2
     assert body["sync"]["remote_check_status"] == "new_available"
 
+def _unexpected_reingest(*args, **kwargs):
+    """`process_attachment` re-extracts and resets `is_vectorized`. A plain cache miss on
+    a read must never reach it; only an explicit refresh may."""
+    raise AssertionError("process_attachment must not run on a plain cache miss")
+
+
 def test_document_content_redownloads_missing_attachment_file(client, monkeypatch, tmp_path):
     test_client, db_factory = client
     monkeypatch.setattr(main_module, "PROJECT_ROOT", tmp_path)
@@ -244,26 +252,24 @@ def test_document_content_redownloads_missing_attachment_file(client, monkeypatc
                 local_path="attachments/c1/missing.pdf",
                 file_type="pdf",
                 extraction_status="extracted",
+                content_text="original extracted text",
+                is_vectorized=1,
             )
         )
         db.commit()
     finally:
         db.close()
 
-    def fake_process_attachment(db, circular, info, force_download=False, verbose=False):
-        assert circular.id == "c1"
-        assert info["id"] == "att-1"
-        assert force_download is True
+    def fake_download_attachment(circular_id, att_info, force=False):
+        assert circular_id == "c1"
+        assert att_info["id"] == "att-1"
+        assert force is True
         repaired_path.parent.mkdir(parents=True, exist_ok=True)
         repaired_path.write_bytes(b"%PDF repaired")
-        attachment = db.query(Attachment).filter(Attachment.id == "att-1").one()
-        attachment.local_path = str(repaired_path.relative_to(tmp_path))
-        attachment.extraction_status = "extracted"
-        attachment.extraction_error = None
-        db.commit()
-        return attachment
+        return repaired_path, True, None, att_info["url"]
 
-    monkeypatch.setattr(main_module, "process_attachment", fake_process_attachment)
+    monkeypatch.setattr(main_module, "download_attachment", fake_download_attachment)
+    monkeypatch.setattr(main_module, "process_attachment", _unexpected_reingest)
 
     resp = test_client.get("/api/documents/att-1/content")
 
@@ -273,6 +279,10 @@ def test_document_content_redownloads_missing_attachment_file(client, monkeypatc
     try:
         attachment = db.query(Attachment).filter(Attachment.id == "att-1").one()
         assert attachment.local_path == "attachments/c1/att-1.pdf"
+        # The pointer is the only thing the read is allowed to change. The text the
+        # vector store was built from, and the ledger saying it is in there, both stand.
+        assert attachment.content_text == "original extracted text"
+        assert attachment.is_vectorized == 1
     finally:
         db.close()
 
@@ -344,19 +354,25 @@ def test_document_content_reports_failed_redownload(client, monkeypatch, tmp_pat
     finally:
         db.close()
 
-    def fake_process_attachment(db, circular, info, force_download=False, verbose=False):
-        attachment = db.query(Attachment).filter(Attachment.id == "att-1").one()
-        attachment.extraction_status = "error"
-        attachment.extraction_error = "download failed"
-        db.commit()
-        return attachment
+    def fake_download_attachment(circular_id, att_info, force=False):
+        return None, False, "download failed", None
 
-    monkeypatch.setattr(main_module, "process_attachment", fake_process_attachment)
+    monkeypatch.setattr(main_module, "download_attachment", fake_download_attachment)
+    monkeypatch.setattr(main_module, "process_attachment", _unexpected_reingest)
 
     resp = test_client.get("/api/documents/att-1/content")
 
     assert resp.status_code == 502
     assert resp.json() == {"error": "download failed"}
+
+    # A failed fetch is not corpus state: the row is left exactly as it shipped.
+    db = db_factory()
+    try:
+        attachment = db.query(Attachment).filter(Attachment.id == "att-1").one()
+        assert attachment.extraction_status == "extracted"
+        assert attachment.extraction_error is None
+    finally:
+        db.close()
 
 
 def test_ensure_document_cached_redownloads_missing_attachment(db_factory, monkeypatch, tmp_path):
@@ -377,30 +393,29 @@ def test_ensure_document_cached_redownloads_missing_attachment(db_factory, monke
                 local_path="attachments/c1/missing.pdf",
                 file_type="pdf",
                 extraction_status="extracted",
+                is_vectorized=1,
             )
         )
         db.commit()
         attachment = db.query(Attachment).filter(Attachment.id == "att-1").one()
 
-        def fake_process_attachment(db, circular, info, force_download=False, verbose=False):
-            assert info["id"] == "att-1"
-            assert force_download is True
+        def fake_download_attachment(circular_id, att_info, force=False):
+            assert circular_id == "c1"
+            assert att_info["id"] == "att-1"
+            assert force is True
             repaired_path.parent.mkdir(parents=True, exist_ok=True)
             repaired_path.write_bytes(b"%PDF repaired")
-            attachment = db.query(Attachment).filter(Attachment.id == "att-1").one()
-            attachment.local_path = str(repaired_path.relative_to(tmp_path))
-            attachment.extraction_status = "extracted"
-            attachment.extraction_error = None
-            db.commit()
-            return attachment
+            return repaired_path, True, None, att_info["url"]
 
-        monkeypatch.setattr(main_module, "process_attachment", fake_process_attachment)
+        monkeypatch.setattr(main_module, "download_attachment", fake_download_attachment)
+        monkeypatch.setattr(main_module, "process_attachment", _unexpected_reingest)
 
         repaired, path = main_module._ensure_document_cached(db, attachment)
 
         assert repaired.id == "att-1"
         assert path == repaired_path
         assert repaired.local_path == "attachments/c1/att-1.pdf"
+        assert repaired.is_vectorized == 1
     finally:
         db.close()
 
@@ -669,3 +684,135 @@ def test_chat_session_get_missing_returns_404(client):
     test_client, _ = client
     resp = test_client.get("/api/chat/sessions/nope")
     assert resp.status_code == 404
+
+
+def test_ensure_document_cached_refresh_reingests(db_factory, monkeypatch, tmp_path):
+    """The counterpart to the tests above: an explicit refresh *is* a re-ingest."""
+    monkeypatch.setattr(main_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(database_module, "PROJECT_ROOT", tmp_path)
+
+    db = db_factory()
+    try:
+        db.add(make_circular(circular_id="c1"))
+        db.add(
+            Attachment(
+                id="att-1",
+                circular_id="c1",
+                filename="rules.pdf",
+                original_url="https://www.sbp.org.pk/files/rules.pdf",
+                local_path="attachments/c1/att-1.pdf",
+                file_type="pdf",
+                extraction_status="extracted",
+                is_vectorized=1,
+            )
+        )
+        db.commit()
+        attachment = db.query(Attachment).filter(Attachment.id == "att-1").one()
+
+        calls = []
+
+        def fake_process_attachment(db, circular, info, force_download=False, verbose=False):
+            calls.append(force_download)
+            return db.query(Attachment).filter(Attachment.id == "att-1").one()
+
+        monkeypatch.setattr(main_module, "process_attachment", fake_process_attachment)
+
+        main_module._ensure_document_cached(db, attachment, refresh=True)
+
+        assert calls == [True]
+    finally:
+        db.close()
+
+
+def _add_law_version(db, *, content_hash, local_path=None):
+    db.add(
+        RegDocument(
+            id="d1",
+            title="SBP Act",
+            normalized_title="sbp act",
+            doc_type="act",
+            first_seen_at=datetime(2026, 8, 1),
+            last_seen_at=datetime(2026, 8, 1),
+        )
+    )
+    db.add(
+        RegDocumentVersion(
+            id="d1-v1",
+            document_id="d1",
+            content_hash=content_hash,
+            file_url="https://www.sbp.org.pk/l/act.pdf",
+            local_path=local_path,
+            file_type="pdf",
+            is_current=1,
+            first_seen_at=datetime(2026, 8, 1),
+            last_seen_at=datetime(2026, 8, 1),
+        )
+    )
+    db.commit()
+
+
+def test_law_file_redownloads_when_the_hash_matches(client, monkeypatch, tmp_path):
+    """A missing archive file is refetched, and accepted because it is the same bytes."""
+    test_client, db_factory = client
+    monkeypatch.setattr(main_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(database_module, "PROJECT_ROOT", tmp_path)
+    archived = tmp_path / "attachments" / "laws" / "d1" / "hash-a-act.pdf"
+
+    db = db_factory()
+    try:
+        _add_law_version(db, content_hash="hash-a")
+    finally:
+        db.close()
+
+    def fake_download_law_file(document_id, url, force=False):
+        assert document_id == "d1"
+        archived.parent.mkdir(parents=True, exist_ok=True)
+        archived.write_bytes(b"%PDF act")
+        return archived, "hash-a", None
+
+    monkeypatch.setattr(main_module, "download_law_file", fake_download_law_file)
+
+    resp = test_client.get("/api/laws/d1/file")
+
+    assert resp.status_code == 200
+    assert resp.content == b"%PDF act"
+    db = db_factory()
+    try:
+        version = db.query(RegDocumentVersion).filter(RegDocumentVersion.id == "d1-v1").one()
+        assert version.local_path == "attachments/laws/d1/hash-a-act.pdf"
+    finally:
+        db.close()
+
+
+def test_law_file_refuses_when_the_live_file_is_a_different_edition(client, monkeypatch, tmp_path):
+    """SBP replaces law PDFs in place. Bytes that do not hash to this version's hash are
+    a different edition, and must not be served as though they were the archived one."""
+    test_client, db_factory = client
+    monkeypatch.setattr(main_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(database_module, "PROJECT_ROOT", tmp_path)
+    fetched = tmp_path / "attachments" / "laws" / "d1" / "hash-b-act.pdf"
+
+    db = db_factory()
+    try:
+        _add_law_version(db, content_hash="hash-a")
+    finally:
+        db.close()
+
+    def fake_download_law_file(document_id, url, force=False):
+        fetched.parent.mkdir(parents=True, exist_ok=True)
+        fetched.write_bytes(b"%PDF a newer act")
+        return fetched, "hash-b", None
+
+    monkeypatch.setattr(main_module, "download_law_file", fake_download_law_file)
+
+    resp = test_client.get("/api/laws/d1/file")
+
+    assert resp.status_code == 404
+    assert "different version" in resp.json()["error"]
+    db = db_factory()
+    try:
+        version = db.query(RegDocumentVersion).filter(RegDocumentVersion.id == "d1-v1").one()
+        # No row is re-pointed at the wrong bytes; capturing a new edition is sync's job.
+        assert version.local_path is None
+    finally:
+        db.close()

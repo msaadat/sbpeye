@@ -23,31 +23,62 @@ Migrated against the live files with every row preserved — 4 workspaces, 12 pi
 sessions, 30 messages, 9 settings — and the served API verified to report the same pin
 counts as the raw tables, with all 12 pinned circular ids resolving across the database
 boundary. Test suite sits at the 6-failure environment baseline with 569 passing (up from
-567: three new tests, listed in 2.1).
+567: three new tests, listed in 2.1) — a Windows measurement; see 0.4.
 
 `sync_status` and `ai_generation_jobs` were deliberately **not** moved; see 2.2 and 10.1.
 
+**Section 4 — the data directory.** `DATA_ROOT` is defined in `env.py` and honours
+`SBPEYE_DATA_DIR`, defaulting to the source root so local checkouts and the test suite are
+unaffected. All seven mutable paths follow it; `main.STATIC_DIR` correctly does not.
+
+The change was six functional lines, not the ~40 call sites this section originally
+estimated — see 4.4 for why, and for the four inline re-derivations that were the actual
+trap. Test suite unchanged against the true baseline (0.4).
+
+**Section 3 — the cache write paths.** A cache miss on an ordinary document view no longer
+runs a re-ingest: it fetches the bytes and writes `local_path` alone, leaving `content_text`
+and the `is_vectorized` ledger intact. Law versions gained the opposite change — they refetch
+on miss instead of 404ing, accepted only when the bytes hash to the version's own hash, so a
+replaced edition can never be served as the archived one.
+
+The `DocumentCache` table was not built and is not needed (10.3, option C). Suite: 1 failed /
+578 passed, baseline failure only.
+
 ### 0.2 Not started
 
-Sections 3 through 9. Nothing outside `database.py`, `models.py`, `api/serializers.py`,
-`api/debug.py`, `main.py`, `ai.py` and `llm_debug.py` has been touched.
+Sections 6 through 9, and section 12. Section 5 needs no code (5.1).
 
 ### 0.3 Sequencing
 
-Sections 2-4 are prerequisites for everything else and are independent of the auth design,
-so they can land first and be verified locally. Section 7 (auth) is the largest single
-piece. Sections 6-8 are small and can be done in any order once 2-4 are in.
+Sections 2-4 are prerequisites for everything else and are independent of the auth design;
+both are now in and were verified locally. Section 7 (auth) is the largest single piece.
+Sections 6-8 are small and can be done in any order.
 
 ```
-2. DB split ✔ ───────┐
-3. attachment cache ─┼─→ 4. data directory ──→ 5. corpus seeding ──→ 9. Railway
-6. ecodata refresh ──┘                                    │
-                              7. auth + admin gating ─────┤
-                              8. corpus content prep ─────┘
+2. DB split ✔ ──→ 4. data directory ✔ ──→ 3. cache paths ✔ ──→ 9. Railway
+                                                  │              │
+                                  5. corpus upload (no code) ────┤
+                                  6. ecodata refresh ────────────┤
+                                  7. auth + admin gating ────────┤
+                                  8. corpus content prep ────────┤
+                                 12. tree consolidation ─────────┘
 ```
 
-Section 3 is now the only item on the critical path that is still an open design question
-rather than known work — see 3.4.
+Sections 2, 3 and 4 are in. Section 7 (auth) is now the largest remaining piece, and section
+12 is unblocked — it was waiting on 10.3, which is closed.
+
+Section 5 turned out to need no code at all — the corpus and vector store are uploaded to the
+volume with the Railway CLI (5.1). That closed what had been a blocker (5.5) and removed the
+seed-copy machinery this plan originally specified (5.2).
+
+### 0.4 Test baseline
+
+The **6 failed / 569 passed** figure quoted below was measured on Windows
+(`.venv/Scripts/python.exe`). On Linux the baseline on clean `main` is **1 failed / 575
+passed** — the single failure being `test_attachments::test_fetch_page_cached_uses_uuid_filename`.
+
+Diff against the baseline on the machine you are actually running, measured by stashing the
+change rather than assumed from this document.
 
 ---
 
@@ -71,10 +102,11 @@ The measurements that would matter if this is revisited:
 | `torch` / `onnxruntime` / `cv2` | 500 MB / 291 MB / 113 MB |
 | `docling` imports | **All function-local** (`checklist.py` only) — droppable, costs one feature |
 | `fastembed` | Lazily imported but on the hot path (`embed_queries` per search and per chat turn) |
-| Shippable corpus | `sbpeye.db` 69 MB + `chroma_db/` 395 MB |
+| Shippable corpus | `sbpeye.db` 69 MB + `chroma_db/` 486 MB (was recorded as 395 MB; re-measured) |
 | Not shippable | `attachments/` 638 MB, `cache/` 736 MB |
 
-Desktop remains viable later; the work in sections 3 and 4 is a prerequisite for it too.
+Desktop remains viable later; the work in sections 3 and 4 is a prerequisite for it too —
+and section 4 is now done, so that prerequisite is half paid.
 
 ### 1.2 Two databases, both SQLite
 
@@ -137,7 +169,8 @@ Verified against the live files: `sbpeye.db` no longer contains any of the five 
 ### 2.2 Closed items
 
 1. **Full-suite verification.** Done — 6 failed / 569 passed, matching the environment
-   baseline on clean `main` exactly. The 6 are the known set (`test_attachments`,
+   baseline on clean `main` exactly (measured on Windows; the Linux baseline is different,
+   see 0.4). The 6 are the known set (`test_attachments`,
    `test_llm_debug::test_only_gateway_calls_chat_completions_create`, four in
    `test_routes_smoke` around document redownload).
 
@@ -202,7 +235,7 @@ live `sbpeye.db`, and now also asserted by `test_corpus_session_cannot_see_runti
 
 ---
 
-## 3. Move the attachment cache mapping into the app database
+## 3. Attachment and law cache paths — resolved without moving the column
 
 ### 3.1 The problem
 
@@ -257,12 +290,15 @@ Then:
 
 `RegDocumentVersion.local_path` has the same shape and the same problem — law PDFs are
 archived under `attachments/laws/`. It is admin-written during laws sync, so it fits 1.3 and
-does not strictly need to move. But the *download-on-miss* path for law versions
-(`main.py` law document routes) is user-reachable. Either route it through `DocumentCache`
-too, or accept the same single-column write. Decide when writing the code; the first is
-tidier, the second is smaller.
+does not strictly need to move.
 
-**But see 3.4 — for law versions specifically, "download-on-miss" is not a safe assumption.**
+> **Correction (3.5).** This section originally claimed "the *download-on-miss* path for law
+> versions (`main.py` law document routes) is user-reachable." That was **false when
+> written**: `download_law_file` had exactly one caller, `scraper/laws.py:662`, inside sync.
+> The served routes returned 404 and never refetched. A download-on-miss path was
+> subsequently added deliberately, with hash verification — see 3.5.3.
+
+**See 3.4 — for law versions, "download-on-miss" is not a safe assumption without the hash.**
 
 ### 3.4 Counter-analysis: findings from reading the `local_path` call sites
 
@@ -355,12 +391,108 @@ handles it by refusing to reseed silently.
 | **C. Defer entirely** | Zero | Sections 4 and 5 make the corpus writable-but-not-shipped, which removes the persistence problem. Leaves 1.3 with a documented exception |
 
 **Suggested:** B, and in all three options exclude `RegDocumentVersion.local_path` from the
-move per 3.4.1 — its download-on-miss route should return an error for a non-current version
-rather than re-fetching. Recorded as 10.3; not decided.
+move per 3.4.1. Superseded by 3.5.
+
+### 3.5 Resolution — the column did not need to move
+
+Decided and implemented. 10.3 is closed. A/B/C turned out to be the wrong axis: it asks
+*which table the pointer lives in*, and the defect was that **a read path was calling a
+re-ingest**.
+
+#### 3.5.1 What the read path was actually doing
+
+3.1 describes a user PDF view as writing `local_path` — one column. It was not.
+`_ensure_document_cached` called `process_attachment(force_download=True)`, which commits
+**seven** columns: `local_path`, `filename`, `original_url`, `file_type`,
+`extraction_error`, `content_text` (re-extracted) and **`is_vectorized = 0`**.
+
+That last one is a ledger with four consumers:
+
+| Consumer | Effect of the reset |
+|---|---|
+| `scraper/circulars.py:1125` | `if attachment.is_vectorized: continue` — the row becomes re-index work |
+| `cli/commands.py:241` | `filter(is_vectorized == 0)` selects it for embedding |
+| `main.py` document payload | Reported as unindexed through the API |
+| `chat_retrieval.py:186` | The model is told `indexed=no` for a retrievable source |
+
+On a deployment `attachments/` starts empty, so all 1,368 rows with a path are guaranteed
+misses and any tester opening any PDF flips that row's flag.
+
+**What this is not.** It does not invalidate or corrupt the vector store. Chunk ids are
+positional (`f"{doc_id}__chunk_{i}"`, `scraper/circulars.py:1030`) and
+`_replace_document_chunks` deletes then re-adds, so re-indexing identical text reproduces an
+identical store — the same bytes re-downloaded give the same `content_text`, the same chunks
+and the same embeddings. The harm is a **false ledger entry** that the API and the chat
+context both repeat, plus redundant re-embedding work. Worth fixing, not an emergency.
+
+Two things checked and cleared: extraction uses `pdfplumber` (`scraper/circulars.py:348`),
+not docling, so re-extraction is reproducible in the container; and no attachment of a type
+the extractor reports as unsupported currently holds text, so the rewrite cannot silently
+blank one.
+
+#### 3.5.2 The fix
+
+`_ensure_document_cached` now splits on intent:
+
+| Call | Behaviour |
+|---|---|
+| `refresh=True` | Unchanged — `process_attachment`, a full re-ingest. This is what a refresh means |
+| plain cache miss | `download_attachment` only; writes `local_path` and nothing else |
+| failed download | **No commit at all.** The error is set on the in-memory row for the route to build its 502 from, and is discarded with the session |
+
+The `CachedDocument` arm eight lines below was already exactly this; the `Attachment` arm was
+the outlier, and now matches it.
+
+With the write reduced to one pointer column, 3.4.4's own reasoning holds without
+qualification — no correctness risk (one replica, one process, one writer), no cost risk (a
+PDF fetch calls no LLM) — and its last substantive argument, the reseed rule, disappeared when
+section 5 became a manual upload. **Option C: the table move is deferred, and `check-stale`
+needs no change**, which drops 3.4.3's coupling entirely.
+
+#### 3.5.3 Law versions now refetch, verified by hash
+
+The opposite change, for the opposite reason. `GET /api/laws/{document_id}/file` used to 404
+whenever the archived file was absent, which on a fresh volume is every law PDF. It now
+refetches through `_ensure_law_version_cached`.
+
+This is only safe because of the hash. SBP replaces law PDFs in place, so `file_url` always
+serves whichever edition is current; for a superseded version those are different bytes by
+definition (3.4.1). Bytes are therefore accepted for a version **only if they hash to the hash
+that version is identified by**:
+
+| Fetched hash | Outcome |
+|---|---|
+| Matches the requested version | Archived, `local_path` recorded, file served |
+| Matches a sibling version | That sibling's `local_path` is recorded; the request still fails, naming the reason |
+| Matches no version | Nothing is written. The bytes stay in the archive under their own name, where the next sync finds them |
+
+The archive cannot be damaged even in the mismatch case: `download_law_file` names its
+destination `_archive_name(content_hash, url)` from the hash of what it actually fetched
+(`scraper/laws.py:561`), so a replaced edition lands under a *different* filename and
+physically cannot overwrite the historical record. Creating a version row and deciding
+`is_current` across siblings stays with sync, where 1.3 puts it.
+
+#### 3.5.4 Tests
+
+`tests/test_routes_smoke.py`. The three existing redownload tests asserted the old contract
+(they monkeypatched `process_attachment` and required `force_download=True` on a plain miss)
+and were rewritten; a shared `_unexpected_reingest` guard now fails any test in which a plain
+miss reaches the re-ingest path.
+
+| Test | Asserts |
+|---|---|
+| `test_document_content_redownloads_missing_attachment_file` | Serves the refetched bytes; `content_text` and `is_vectorized` survive untouched |
+| `test_document_content_reports_failed_redownload` | 502 carries the reason; the row is left exactly as it shipped |
+| `test_ensure_document_cached_redownloads_missing_attachment` | Unit-level equivalent |
+| `test_ensure_document_cached_refresh_reingests` | `refresh=True` still calls `process_attachment` |
+| `test_law_file_redownloads_when_the_hash_matches` | Refetched, accepted, `local_path` recorded |
+| `test_law_file_refuses_when_the_live_file_is_a_different_edition` | 404 naming the reason; no row re-pointed at the wrong bytes |
+
+Suite: 1 failed / 578 passed, the baseline failure only (0.4).
 
 ---
 
-## 4. Separate code location from data location
+## 4. Separate code location from data location — complete
 
 ### 4.1 The problem
 
@@ -424,60 +556,190 @@ Two options, both acceptable for a test deploy:
 **Recommendation: the first**, with the second noted as production hardening. Either way,
 `load_app_env` already gives process environment variables precedence over file values
 (`env.py`), so Railway variables win over anything written to the file — which is the
-behaviour you want.
+behaviour you want. **Taken:** `MANAGED_ENV_FILE` is `DATA_ROOT / ".env.local"`. 10.4 closed.
+
+### 4.4 What landed, and why it was six lines
+
+This section estimated "roughly 40 call sites across 10 files." That is the right count of
+*usages*, but nearly all of them reach the root through `from ..database import
+PROJECT_ROOT`, and — the fact that collapses the work — **no use of `PROJECT_ROOT` was ever
+a code path.** Every one is a database, a cache, or the attachment tree. Package assets are
+resolved separately, from `Path(__file__).resolve().parent` (`main.STATIC_DIR`).
+
+So the root is defined once, in `env.py`, which imports only stdlib and `dotenv` and is
+therefore safe for every other module to import from:
+
+```python
+CODE_ROOT = Path(__file__).resolve().parents[2]
+DATA_ROOT = Path(os.getenv("SBPEYE_DATA_DIR") or CODE_ROOT).resolve()
+PROJECT_ROOT = DATA_ROOT   # alias; see below
+```
+
+| File | Change |
+|---|---|
+| `env.py` | Defines `CODE_ROOT` / `DATA_ROOT` / `PROJECT_ROOT`; `.env` and `.env.local` repointed |
+| `database.py` | Imports both from `env`; corpus, app and debug databases and `chroma_db/` repointed |
+| `documents.py` | Two inline `parents[2]` → `DATA_ROOT` |
+| `checklist.py` | `PARSE_CACHE_DIR` → `DATA_ROOT` |
+| `embeddings.py` | `_project_root()` deleted (one caller) → `DATA_ROOT`; unused `Path` import dropped |
+
+**`PROJECT_ROOT` was kept as the exported name** rather than renamed at ~40 sites. Two
+reasons beyond diff size, both of which 4.2 half-anticipated:
+
+- The attachment path-containment guards (`main.py:187`, `1744`, `1795`,
+  `api/serializers.py:419`) compare a candidate against this root. 4.2 warns they "fail open
+  or closed" if they drift from the tree they guard. One name makes drift impossible; two
+  names make it a live risk on every future edit.
+- Roughly 20 test sites monkeypatch `PROJECT_ROOT` on `laws`, `scraper`, `main`,
+  `database` and `cli_commands`. Renaming breaks all of them for no behavioural gain.
+
+**The four inline re-derivations were the actual trap.** `documents.py` (twice),
+`checklist.py` and `embeddings.py` each computed `Path(__file__).resolve().parents[2]`
+locally instead of importing it. An env override of `PROJECT_ROOT` alone would have left all
+four silently writing to the ephemeral image layer — the exact failure this section exists to
+prevent, and invisible until a redeploy ate the data. This grep must return exactly one hit,
+the `CODE_ROOT` definition:
+
+```bash
+grep -rn "parents\[2\]" src/
+```
+
+**Verified.** With `SBPEYE_DATA_DIR` unset every path resolves exactly where it did before.
+With it set, all seven mutable paths follow — both databases, the debug database,
+`chroma_db/`, `.env.local`, `cache/parses`, `cache/models` — plus `ATTACHMENTS_DIR` and
+`HTML_CACHE_DIR`, while `main.STATIC_DIR` correctly stays in the source tree. Suite: 1 failed
+/ 575 passed, identical to the stashed baseline, same single failure (0.4).
+
+**One constraint now documented in the code:** `SBPEYE_DATA_DIR` must be a real process
+environment variable. It is read before any env file loads, because it is what says where
+those files are; setting it in `.env.local` cannot work.
 
 ---
 
-## 5. Seed the corpus onto the volume
+## 5. Get the corpus onto the volume
 
-### 5.1 The rule
+### 5.1 The route: upload it directly — decided
 
-The `sbpeye.db` tracked in git is a **seed**. The application never opens it for writing.
+The corpus and the vector store are uploaded to the Railway volume with the CLI, once, by
+hand. Nothing is copied out of the image and **no seeding code is written**.
 
-On startup:
+```bash
+railway volume -v <volume> files upload ./sbpeye.db /sbpeye.db
+railway volume -v <volume> files upload ./chroma_db /chroma_db
+```
 
-1. If `DATA_ROOT/sbpeye.db` does not exist, copy the seed from the image and write a marker
-   recording the seed's version.
-2. If it exists and the marker matches the image's seed version, leave it alone.
-3. If it exists and the marker is older, the image carries a newer corpus. **Do not
-   overwrite silently** — a newer corpus would discard whatever the admin generated on the
-   running deployment. Log loudly and require an explicit opt-in (`SBPEYE_RESEED=1`).
+`files upload` accepts a directory as well as a file (`--concurrency` defaults to 32), so the
+store goes up as a directory rather than a tarball — a tarball would have to be extracted
+inside the container, and Railway documents no shell for that. `/` is the volume root, which
+is the `/data` mount; confirm placement with `railway volume files list /`.
 
-Rule 3 is the one that matters. Without it, every corpus update you ship destroys admin work
-done since the last deploy, and the failure is silent.
+This works only because of section 4: `SBPEYE_DATA_DIR=/data` is what makes the application
+look on the volume instead of beside its own source. With that set, uploaded files are simply
+found. There is no code change at all in this section.
 
-### 5.2 Seed version marker
+### 5.2 What this removes
 
-A file next to the copied database (`DATA_ROOT/.corpus-seed`) holding the seed's content
-hash, or a build-time version string baked into the image. A hash is self-maintaining and
-cannot drift from the file it describes.
+Three things this plan previously specified are now unnecessary and should not be built:
 
-### 5.3 What ships in the seed
-
-| Included | Excluded |
+| Was | Why it is gone |
 |---|---|
-| `sbpeye.db` (69 MB) | `attachments/` (638 MB) — fetched on demand |
-| `chroma_db/` (395 MB) | `cache/` (736 MB) — regenerated |
-| | `sbpeye_app.db` — created empty on first boot |
-| | `sbpeye_debug.db` — created on demand |
+| Seed copied from the image on first boot | Nothing is in the image to copy |
+| `.corpus-seed` version marker | Nothing auto-copies, so there is no version to compare |
+| `SBPEYE_RESEED=1` opt-in | The rule it protected — "never silently overwrite admin work" — is enforced by the absence of any automatic overwrite |
 
-`chroma_db/` is the awkward one. It must ship or vector search is dead on arrival, and
-rebuilding it means re-embedding 5,222 sources on container CPU — minutes to tens of minutes
-of first-boot time. Shipping it couples the image to a chromadb version whose on-disk format
-has changed across releases historically. **Verify** that the pinned `chromadb>=1.5.9`
-opens the committed store in a clean container before relying on it; this is the single
-most likely thing in this plan to fail in a way that is annoying to diagnose.
+Updating the corpus later is the same command with `--overwrite`, run deliberately, with the
+service stopped. The protection is that it is manual, which is stronger than a marker file and
+is zero code.
 
-Both are large enough that the volume needs to be sized for corpus + attachments growth, not
-just the databases.
+### 5.3 What goes on the volume
 
-### 5.4 FTS on first boot
+| On the volume | Not on the volume |
+|---|---|
+| `sbpeye.db` (69 MB) — uploaded | `attachments/` (645 MB) — fetched on demand |
+| `chroma_db/` (486 MB) — uploaded | `cache/models` (209 MB) — belongs in the image, see 5.4 |
+| `sbpeye_app.db` — created empty on first boot | |
+| `sbpeye_debug.db` — created on demand | |
+| `.env.local` — written by the Settings UI (4.3) | |
 
-`_warm_up_search_index` (`main.py`) runs `backfill_fts` in a background thread on every
-boot and writes to the corpus if the FTS tables are empty. The seed already contains
-populated `circulars_fts` and `laws_fts`, so this is a no-op in practice — but if a seed is
-ever built without them, first boot performs a large corpus write with no admin involved.
-Worth an explicit check when building a seed.
+**Volume sizing.** Railway gates volume size by plan: Free/Trial 0.5 GB, Hobby 5 GB, Pro
+50 GB. 0.5 GB does not fit the corpus alone. **Hobby is the floor, and is the plan being
+taken.** Budget roughly 555 MB at rest, ~1.2 GB once attachments cache, ~1.9 GB if the HTML
+cache is also allowed to fill — comfortably inside 5 GB.
+
+### 5.4 Rules that still apply
+
+1. **Do not upload into a live store.** Chroma's `PersistentClient` is single-process, and
+   writing into `chroma_db/` while the application holds the HNSW segment open is exactly
+   what `_require_exclusive_vector_store` (`cli/commands.py:891`) exists to prevent. Stop the
+   service, upload, start it. This is the one way to corrupt the store on this route.
+2. **Volumes are not mounted at pre-deploy time**, so this cannot be scripted as a deploy
+   step even if that later looks attractive. CLI upload is the mechanism.
+3. **The chromadb format coupling is still live.** The store was built by the local
+   `chromadb`; the container's pinned `chromadb>=1.5.9` has to open it. 5.3 originally called
+   this the single most likely thing in this plan to fail in a way that is annoying to
+   diagnose, and choosing upload over rebuild keeps that risk rather than removing it. Test
+   one boot before relying on it. If it fails, 5.6 is the fallback.
+4. **Bake the FastEmbed model into the image.** `EmbeddingConfig.cache_dir()` resolves to
+   `DATA_ROOT/cache/models`, overridable with `FASTEMBED_CACHE_PATH`. Left on the volume it
+   is 209 MB of third-party weights being treated as application data; unset, first boot
+   downloads them before it can embed anything. Point `FASTEMBED_CACHE_PATH` at a baked-in
+   image path.
+5. **FTS on first boot.** `_warm_up_search_index` (`main.py`) runs `backfill_fts` in a
+   background thread on every boot and writes to the corpus if the FTS tables are empty. The
+   uploaded `sbpeye.db` already contains populated `circulars_fts` and `laws_fts`, so this is
+   a no-op in practice — but a corpus uploaded without them would make first boot perform a
+   large corpus write with no admin involved. Worth checking before uploading.
+
+### 5.5 The vector store cannot ship in git
+
+Recorded because it is what forced the upload route, and because it will come up again the
+first time someone assumes the repo is self-contained.
+
+`chroma_db/` is **gitignored** (`.gitignore`, `/chroma_db/`) and has never been tracked, so a
+build sourced from the repo — which is what a Railway GitHub deploy is — does not have it.
+Nor can it be added:
+
+| File | Size | Against GitHub's 100 MB hard per-file limit |
+|---|---|---|
+| `chroma_db/chroma.sqlite3` | 311 MB | ✗ |
+| `…/data_level0.bin` | 152 MB | ✗ |
+| remaining 9 files | < 5 MB each | ✓ |
+
+Git LFS was rejected: 486 MB per corpus version against a 1 GB free quota, plus bandwidth
+billing. Baking it into the image was rejected because it requires building where `chroma_db/`
+exists — locally, then pushing a multi-GB image to a registry — which kills the two-minute
+push-to-deploy that 1.1 chose Railway for.
+
+### 5.6 Fallback: the store is reproducible from `sbpeye.db`
+
+Not the chosen route, but the reason the upload route is safe to take: if the uploaded store
+turns out to be unopenable by the container's chromadb, or is ever lost, it can be rebuilt
+without any of the file trees.
+
+`sbpeye reindex` (`cli/commands.py:937`) rebuilds all 44,106 chunks from the corpus database
+alone. The PDFs are vectored, but **not from the files**:
+
+| Source | Chunks |
+|---|---|
+| attachment | 27,740 |
+| circular | 8,486 |
+| law | 8,169 |
+
+`attachment_document()` (`scraper/circulars.py:925`) feeds the chunker
+`attachment.content_text` and nothing else — no `local_path`, no file read — and
+`prepare_index_chunks` routes to `prepare_reference_chunks` (`checklist.py:934`), whose
+docstring is explicit that it chunks "without invoking the PDF pipeline". Docling runs on the
+checklist and entity paths, never on indexing.
+
+So the input is 16 MB of `content_text` across 1,328 extracted attachments, already inside the
+69 MB corpus. The 645 MB of `attachments/` is irrelevant to a rebuild. Cost is time: roughly
+18 chunks/s once warm on a desktop CPU puts 44,106 chunks near 40 minutes, and a container
+will be slower. That is one rough measurement, not a benchmark.
+
+If this is ever wired in as automatic recovery rather than run by hand, note the hazard:
+`reset_collection()` (`database.py:100`) drops the collection and rebinds the module-level
+handle that `search`, `chat_retrieval` and `scraper.circulars` bound at import. The CLI can
+assume it is alone; a rebuild inside the serving process has readers arriving mid-swap.
 
 ---
 
@@ -558,6 +820,7 @@ Everything that writes the corpus:
 | `POST /api/settings`, `POST /api/settings/**/test` | provider config |
 | `/debug` and the trace APIs | already gated by `LLM_DEBUG_ALLOWED`; add admin on top |
 | Ecodata forced refresh | section 6.2 |
+| `POST /api/documents/resolve?refresh=true` | re-ingest — the one document path that still rewrites corpus rows (3.5.2) |
 
 `POST /api/circulars/open` being admin-only means a tester pasting an unknown SBP link gets
 a refusal rather than an indexed circular. Accepted deliberately (1.3). The endpoint should
@@ -667,7 +930,9 @@ design (`database.reset_collection` documents why), and the sync and remote-chec
 `main.py` are module-level `threading.Lock`s that only work in one process. Single instance
 is the correct topology, not a compromise. Worth knowing it is a hard ceiling.
 
-Size it for corpus (464 MB) plus attachment growth, not just the databases.
+Size it for corpus (69 MB + 486 MB) plus attachment growth, not just the databases. Railway
+gates volume size by plan — Free/Trial 0.5 GB, Hobby 5 GB, Pro 50 GB — and 0.5 GB does not fit
+the corpus alone. **Hobby is the floor and is the plan being taken**; see 5.3 for the budget.
 
 ### 9.3 Environment
 
@@ -713,24 +978,35 @@ rows and corpus rows together. Low consequence. Section 2.3.
 Shared or per-user. Determines whether the `DEFAULT_WORKSPACE_ID` rework is needed now.
 Section 7.4.
 
-### 10.3 `local_path` — whether to move it at all, and how
+### 10.3 `local_path` — whether to move it at all, and how — closed
 
-Was: "route `RegDocumentVersion` through `DocumentCache` or accept the corpus write."
-Widened by the findings in **3.4**, which apply to all three `local_path` columns:
+**Option C — the column stays in the corpus.** The A/B/C question turned out to be aimed at
+the wrong thing: the defect was a read path calling a full re-ingest, not which table the
+pointer lived in. With that fixed the served write is a single pointer column, which 3.4.4
+already judged harmless, and the reseed rule that was its last real argument disappeared when
+section 5 became a manual upload.
 
-- Choose between option A (implement 3.2 as written), B (overlay with corpus fallback) or
-  C (defer — sections 4 and 5 may make it unnecessary). Table in 3.4.5.
-- Independently: `RegDocumentVersion.local_path` is an **archive, not a cache** (3.4.1).
-  Two superseded law editions already exist only on disk. Its download-on-miss path should
-  refuse rather than re-fetch for a non-current version, under any of A/B/C.
-- If A or B: `sbpeye cache check-stale` must be updated in the same change (3.4.3).
+`check-stale` needs no change, so 3.4.3's coupling is gone. `RegDocumentVersion` refetches on
+miss with hash verification rather than refusing outright — a better answer than either option
+this decision originally offered. Implemented; see 3.5.
 
-Section 3 should not be implemented before section 4 either way (3.4.2).
+### 10.4 `.env.local` writability in production — closed
 
-### 10.4 `.env.local` writability in production
+Persisted on the volume. `MANAGED_ENV_FILE` is `DATA_ROOT / ".env.local"` as of the section 4
+work; Railway environment variables still win over file values. Making provider config
+read-only is noted as production hardening in 4.3, not done. Section 4.3.
 
-Persist on the volume, or make provider config read-only from Railway variables.
-Section 4.3.
+### 10.5 How the vector store reaches the volume — closed
+
+Uploaded directly with `railway volume files upload`, along with `sbpeye.db`. No seeding code,
+no release asset, no rebuild-on-boot. Section 5.1.
+
+The residual risk is the chromadb on-disk format (5.4, rule 3), with `sbpeye reindex` as the
+documented fallback (5.6).
+
+### 10.6 File tree consolidation — proposed, not decided
+
+Merging `attachments/` and `cache/` into one tree. Section 12.
 
 ---
 
@@ -738,17 +1014,136 @@ Section 4.3.
 
 Before calling the deployment done:
 
-1. **Test suite** diffed against the 6-failure baseline on clean `main`, not against zero.
-   ✔ as of the section 2 work — 6 failed / 569 passed.
+1. **Test suite** diffed against the baseline on clean `main`, not against zero, and
+   measured on the machine in use rather than taken from this document (0.4). ✔ as of the
+   section 4 work — 1 failed / 575 passed on Linux, identical to the stashed baseline.
 2. **Boundary test**: a corpus session must raise on app tables (section 2.5). ✔ confirmed
    against the live files and now covered by a test.
-3. **Cold-start test**: build the image, mount an *empty* volume, boot. The seed must copy,
-   `sbpeye_app.db` must be created, search must return results (proves Chroma opened), and a
-   PDF must download on demand (proves section 3 and the attachments path).
+3. **Cold-start test**: upload `sbpeye.db` and `chroma_db/` to a fresh volume, then boot.
+   `sbpeye_app.db` must be created, **vector search must return results** — which is the real
+   assertion, since it is the proof the container's chromadb opened a store built elsewhere
+   (5.4, rule 3) — and a PDF must download on demand (proves section 3 and the attachments
+   path).
 4. **Redeploy test**: change a setting through the UI, redeploy the same image, confirm the
-   setting survived and the corpus was not reseeded.
+   setting survived and the uploaded corpus was untouched.
 5. **Auth test**: every endpoint in 7.3 returns 403 for a non-admin session and 401 for no
    session.
 6. **Git cleanliness**: after a full session of use against a deployed instance, `git status`
    in a local checkout must show `sbpeye.db` unmodified. That was the original symptom; it is
    the clearest single signal the split worked.
+7. **Data-directory test**: boot with `SBPEYE_DATA_DIR` set and confirm nothing mutable was
+   written under the source tree. `grep -rn "parents\[2\]" src/` returning more than the
+   single `CODE_ROOT` hit means a path has escaped `DATA_ROOT` (4.4).
+
+---
+
+## 12. File tree consolidation — proposed
+
+`attachments/` and `cache/` are two top-level mutable trees where one would do. This section
+proposes the merge and, more importantly, records what the merge must not destroy.
+
+### 12.1 Current layout
+
+```
+DATA_ROOT/
+├── attachments/          645 MB
+│   ├── laws/              76 MB   archive — irreplaceable
+│   └── <circular-uuid>/  569 MB   downloaded PDFs — re-fetchable from sbp.org.pk
+└── cache/                527 MB
+    ├── html/             318 MB   scraped pages — re-fetchable
+    ├── models/           209 MB   FastEmbed ONNX weights — third-party, not our data
+    └── parses/           736 KB   docling parses — regenerable, expensive per item
+```
+
+The two names describe *where a file came from*. They do not describe **how much it costs to
+lose**, which is the only property that matters when something deletes a directory.
+
+### 12.2 Why a flat merge would be a mistake
+
+`attachments/laws/` is the least reproducible data in the system. 3.4.1 established it: SBP
+replaces law PDFs in place and keeps no history, `download_law_file` never overwrites an
+existing archive file because "that copy is the historical record, and SBP does not keep
+another one" (`scraper/laws.py:571-576`), and **2 superseded editions already exist nowhere
+else**.
+
+It currently sits one directory away from 569 MB of trivially re-downloadable PDFs, under a
+shared name. That is already uncomfortable, and it has already nearly gone wrong: 3.4.3
+records a `sbpeye cache check-stale --prune` run that nearly deleted the laws archive.
+
+A merge that puts the archive and the caches in one flat tree makes that near-miss more
+likely, not less. The consolidation is only worth doing if it encodes the durability
+boundary rather than erasing it.
+
+### 12.3 Proposal
+
+One tree, split by how much it costs to lose:
+
+```
+DATA_ROOT/
+└── files/
+    ├── laws/                archive     — never auto-deleted, by any code path
+    ├── circulars/<uuid>/    re-fetchable — deleting costs a download
+    └── cache/               disposable   — `rm -rf files/cache` is ALWAYS safe
+        ├── html/
+        └── parses/
+```
+
+And `cache/models/` leaves `DATA_ROOT` entirely: it is 209 MB of third-party weights being
+stored as if it were application data. It belongs in the image, via `FASTEMBED_CACHE_PATH`
+(5.4, rule 4).
+
+That gives one top-level file directory instead of two, takes 209 MB off the volume, and
+makes the rule statable in one line:
+
+> Exactly one path under `files/` may be deleted by anything: `files/cache/`.
+
+`files/` is a placeholder name; `storage/` reads equally well. Not worth a long discussion.
+
+### 12.4 Cost
+
+**1,479 stored paths must be rewritten.** Every `local_path` is relative and prefixed
+`attachments/` — 1,371 in `attachments`, 108 in `reg_document_versions`, none absolute. The
+rename is a `mv` plus an UPDATE, but with **two prefixes that must not be conflated**:
+
+| From | To |
+|---|---|
+| `attachments/laws/…` | `files/laws/…` |
+| `attachments/<uuid>/…` | `files/circulars/<uuid>/…` |
+
+Order matters — rewriting the generic prefix first would send the laws archive to
+`files/circulars/laws/`.
+
+**The collision with section 3 is resolved.** 10.3 closed as option C, so the pointers stay
+in the corpus and there is no `DocumentCache` migration to coordinate with. This is now a
+single-pass rename of two corpus columns, which is the cheapest this change was ever going to
+be.
+
+**`sbpeye cache check-stale` must be updated in the same change** (`cli/commands.py:1692`).
+It walks all three trees and reconciles them against the filesystem; it is also the command
+that nearly deleted the archive once. 3.4.3 already flags this requirement for section 3.
+
+**Definition sites are few** — the change itself is small:
+
+| Site | Currently |
+|---|---|
+| `scraper/circulars.py:33-34` | `HTML_CACHE_DIR`, `ATTACHMENTS_DIR` |
+| `scraper/laws.py:46` | `LAWS_ARCHIVE_DIR = ATTACHMENTS_DIR / "laws"` |
+| `checklist.py:611` | `PARSE_CACHE_DIR` |
+| `embeddings.py:76` | FastEmbed cache dir |
+| `documents.py:19` | Re-derives `cache/html` inline — a duplicate of `HTML_CACHE_DIR`; fold it in while there |
+| `main.py:188/1745/1796`, `api/serializers.py:420` | Path-containment guards |
+
+**One honest regression:** `rm -rf files/` is shorter to type than `rm -rf attachments/` and
+destroys considerably more. The mitigation is that `files/cache/` is the only path any code
+is permitted to delete, and `check-stale --prune` must be scoped to it explicitly rather than
+walking from `files/`.
+
+### 12.5 Timing
+
+**Before the deploy, not after.** 10.3 is closed, so nothing blocks it.
+
+Nothing here is required for Railway. Section 4 already puts both trees on the volume and
+neither is uploaded (5.3), so the deploy works either way. But once the deployment is running
+there are two attachment trees to migrate instead of one, so the cheap moment is now, and the
+blocker is 10.3 rather than anything in this section.
+

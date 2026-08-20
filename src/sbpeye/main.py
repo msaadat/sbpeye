@@ -62,6 +62,7 @@ from .scraper.circulars import (
     process_circular,
     scrape_circulars,
 )
+from .scraper.laws import download_law_file
 from .scraper.ecodata import scrape_ecodata
 from .scraper.clean_html import clean_sbp_html, extract_sbp_text
 from .scraper.ecodata_index import scrape_ecodata_index
@@ -210,12 +211,43 @@ def _ensure_document_cached(
             db.commit()
             return document, None
         info["id"] = document.id
-        document = process_attachment(
-            db,
-            circular,
-            info,
-            force_download=True,
+        if refresh:
+            # An explicit refresh is a re-ingest and is meant to rewrite the row:
+            # re-download, re-extract, and mark the attachment for re-embedding.
+            document = process_attachment(
+                db,
+                circular,
+                info,
+                force_download=True,
+            )
+            return document, _cached_document_path(document)
+
+        # A cache miss on an ordinary view is not a re-ingest. Fetch the bytes, record
+        # where they landed, and touch nothing else.
+        #
+        # `process_attachment` used to run here too, which committed seven columns for
+        # what the caller asked to be a read: it re-extracted `content_text` and reset
+        # `is_vectorized` to 0. That flag is a ledger — `index_pending_attachments`
+        # skips on it, the CLI selects work by it, the API reports it, and
+        # `chat_retrieval` states it to the model as `indexed=yes/no`. Resetting it does
+        # not touch the vector store, whose chunks stay in place and stay correct; it
+        # just makes the ledger claim "unindexed" for a row that is indexed, and buys a
+        # redundant re-embed on the next index run. On a deployment `attachments/` starts
+        # empty, so every one of the 1368 rows with a path is a guaranteed miss and any
+        # tester opening any PDF would flip it.
+        local_path, _, download_error, _ = download_attachment(
+            circular.id, info, force=True
         )
+        if local_path is None:
+            # Left uncommitted deliberately: a failed fetch is not corpus state. The
+            # attribute carries the reason back to the route, which reads it to build
+            # the 502, and is discarded when the request's session closes.
+            document.extraction_error = (
+                download_error or "Attachment could not be downloaded."
+            )
+            return document, None
+        document.local_path = str(local_path.relative_to(PROJECT_ROOT))
+        db.commit()
         return document, _cached_document_path(document)
 
     path, _, error, _ = download_attachment("standalone", info, force=True)
@@ -223,6 +255,75 @@ def _ensure_document_cached(
     document.error = error
     db.commit()
     return document, _cached_document_path(document)
+
+
+def _law_archive_path(version: RegDocumentVersion) -> Path | None:
+    """The archived file for a law version, if it is on disk and inside the archive."""
+    if not version.local_path:
+        return None
+    candidate = (PROJECT_ROOT / version.local_path).resolve()
+    archive_root = (PROJECT_ROOT / "attachments").resolve()
+    if archive_root not in candidate.parents:
+        return None
+    return candidate if candidate.is_file() else None
+
+
+def _ensure_law_version_cached(
+    db: Session, version: RegDocumentVersion
+) -> tuple[Path | None, str | None]:
+    """The archived file for a law version, fetching it once if it is not on disk.
+
+    Refetching a law file is not the same operation as refetching a circular attachment.
+    An attachment's bytes are reproducible: `file_url` serves the same document tomorrow.
+    SBP replaces law PDFs in place and keeps no history, so a law's URL always serves
+    whichever edition is current — for a superseded version that is different bytes by
+    definition, and serving them would answer a request for the historical record with
+    today's text.
+
+    The content hash is what makes fetching safe. Bytes are accepted for this version
+    only if they hash to the hash this version is identified by. Returns (path, error).
+    """
+    path = _law_archive_path(version)
+    if path is not None:
+        return path, None
+    if not version.file_url:
+        return None, "This version has no source file to download."
+
+    local_path, content_hash, error = download_law_file(
+        version.document_id, version.file_url
+    )
+    if local_path is None:
+        return None, error or "The archived file could not be downloaded."
+
+    # `download_law_file` names the destination from the hash of what it actually
+    # fetched (`_archive_name`), so a replaced edition lands under a different filename
+    # than the archived one and cannot overwrite it. Whatever arrived is safely on disk;
+    # the only open question is which version those bytes belong to.
+    owner = (
+        db.query(RegDocumentVersion)
+        .filter(
+            RegDocumentVersion.document_id == version.document_id,
+            RegDocumentVersion.content_hash == content_hash,
+        )
+        .first()
+    )
+    if owner is not None:
+        relative = str(local_path.relative_to(PROJECT_ROOT))
+        if owner.local_path != relative:
+            owner.local_path = relative
+            db.commit()
+        if owner.id == version.id:
+            return _law_archive_path(version), None
+
+    # The bytes are a different edition than the one asked for. Leave every version row
+    # otherwise untouched: creating a version and deciding `is_current` across its
+    # siblings is sync's job (`capture_document_version`), it is admin-gated under the
+    # corpus write policy, and an unsynced edition sitting in the archive is exactly what
+    # `download_law_file` expects to find on the next run.
+    return None, (
+        "SBP no longer serves this edition at its source URL - the file there is now a "
+        "different version. The archived copy is not available on this deployment."
+    )
 
 
 @asynccontextmanager
@@ -1739,13 +1840,13 @@ def get_law_version(document_id: str, version_id: str, db: Session = Depends(get
         "doc_type": version.document.doc_type,
         "part_label": version.document.part_label,
     }
+    # A pure read: reports what is on disk and never fetches. Downloading belongs to
+    # `/file`, where the caller has actually asked for the bytes.
     payload["archive_path"] = None
-    if version.local_path:
-        candidate = (PROJECT_ROOT / version.local_path).resolve()
-        archive_root = (PROJECT_ROOT / "attachments").resolve()
-        if archive_root in candidate.parents and candidate.is_file():
-            payload["archive_path"] = version.local_path
-            payload["archive_size"] = candidate.stat().st_size
+    candidate = _law_archive_path(version)
+    if candidate is not None:
+        payload["archive_path"] = version.local_path
+        payload["archive_size"] = candidate.stat().st_size
     return payload
 
 
@@ -1789,13 +1890,14 @@ def get_law_file(document_id: str, version_id: str | None = None, db: Session = 
         version = query.filter(RegDocumentVersion.id == version_id).first()
     else:
         version = query.filter(RegDocumentVersion.is_current == 1).first()
-    if version is None or not version.local_path:
+    if version is None:
         return JSONResponse({"error": "No archived file for this version"}, status_code=404)
 
-    candidate = (PROJECT_ROOT / version.local_path).resolve()
-    archive_root = (PROJECT_ROOT / "attachments").resolve()
-    if archive_root not in candidate.parents or not candidate.is_file():
-        return JSONResponse({"error": "Archived file is missing"}, status_code=404)
+    candidate, cache_error = _ensure_law_version_cached(db, version)
+    if candidate is None:
+        return JSONResponse(
+            {"error": cache_error or "Archived file is missing"}, status_code=404
+        )
     # `inline`, not the default `attachment`: the reader renders this in an iframe, and an
     # attachment disposition makes the browser download it instead of showing it. The
     # filename is kept so saving it from the viewer still gets a meaningful name.

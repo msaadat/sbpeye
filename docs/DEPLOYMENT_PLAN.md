@@ -1171,6 +1171,12 @@ Beyond the plan:
   fastembed is on the hot path. `libgl1` and `libglib2.0-0` are for opencv via docling and
   matter only when a checklist is generated.
 - **No data ships.** `sbpeye.db` is excluded along with `chroma_db/` and `files/`, per 5.3.
+- **No `VOLUME` instruction.** Railway fails the build outright with *"docker VOLUME at Line
+  N is not supported, use Railway Volumes"*. It bought nothing: a bind mount or a Railway
+  volume attaches to `/data` regardless, and the instruction only changes what an otherwise
+  undeclared `docker run` does with writes there. `ENV SBPEYE_DATA_DIR=/data` stays, so a
+  plain `docker run -v …:/data` still behaves the way Railway does. Verified after removing
+  it: the container boots, `/healthz` is green, and it creates its databases on the mount.
 
 `.dockerignore` takes the build context from **7.5 GB to 17.9 MB**.
 

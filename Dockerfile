@@ -67,10 +67,14 @@ RUN python -c "\
 from fastembed import TextEmbedding; \
 TextEmbedding(model_name='BAAI/bge-base-en-v1.5', cache_dir='/opt/models')"
 
-# The writable volume. Overridden by Railway's own SBPEYE_DATA_DIR, and set here so a
-# plain `docker run -v ...:/data` behaves the same way.
+# Where mutable data lives. Set as a default so a plain `docker run -v ...:/data` behaves
+# the same way Railway does; Railway sets it explicitly too.
+#
+# Deliberately no `VOLUME` instruction: Railway rejects the build outright with "docker
+# VOLUME is not supported, use Railway Volumes". It bought nothing anyway — a bind mount
+# or a Railway volume attaches to this path regardless, and declaring it only changes
+# what an *undeclared* `docker run` does with writes to it.
 ENV SBPEYE_DATA_DIR=/data
-VOLUME ["/data"]
 
 # run.py reads $PORT and falls back to 8000. Railway injects the port it routes to.
 EXPOSE 8000

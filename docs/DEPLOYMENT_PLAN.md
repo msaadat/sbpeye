@@ -74,8 +74,35 @@ write to the real `sbpeye_app.db`, and the data loss recorded with it.
 
 ### 0.2 Not started
 
-Section 8, and the Railway half of section 9 (9.2, 9.3). Section 5 needs no code (5.1); the
-container half of 9 is done (9.1.1-9.1.4, 11.1).
+**Section 8.** Still 6 of 3653 circulars with a summary and 4 with a checklist, measured
+against the corpus in git — so 8.1's finding stands unchanged and testers would see the two
+most visible AI features as blank.
+
+### 0.2.1 Live, and what is outstanding on it
+
+The Railway half of section 9 is no longer "not started": the service is deployed and
+serving. Volume `sbpeye-volume-76qt` is mounted at `/data` on the Hobby plan (9.2), the
+environment is set (9.3), and `/healthz` answers.
+
+| On the volume | State |
+|---|---|
+| `sbpeye.db` | 70 MB — uploaded |
+| `chroma_db/` | 522 MB — uploaded |
+| `files/laws/` | 108 files — uploaded (5.7.4) |
+| `files/cache/html/`, `files/circulars/`, `files/cache/parses/` | partial; `push` per subtree |
+
+Two things outstanding, in order:
+
+1. **`/healthz` reports `vector_store: "ok (empty)"` while a 522 MB store sits on the
+   volume.** Not a fault and not a format problem — `chromadb.PersistentClient` is
+   constructed at import (`database.py:88`), so the process is still holding the empty store
+   it created on its own first boot. **The redeploy in 9.6 step 8 is what picks up the
+   uploaded one**, and until it happens search returns nothing. This is the state 9.6 step 8
+   exists to resolve, reached and not yet acted on.
+2. **The rest of `files/`** (5.7.4), without which 9.5.1's IP block takes out document and
+   law viewing for every user.
+
+Then verification items 4 and 6 (11), both of which need the live deployment.
 
 ### 0.3 Sequencing
 
@@ -93,12 +120,18 @@ is now in. Sections 6 and 8 are small and can be done in any order.
                                  12. tree consolidation ✔ ───────┘
 ```
 
-Sections 2, 3 and 4 are in. Section 7 (auth) is now the largest remaining piece, and section
-12 is unblocked — it was waiting on 10.3, which is closed.
+Sections 2, 3 and 4 are in. Section 7 (auth) is done, and section 12 is unblocked — it was
+waiting on 10.3, which is closed. Section 8 is the only work section not started (0.2).
 
-Section 5 turned out to need no code at all — the corpus and vector store are uploaded to the
-volume with the Railway CLI (5.1). That closed what had been a blocker (5.5) and removed the
-seed-copy machinery this plan originally specified (5.2).
+Section 5 needed no code **for the corpus** — `sbpeye.db` and `chroma_db/` are two paths
+uploaded with the Railway CLI (5.1). That closed what had been a blocker (5.5) and removed
+the seed-copy machinery this plan originally specified (5.2).
+
+> **Correction.** "Section 5 turned out to need no code at all" held only while section 5
+> meant the corpus. 9.5.1 then made the 963 MB `files/` tree a deployment requirement too,
+> and 5251 files is a different problem from 11: the CLI has no resume, and re-running a
+> timed-out directory upload nests it rather than continuing it (5.7.1). That needed a tool
+> after all — `scripts/sync_volume.py`, 5.7.4.
 
 ### 0.4 Test baseline
 
@@ -658,9 +691,18 @@ railway volume files -v <volume> upload ./chroma_db /chroma_db
 ```
 
 `files upload` accepts a directory as well as a file (`--concurrency` defaults to 32), so the
-store goes up as a directory rather than a tarball — a tarball would have to be extracted
-inside the container, and Railway documents no shell for that. `/` is the volume root, which
-is the `/data` mount; confirm placement with `railway volume files -v <volume> list /`.
+store goes up as a directory rather than a tarball. `/` is the volume root, which is the
+`/data` mount.
+
+> **Correction.** This section said a tarball "would have to be extracted inside the
+> container, and Railway documents no shell for that." **`railway ssh` is that shell**, and
+> the image has `/usr/bin/tar`. `railway ssh -s <service> -- sh -c '<command>'` runs a
+> command in the running container and returns its output. The choice between directory
+> upload and a tarball is therefore open, not forced — and 5.7 explains why the tarball
+> route is the better one for the file trees.
+>
+> This section also said to "confirm placement with `railway volume files list /`". Do not:
+> that command **silently caps its output** (5.7.2). Use `find` over `railway ssh` instead.
 
 Note the flag position: `-v/--volume` is an option on `files`, not on `volume`, so it sits
 between the two. `railway volume <name> files …` and `railway volume -v <name> files …` are
@@ -774,6 +816,111 @@ If this is ever wired in as automatic recovery rather than run by hand, note the
 `reset_collection()` (`database.py:100`) drops the collection and rebinds the module-level
 handle that `search`, `chat_retrieval` and `scraper.circulars` bound at import. The CLI can
 assume it is alone; a rebuild inside the serving process has readers arriving mid-swap.
+
+### 5.7 What `railway volume files upload` actually does
+
+Found the hard way, uploading `files/` (963 MB, 5251 files) after the block in 9.5.1 made
+that upload necessary. The command timed out partway, was re-run, and the re-run did not
+resume — it nested. Everything below is measured against CLI 5.41.2.
+
+#### 5.7.1 A directory upload onto an existing path nests rather than merging
+
+`upload <dir> <remote>` has `cp -r` semantics: if `<remote>` already exists as a directory,
+the source is placed **inside** it. It does not merge, does not skip, does not error.
+Verified with a two-file probe directory:
+
+| Run | Remote path | Reported |
+|---|---|---|
+| 1st (`/probe_test` absent) | `/probe_test/{a,b}.txt` | `Uploaded … to /probe_test` |
+| 2nd (`/probe_test` present) | `/probe_test/probe/{a,b}.txt` | `Uploaded … to /probe_test/probe` |
+
+So re-running a timed-out directory upload is not a resume. It is a second, misplaced copy.
+What this produced on the volume:
+
+| Remote path | Files | Should have been |
+|---|---|---|
+| `/data/files/cache/html/html/` | 2556 | `/data/files/cache/html/` |
+| `/data/files/laws/laws/` | 106 | `/data/files/laws/` |
+
+Nothing was lost — 225 MB was intact, one level too deep — and a `mv` inside the container
+put it right in seconds rather than re-sending it. But nothing warned either: `list` showed
+plausible-looking directories and the app simply found no files.
+
+**`--overwrite` is not the fix.** It governs replacing an existing path; it does not change
+the nesting rule. 9.6 step 7 calls it "required, not optional", which is correct for the two
+single-file corpus uploads that section is about and **wrong if generalised to directories**.
+
+#### 5.7.2 `railway volume files list` truncates without saying so
+
+`list` on `/files/cache/html` reported **5** files. `find` over `railway ssh` on the same
+directory reported **2561**. There is no pagination cursor in the JSON and no indication the
+result is partial.
+
+Any verification built on `list` — including 9.6 step 7's `list /` — can therefore report a
+directory as nearly empty when it is full. Use:
+
+```bash
+railway ssh -s <service> -- sh -c "find /data/files -type f -printf '%s\t%P\n'"
+```
+
+That returns the whole tree, with sizes, in one call.
+
+#### 5.7.3 Per-file and per-directory operations do not scale
+
+Each CLI invocation costs **~6.5 s** of handshake before it does any work. That sets the
+floor on two approaches this plan might otherwise have reached for:
+
+| Approach | Calls | Cost |
+|---|---|---|
+| Walk the tree with `list` to diff it | 1985 directories | ~3.6 hours |
+| Upload the missing files one at a time | 2664 files | ~4.8 hours |
+
+Both are why the sync tool packs into one tar and splits it into chunks instead: the same
+2664 files go up as a handful of single-file uploads.
+
+#### 5.7.4 The tool: `scripts/sync_volume.py`
+
+Written for this, and idempotent so an interrupted run is resumed by re-running it.
+**Operator runbook: `docs/VOLUME_SYNC.md`** — this section records why it exists; that one
+records how to drive it.
+
+| Phase | Does |
+|---|---|
+| `status [SUBTREE]` | Diffs local against the volume by path and size |
+| `fix-nesting --apply` | Moves a nested directory's contents up one level, in-container |
+| `prune-duplicates --apply` | Removes nested leftovers, only where the correct copy matches |
+| `push [SUBTREE] --apply` | Tars what is missing, splits it, uploads, extracts, re-verifies |
+| `cleanup --apply` | Removes the staging directory |
+
+Three details worth keeping:
+
+- **Chunks are labelled per subtree.** The extract is `cat <stage>/<label>.part.* | tar xzf -`,
+  and an unlabelled glob would concatenate a previous subtree's leftover chunks into the
+  next tar. This was a real bug in the first version, found when adding subtree scoping.
+- **A subtree's chunks are deleted after its extract succeeds**, so staging never holds a
+  second copy of the payload. 723 MB of chunks on top of a 1.5 GB tree matters on Hobby's
+  5 GB.
+- **Size, not just presence, decides what to re-send.** A file interrupted mid-upload is
+  present and short; treating existence as success would leave it truncated forever. Six
+  such files existed after the timed-out run.
+
+`SUBTREE` exists so the tree can go up in stages, **laws first** — it is the archive 3.4.1
+and 12.2 establish cannot be re-fetched:
+
+```bash
+python scripts/sync_volume.py push laws --apply
+python scripts/sync_volume.py push cache/parses --apply
+python scripts/sync_volume.py push cache/html --apply
+python scripts/sync_volume.py push circulars --apply
+```
+
+#### 5.7.5 Git Bash mangles remote paths
+
+On Windows, MSYS rewrites a leading-slash argument into a Windows path before the CLI sees
+it: `list /` became `Failed to list remote directory /data/D:/Progs/Git/`. Export
+`MSYS_NO_PATHCONV=1` for any raw `railway` command carrying a remote path. `sync_volume.py`
+is unaffected — Python's `subprocess` does no such rewriting, which is part of why the tool
+is Python rather than shell.
 
 ---
 
@@ -1332,17 +1479,26 @@ solve. This is not a bug in the app and no amount of retrying fixes it.
 | The scheduled EcoData refresh (6.4) | Nobody — it fails on a timer and logs |
 
 **The mitigation is to upload what would otherwise be fetched.** All three are already on the
-volume's sibling paths and none of them ship in the image:
+volume's sibling paths and none of them ship in the image.
 
-```bash
-railway volume files -v <volume> upload --overwrite ./files/cache/html /files/cache/html
-railway volume files -v <volume> upload --overwrite ./files/circulars /files/circulars
-railway volume files -v <volume> upload --overwrite ./files/laws /files/laws
-```
+> **Correction.** This section originally gave three raw `railway volume files upload`
+> commands for the three trees. **Do not run them.** At 963 MB across 5251 files the upload
+> times out partway, and re-running it nests rather than resumes (5.7.1) — which is exactly
+> what happened, leaving 2662 files one directory too deep. Use the tool instead:
+>
+> ```bash
+> python scripts/sync_volume.py push laws --apply
+> python scripts/sync_volume.py push cache/parses --apply
+> python scripts/sync_volume.py push cache/html --apply
+> python scripts/sync_volume.py push circulars --apply
+> ```
+>
+> Laws first: it is the one tree that cannot be re-fetched (3.4.1). Re-run any command that
+> dies; it resumes. Confirm with `python scripts/sync_volume.py status`.
 
 `cache/html` covers **3649 of 3653 circulars** (99%), because `fetch_page_cached` consults the
 cache before the network and the key is `uuid5(NAMESPACE_URL, url)`, which is stable across
-machines. 318 MB in 3768 files, so it is the slow upload; `--concurrency 64` helps.
+machines. 318 MB in 3768 files, so it is the slow upload.
 
 Budget: 963 MB of file trees plus the 591 MB corpus is roughly 1.55 GB against Hobby's 5 GB.
 
@@ -1411,11 +1567,19 @@ Volume sizes at time of writing: `sbpeye.db` 70 MB, `chroma_db/` 521 MB.
    ```bash
    railway volume files -v <volume> upload --overwrite ./sbpeye.db /sbpeye.db
    railway volume files -v <volume> upload --overwrite ./chroma_db /chroma_db
-   railway volume files -v <volume> list /
    ```
 
    `/` is the volume root, which is the `/data` mount. 521 MB across 11 files takes a few
    minutes.
+
+   > **Correction, two parts.** `--overwrite` being required is right *here* — these are two
+   > known paths replaced wholesale. It does **not** generalise to the file trees: for a
+   > directory upload the failure mode is nesting, not refusal, and `--overwrite` does not
+   > prevent it (5.7.1). Use `scripts/sync_volume.py` for `files/`.
+   >
+   > The verification line was `railway volume files list /`. That command truncates its
+   > output without saying so (5.7.2) and will under-report a directory. Verify with
+   > `python scripts/sync_volume.py status`, or `railway ssh -s <service> -- sh -c "du -sh /data/*"`.
 
    **Re-uploading onto a live deployment later is a different problem.** With testers using
    it, "nothing writes during the window" stops being true. The way to get the guarantee back
@@ -1423,8 +1587,13 @@ Volume sizes at time of writing: `sbpeye.db` 70 MB, `chroma_db/` 521 MB.
    `SBPEYE_DATA_DIR=/data/_staging` and redeploy, so the process opens
    `/data/_staging/chroma_db` and never touches the target; upload to `/chroma_db`; then set
    `SBPEYE_DATA_DIR=/data` and redeploy onto the new store. Note the staging directory has to
-   exist — nothing creates `DATA_ROOT` — so upload a throwaway file into it first, or make
-   `DATA_ROOT` self-creating in `env.py`.
+   exist — nothing creates `DATA_ROOT`.
+
+   > **Simplification.** That last point suggested uploading a throwaway file to bring the
+   > staging directory into being, or making `DATA_ROOT` self-creating in `env.py`. Neither
+   > is needed: `railway ssh -s <service> -- mkdir -p /data/_staging` does it directly
+   > (5.1 correction). Making `DATA_ROOT` self-creating is still worth doing on its own
+   > merits, but it is no longer a prerequisite for this procedure.
 
 8. **Redeploy** — same three-dot menu, `railway up`, or a push — and confirm `/healthz` reports `vector_store: "ok"` rather than
    `"ok (empty)"`. A search returning results is the proof the container's chromadb opened a

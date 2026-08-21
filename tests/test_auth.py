@@ -218,8 +218,32 @@ def test_link_discovery_explains_itself_rather_than_bare_403(client, db_factory)
     response = test_client.post("/api/circulars/open", json={"url": "https://x"})
 
     assert response.status_code == 403
-    assert "administrators" in response.json()["detail"]
-    assert "Ask an admin" in response.json()["detail"]
+    assert "administrators" in response.json()["error"]
+    assert "Ask an admin" in response.json()["error"]
+
+
+@pytest.mark.parametrize("path", [
+    "/api/circulars/sync",
+    "/api/circulars/c1/generate",
+    "/api/settings",
+])
+def test_a_refusal_arrives_in_the_shape_the_client_reads(client, db_factory, path):
+    """`{"error": ...}`, like every other failure the application returns.
+
+    FastAPI answers a raised `HTTPException` with `{"detail": ...}`, which the browser
+    client does not read — so every admin-only route explained itself into a key nobody
+    looked at, and the user saw "Request failed with 403" instead.
+    """
+    test_client, _ = client
+    sign_out(test_client)
+    sign_in(test_client, db_factory, is_admin=False)
+
+    response = test_client.post(path, json={})
+
+    assert response.status_code == 403
+    body = response.json()
+    assert "detail" not in body
+    assert "administrators" in body["error"]
 
 
 def test_the_trace_console_is_admin_only(client, db_factory):

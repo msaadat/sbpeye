@@ -13,9 +13,15 @@ import {
   type ConsolidationChainMember,
   type ConsolidationResponse,
 } from '@/lib/api'
+import { ADMIN_ONLY_EMPTY_HINT, adminOnlyHint } from '@/lib/adminOnly'
+import { useCurrentUser } from '@/lib/useCurrentUser'
 
 const props = defineProps<{ circularId: string }>()
 const emit = defineEmits<{ navigate: [id: string] }>()
+
+// Building a consolidation writes the shared corpus, so the server allows it only to an
+// admin. The button stays visible and says so rather than disappearing.
+const { isAdmin, load: loadCurrentUser } = useCurrentUser()
 
 const payload = ref<ConsolidationResponse | null>(null)
 const loading = ref(false)
@@ -169,7 +175,10 @@ async function generate() {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  void loadCurrentUser()
+  void load()
+})
 onBeforeUnmount(stopPolling)
 </script>
 
@@ -242,8 +251,19 @@ onBeforeUnmount(stopPolling)
 
         <div v-else-if="!consolidation" class="consolidated-empty">
           <i class="pi pi-sparkles" />
-          <p>No consolidated view has been generated for this chain yet.</p>
-          <Button icon="pi pi-sparkles" label="Generate consolidated view" size="small" @click="generate" />
+          <p>
+            No consolidated view has been generated for this chain yet.
+            <template v-if="!isAdmin">{{ ADMIN_ONLY_EMPTY_HINT }}</template>
+          </p>
+          <span class="admin-gate" :title="isAdmin ? '' : adminOnlyHint('Building a consolidated view')">
+            <Button
+              icon="pi pi-sparkles"
+              label="Generate consolidated view"
+              size="small"
+              :disabled="!isAdmin"
+              @click="generate"
+            />
+          </span>
         </div>
 
         <template v-else>
@@ -257,18 +277,22 @@ onBeforeUnmount(stopPolling)
                 ({{ memberDate(consolidation.as_of_circular_id) }})
               </span>
             </div>
-            <Button
-              icon="pi pi-refresh"
-              :label="consolidation.stale ? 'Regenerate (stale)' : 'Regenerate'"
-              text
-              size="small"
-              @click="generate"
-            />
+            <span class="admin-gate" :title="isAdmin ? '' : adminOnlyHint('Regenerating a consolidated view')">
+              <Button
+                icon="pi pi-refresh"
+                :label="consolidation.stale ? 'Regenerate (stale)' : 'Regenerate'"
+                text
+                size="small"
+                :disabled="!isAdmin"
+                @click="generate"
+              />
+            </span>
           </div>
 
           <Message v-if="consolidation.stale" severity="warn" :closable="false">
             The chain changed after this consolidation was generated — a newer amendment
-            may be missing. Regenerate to bring it up to date.
+            may be missing.
+            {{ isAdmin ? 'Regenerate to bring it up to date.' : ADMIN_ONLY_EMPTY_HINT }}
           </Message>
 
           <section v-for="group in activeGroups" :key="group.section" class="requirement-group">

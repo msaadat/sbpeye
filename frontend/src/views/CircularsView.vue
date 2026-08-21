@@ -628,8 +628,11 @@ onBeforeUnmount(() => searchController?.abort())
           @click="toggleSelectionMode"
         />
         <Button label="CSV" icon="pi pi-download" size="small" text title="Export CSV" :loading="exportLoading" @click="exportCsv" />
-        <Button label="ZIP" icon="pi pi-file-zip" size="small" text title="Download selected as ZIP" :disabled="!selectedIds.length" :loading="zipLoading" @click="downloadSelectedZip" />
-        <Button label="Chat" icon="pi pi-comments" size="small" text title="Open selected in Chat" :disabled="!selectedIds.length" @click="handoffToChat" />
+        <!-- Both act on the ticked set, so they appear with one rather than sitting
+             greyed out. `selectedIds` is emptied when selection mode closes, so its
+             length is the only condition needed. -->
+        <Button v-if="selectedIds.length" label="ZIP" icon="pi pi-file-zip" size="small" text title="Download selected as ZIP" :loading="zipLoading" @click="downloadSelectedZip" />
+        <Button v-if="selectedIds.length" label="Chat" icon="pi pi-comments" size="small" text title="Open selected in Chat" @click="handoffToChat" />
       </div>
     </section>
 

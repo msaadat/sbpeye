@@ -8,6 +8,7 @@ import Toast from 'primevue/toast'
 import { useToast } from 'primevue/usetoast'
 import SbpNewsPanel from '@/components/SbpNewsPanel.vue'
 import { getAppStatus, logout, startCircularSync, type ApiError, type AppStatus, type CircularSyncStatus } from '@/lib/api'
+import { adminOnlyHint, adminOnlyLabel } from '@/lib/adminOnly'
 import { useCurrentUser } from '@/lib/useCurrentUser'
 import { useLlmDebugState } from '@/lib/useLlmDebugState'
 import { useLlmStatus } from '@/lib/useLlmStatus'
@@ -202,7 +203,10 @@ const syncIcon = computed(() => {
   return 'pi pi-refresh'
 })
 const syncButtonTitle = computed(() => {
-  return `${statusLabel.value}\n${statusDetail.value}`
+  const base = `${statusLabel.value}\n${statusDetail.value}`
+  // The badge keeps reporting freshness to everyone — that is worth knowing whoever you
+  // are. Only starting a sync belongs to the admin, so only that is spelled out here.
+  return isAdmin.value ? base : `${base}\n${adminOnlyHint('Starting a sync')}`
 })
 
 function updateStatusPolling() {
@@ -405,17 +409,22 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="sidebar-tools">
-        <Button
-          text
-          rounded
-          class="sync-status-button"
-          :class="`is-${syncStaleness}`"
-          :icon="syncIcon"
-          :aria-label="syncRunning ? 'Circular sync running' : 'Sync circulars'"
-          :title="syncButtonTitle"
-          :disabled="syncRunning || syncStarting"
-          @click="startSync"
-        />
+        <!-- The title sits on the wrapper: a disabled button swallows its own hover
+             events, and the explanation is needed exactly when it is disabled. -->
+        <span class="admin-gate" :title="syncButtonTitle">
+          <Button
+            text
+            rounded
+            class="sync-status-button"
+            :class="`is-${syncStaleness}`"
+            :icon="syncIcon"
+            :aria-label="isAdmin
+              ? (syncRunning ? 'Circular sync running' : 'Sync circulars')
+              : adminOnlyLabel('Circular sync status')"
+            :disabled="!isAdmin || syncRunning || syncStarting"
+            @click="startSync"
+          />
+        </span>
 
         <button
           type="button"

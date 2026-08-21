@@ -530,10 +530,6 @@ a {
   height: 2rem;
 }
 
-.sync-status-button:disabled {
-  opacity: 1;
-}
-
 .sync-status-button.is-checking,
 .sync-status-button.is-running {
   color: var(--sbp-muted);
@@ -549,6 +545,23 @@ a {
 
 .sync-status-button.is-error {
   color: var(--sbp-danger);
+}
+
+/* Wrapper for a control the current account may see but not use. A disabled button
+   swallows its own hover events, so the explanatory title has to hang on something
+   around it. */
+.admin-gate {
+  display: inline-flex;
+}
+
+/* The sync icon doubles as a freshness indicator, and freshness is worth reporting to an
+   account that cannot start a sync — so it is not dimmed while disabled, which would read
+   as broken rather than as unavailable. Needs the `.sidebar-tools` prefix to outspecify
+   PrimeVue's own `.p-component:disabled`, injected after this sheet. */
+.sidebar-tools .sync-status-button:disabled,
+.sidebar-tools .sync-status-button.p-disabled {
+  opacity: 1;
+  cursor: default;
 }
 
 .llm-status {

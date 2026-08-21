@@ -6,6 +6,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from sqlalchemy.orm import Session, aliased
 from sqlalchemy import func, extract, and_, or_, text
 from urllib.parse import quote, urljoin, urlparse, urlencode
@@ -410,6 +411,29 @@ def _bind_dependency_overrides(routes) -> None:
 
 _bind_dependency_overrides(debug_router.routes)
 _bind_dependency_overrides(auth_router.routes)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_as_error(request: Request, exc: StarletteHTTPException):
+    """Report raised exceptions in the shape the rest of the application uses.
+
+    Everything that answers with a failure here writes `{"error": ...}` — the auth
+    middleware, and every route that returns a `JSONResponse` itself — and the browser
+    client reads that key. FastAPI's own handler writes `{"detail": ...}` instead, so an
+    `HTTPException` arrived at the SPA as an object it could not read, and a carefully
+    worded refusal ("Indexing a new circular from a link is limited to administrators…
+    Ask an admin to add it") was displayed as "Request failed with 403". One shape, so
+    the message a route bothers to write is the message the user gets.
+    """
+    detail = exc.detail
+    payload = (
+        {"error": detail} if isinstance(detail, str)
+        # A non-string detail is structured data — FastAPI's validation errors are the
+        # usual case. It is kept intact under its own key rather than stringified, with
+        # a readable sentence alongside for the client that only knows how to show one.
+        else {"error": "The request could not be completed.", "detail": detail}
+    )
+    return JSONResponse(payload, status_code=exc.status_code, headers=exc.headers)
 
 
 @app.middleware("http")

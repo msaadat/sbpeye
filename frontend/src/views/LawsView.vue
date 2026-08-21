@@ -12,6 +12,8 @@ import RelationshipGroups, {
 import SummarySection from '@/components/SummarySection.vue'
 import { useResizablePane } from '@/lib/useResizablePane'
 import { useAiGeneration } from '@/lib/useAiGeneration'
+import { ADMIN_ONLY_EMPTY_HINT, adminOnlyHint, adminOnlyLabel } from '@/lib/adminOnly'
+import { useCurrentUser } from '@/lib/useCurrentUser'
 import {
   buildLawFileUrl,
   downloadLawChecklistExcel,
@@ -437,6 +439,9 @@ function formatDate(value?: string | null): string {
 const analysisRail = useResizablePane('sbp:lawRailWidth', 336, 240, 480, { reverse: true })
 const generationPopover = ref<InstanceType<typeof Popover> | null>(null)
 const exportingChecklist = ref(false)
+// Generation writes the shared corpus and is admin-only on the server; the controls stay
+// visible and explain themselves rather than vanishing for a tester.
+const { isAdmin, load: loadCurrentUser } = useCurrentUser()
 
 const { activeJob, generate: startGeneration, stop: stopGeneration } = useAiGeneration({
   start: (feature) => startLawGeneration(selectedId.value, feature as LawGenerationAction),
@@ -916,6 +921,7 @@ watch(typeFilter, () => {
 watch(selectedId, (id) => void loadDetail(id), { immediate: true })
 
 onMounted(() => {
+  void loadCurrentUser()
   void loadCorpus()
   // Facet source of truth; failing to load it just costs us the chips.
   getLawTypes()
@@ -1215,17 +1221,24 @@ onMounted(() => {
             </p>
           </div>
           <div class="reader-actions">
-            <Button
+            <span
               v-if="!analysisBlocker"
-              icon="pi pi-sparkles"
-              text
-              rounded
-              severity="help"
-              :loading="Boolean(activeJob)"
-              aria-label="Generate AI analysis"
-              :title="activeJob ? `Generating ${activeJob.feature}` : 'Generate AI analysis'"
-              @click="generationPopover?.toggle($event)"
-            />
+              class="admin-gate"
+              :title="isAdmin
+                ? (activeJob ? `Generating ${activeJob.feature}` : 'Generate AI analysis')
+                : adminOnlyHint('AI analysis')"
+            >
+              <Button
+                icon="pi pi-sparkles"
+                text
+                rounded
+                severity="help"
+                :loading="Boolean(activeJob)"
+                :disabled="!isAdmin"
+                :aria-label="isAdmin ? 'Generate AI analysis' : adminOnlyLabel('Generate AI analysis')"
+                @click="generationPopover?.toggle($event)"
+              />
+            </span>
             <Button
               v-if="detail.checklist_available"
               icon="pi pi-file-excel"
@@ -1383,16 +1396,20 @@ onMounted(() => {
               <i class="pi pi-sparkles" />
               <p class="detail-rail-empty-title">No AI analysis yet</p>
               <p class="detail-rail-empty-text">
-                Generate a summary, tags, relationships and the regulatory values this
-                document states. The obligations checklist is generated separately.
+                A summary, tags, relationships and the regulatory values this document
+                states can be generated. The obligations checklist is generated separately.
+                <template v-if="!isAdmin">{{ ADMIN_ONLY_EMPTY_HINT }}</template>
               </p>
-              <Button
-                icon="pi pi-sparkles"
-                label="Generate analysis"
-                size="small"
-                :loading="Boolean(activeJob)"
-                @click="generate('all')"
-              />
+              <span class="admin-gate" :title="isAdmin ? '' : adminOnlyHint('AI analysis')">
+                <Button
+                  icon="pi pi-sparkles"
+                  label="Generate analysis"
+                  size="small"
+                  :loading="Boolean(activeJob)"
+                  :disabled="!isAdmin"
+                  @click="generate('all')"
+                />
+              </span>
             </div>
           </template>
         </aside>

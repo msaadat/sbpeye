@@ -5,9 +5,14 @@ import Button from 'primevue/button'
 import Message from 'primevue/message'
 import ProgressSpinner from 'primevue/progressspinner'
 import { buildDocumentContentUrl, resolveDocument, type ResolvedDocument } from '@/lib/api'
+import { adminOnlyHint } from '@/lib/adminOnly'
+import { useCurrentUser } from '@/lib/useCurrentUser'
 
 const PdfPreviewDialog = defineAsyncComponent(() => import('@/components/PdfPreviewDialog.vue'))
 const route = useRoute()
+// Re-fetching rewrites the cached copy every account reads, so the server keeps it with
+// the admin. Reading the document stays open to everyone.
+const { isAdmin, load: loadCurrentUser } = useCurrentUser()
 const document = ref<ResolvedDocument | null>(null)
 const loading = ref(true)
 const refreshing = ref(false)
@@ -43,7 +48,10 @@ async function load(refresh = false) {
   }
 }
 
-onMounted(() => load())
+onMounted(() => {
+  void loadCurrentUser()
+  void load()
+})
 </script>
 
 <template>
@@ -56,7 +64,16 @@ onMounted(() => load())
         <div class="route-error-actions">
           <Button v-if="isPdf" label="Open viewer" icon="pi pi-file-pdf" @click="pdfVisible = true" />
           <Button v-else as="a" :href="buildDocumentContentUrl(document.id)" label="Open local file" icon="pi pi-download" />
-          <Button label="Refresh from SBP" icon="pi pi-refresh" outlined :loading="refreshing" @click="load(true)" />
+          <span class="admin-gate" :title="isAdmin ? 'Re-fetch this document from SBP' : adminOnlyHint('Refreshing from SBP')">
+            <Button
+              label="Refresh from SBP"
+              icon="pi pi-refresh"
+              outlined
+              :loading="refreshing"
+              :disabled="!isAdmin"
+              @click="load(true)"
+            />
+          </span>
         </div>
       </section>
     </template>

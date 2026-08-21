@@ -25,6 +25,8 @@ import {
 } from '@/lib/api'
 import { useResizablePane } from '@/lib/useResizablePane'
 import { useAiGeneration } from '@/lib/useAiGeneration'
+import { ADMIN_ONLY_EMPTY_HINT, adminOnlyHint, adminOnlyLabel } from '@/lib/adminOnly'
+import { useCurrentUser } from '@/lib/useCurrentUser'
 import RelationshipGroups, {
   type RelationGroup,
 } from '@/components/RelationshipGroups.vue'
@@ -41,6 +43,9 @@ const props = defineProps<{ id: string, isPinned: boolean, pinPending: boolean }
 const emit = defineEmits<{ close: [], 'toggle-pin': [] }>()
 const router = useRouter()
 const toast = useToast()
+// Generation and re-fetching write the shared corpus, so the server allows them only to
+// an admin. The controls stay on the page for everyone and say why they are inert.
+const { isAdmin, load: loadCurrentUser } = useCurrentUser()
 
 const circular = ref<CircularDetail | null>(null)
 const source = ref<CircularSourceContent | null>(null)
@@ -333,7 +338,12 @@ async function exportChecklist() {
   }
 }
 
-onMounted(loadCircular)
+onMounted(() => {
+  // Deduplicated at the composable, so this costs nothing when the sidebar already
+  // loaded it — but a deep link straight to a circular must not race it.
+  void loadCurrentUser()
+  void loadCircular()
+})
 watch(() => props.id, loadCircular)
 </script>
 
@@ -369,16 +379,23 @@ watch(() => props.id, loadCircular)
             <span v-if="circular.date"><i class="pi pi-calendar" /> {{ formatDate(circular.date) }}</span>
           </div>
           <div class="detail-actions">
-            <Button
-              icon="pi pi-sparkles"
-              text
-              rounded
-              severity="help"
-              :loading="Boolean(activeJob)"
-              aria-label="Generate AI analysis"
-              :title="activeJob ? `Generating ${activeJob.feature}` : 'Generate AI analysis'"
-              @click="generationPopover?.toggle($event)"
-            />
+            <span
+              class="admin-gate"
+              :title="isAdmin
+                ? (activeJob ? `Generating ${activeJob.feature}` : 'Generate AI analysis')
+                : adminOnlyHint('AI analysis')"
+            >
+              <Button
+                icon="pi pi-sparkles"
+                text
+                rounded
+                severity="help"
+                :loading="Boolean(activeJob)"
+                :disabled="!isAdmin"
+                :aria-label="isAdmin ? 'Generate AI analysis' : adminOnlyLabel('Generate AI analysis')"
+                @click="generationPopover?.toggle($event)"
+              />
+            </span>
             <Button
               :icon="isPinned ? 'pi pi-bookmark-fill' : 'pi pi-bookmark'"
               text
@@ -414,7 +431,18 @@ watch(() => props.id, loadCircular)
               aria-label="View on SBP website"
               title="View on SBP website"
             />
-            <Button icon="pi pi-refresh" text rounded severity="secondary" :loading="refreshingSource" aria-label="Refresh from SBP" title="Refresh local copy from SBP" @click="refreshFromSbp" />
+            <span class="admin-gate" :title="isAdmin ? 'Refresh local copy from SBP' : adminOnlyHint('Refreshing from SBP')">
+              <Button
+                icon="pi pi-refresh"
+                text
+                rounded
+                severity="secondary"
+                :loading="refreshingSource"
+                :disabled="!isAdmin"
+                :aria-label="isAdmin ? 'Refresh from SBP' : adminOnlyLabel('Refresh from SBP')"
+                @click="refreshFromSbp"
+              />
+            </span>
             <Button
               v-if="hasRelationships"
               icon="pi pi-sitemap"
@@ -599,15 +627,20 @@ watch(() => props.id, loadCircular)
             <i class="pi pi-sparkles" />
             <p class="detail-rail-empty-title">No AI analysis yet</p>
             <p class="detail-rail-empty-text">
-              Generate a summary, tags, relationships, and regulatory values for this circular.
+              A summary, tags, relationships, and regulatory values can be generated for
+              this circular.
+              <template v-if="!isAdmin">{{ ADMIN_ONLY_EMPTY_HINT }}</template>
             </p>
-            <Button
-              icon="pi pi-sparkles"
-              label="Generate analysis"
-              size="small"
-              :loading="Boolean(activeJob)"
-              @click="generate('all')"
-            />
+            <span class="admin-gate" :title="isAdmin ? '' : adminOnlyHint('AI analysis')">
+              <Button
+                icon="pi pi-sparkles"
+                label="Generate analysis"
+                size="small"
+                :loading="Boolean(activeJob)"
+                :disabled="!isAdmin"
+                @click="generate('all')"
+              />
+            </span>
           </div>
         </aside>
       </div>

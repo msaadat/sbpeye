@@ -4,7 +4,7 @@ Operator runbook for `scripts/sync_volume.py`.
 
 The `files/` tree — 5251 files, 963 MB — has to reach the Railway volume because SBP blocks
 the deployment's IP, so anything the app would otherwise fetch on demand has to be there
-already (`DEPLOYMENT_PLAN.md` §9.5.1). It is gitignored and not in the image, so upload is
+already (`DEPLOYMENT_PLAN.md` §2.1). It is gitignored and not in the image, so upload is
 the only route.
 
 `railway volume files upload` cannot do this on its own. Read §"Why not the CLI directly"
@@ -38,7 +38,7 @@ Every mutating phase is a dry run unless `--apply` is passed.
 ## The normal path
 
 Push one subtree at a time, **laws first** — it is the archive that cannot be re-fetched
-(`DEPLOYMENT_PLAN.md` §3.4.1, §12.2). The rest is re-fetchable given an unblocked IP, so it
+(`DEPLOYMENT_PLAN.md` §3.7). The rest is re-fetchable given an unblocked IP, so it
 is the cheaper thing to lose.
 
 ```bash
@@ -83,7 +83,7 @@ and short, and treating existence as success would leave it truncated permanentl
 ## Why not the CLI directly
 
 Three properties of `railway volume files`, all measured against CLI 5.41.2. The full write-up
-is `DEPLOYMENT_PLAN.md` §5.7.
+is `DEPLOYMENT_PLAN.md` §2.5.
 
 **A directory upload onto an existing path nests.** `upload ./files/laws /files/laws` when
 `/files/laws` already exists writes `/files/laws/laws/` — `cp -r` semantics. It does not
@@ -149,10 +149,10 @@ item 11.6 checks that `git status` stays clean.
   unaffected — `subprocess` does no such rewriting, which is part of why it is Python.
 - **The volume is only reachable through a running container.** Both `railway ssh` and
   `railway volume files` proxy through it, so the service cannot be stopped first
-  (`DEPLOYMENT_PLAN.md` §9.6 step 7).
+  (`DEPLOYMENT_PLAN.md` §2.4).
 - **Do not push while the app is being used.** The extract writes into the tree the app
   reads. For `files/` the risk is low — a reader gets a file that appears mid-request — but
   the same is emphatically not true of `chroma_db/`, which must never be written under a
-  live process (§5.4 rule 1).
+  live process (`DEPLOYMENT_PLAN.md` §2.4).
 - **Uploaded files are root-owned**, since the container runs as root. Noted as production
-  hardening in §9.1.4, harmless for a test deploy.
+  hardening in `DEPLOYMENT_PLAN.md` §1.3, harmless for a test deploy.

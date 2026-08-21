@@ -67,9 +67,40 @@ const router = createRouter({
     },
     {
       // Admin-only server-side too; the view explains itself rather than 403-ing blankly.
+      //
+      // Tabs are child routes rather than local state so each one is addressable: a
+      // link to the index-health tab is a thing an operator wants to send someone, and
+      // a reload has to land back where they were rather than on the default.
       path: '/admin',
-      name: 'admin',
       component: () => import('@/views/AdminView.vue'),
+      children: [
+        { path: '', redirect: '/admin/corpus' },
+        {
+          path: 'corpus',
+          name: 'admin-corpus',
+          component: () => import('@/views/admin/AdminCorpusTab.vue'),
+        },
+        {
+          path: 'index',
+          name: 'admin-index',
+          component: () => import('@/views/admin/AdminIndexTab.vue'),
+        },
+        {
+          path: 'runs',
+          name: 'admin-runs',
+          component: () => import('@/views/admin/AdminRunsTab.vue'),
+        },
+        {
+          path: 'users',
+          name: 'admin-users',
+          component: () => import('@/views/admin/AdminUsersTab.vue'),
+        },
+        {
+          path: 'deployment',
+          name: 'admin-deployment',
+          component: () => import('@/views/admin/AdminDeploymentTab.vue'),
+        },
+      ],
     },
     {
       path: '/debug',

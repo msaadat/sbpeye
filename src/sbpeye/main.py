@@ -23,6 +23,7 @@ import threading
 
 from .database import PROJECT_ROOT, AppSessionLocal, engine, Base, get_app_db, get_db, SessionLocal, has_vector_store_data
 from .models import AIGenerationJob, Attachment, CachedDocument, SyncStatus, circular_sync_only, Circular, CircularEntity, CircularRelationship, EcoDataSeries, EcoDataEntry, RegDocument, RegDocumentVersion, Settings, ChatSession, ChatMessage, ResearchWorkspace, User, WorkspaceCircular, upsert_settings
+from .api.admin import router as admin_router
 from .api.debug import router as debug_router
 from .llm_debug import (
     bind_context,
@@ -165,17 +166,28 @@ def fail_interrupted_ai_jobs() -> None:
 
 
 def fail_interrupted_sync_jobs() -> None:
-    """Mark a previous process' in-flight circular sync as failed."""
+    """Mark a previous process' in-flight sync as failed, whichever corpus it scraped.
+
+    Deliberately *not* filtered through `circular_sync_only()`. Laws runs share this
+    table, and excluding them meant a killed `laws sync` left its row reading "running"
+    with no completion for ever — two such rows accumulated in the local corpus before
+    the admin console started displaying run history and made them visible.
+
+    The one case this could mislabel is a CLI laws sync in flight on the same corpus
+    while the server boots. It self-corrects: `_run_laws_sync` writes the terminal status
+    from its own session when it finishes, and that UPDATE lands after this one.
+    """
     db = SessionLocal()
     try:
         interrupted = db.query(SyncStatus).filter(
             SyncStatus.status.in_(("queued", "running")),
-            circular_sync_only(),
         ).all()
         for job in interrupted:
             job.status = "failed"
             job.error = "Sync was interrupted by a server restart."
-            job.completed_at = datetime.utcnow()
+            # `completed_at` stays NULL: the run has no known end. Stamping it with the
+            # restart time made run history report a sync killed two days ago as having
+            # taken 38 hours, which is a duration nothing measured.
         if interrupted:
             db.commit()
     finally:
@@ -384,6 +396,7 @@ app = FastAPI(
 # Keep routes flat in the application router. The FastAPI version used by this
 # project defers ``app.include_router`` behind an internal placeholder, which would
 # make literal-route shadow checks see the placeholder instead of the API routes.
+app.router.routes.extend(admin_router.routes)
 app.router.routes.extend(debug_router.routes)
 app.router.routes.extend(auth_router.routes)
 app.router._mark_routes_changed()
@@ -409,6 +422,7 @@ def _bind_dependency_overrides(routes) -> None:
             route.app = request_response(route.get_route_handler())
 
 
+_bind_dependency_overrides(admin_router.routes)
 _bind_dependency_overrides(debug_router.routes)
 _bind_dependency_overrides(auth_router.routes)
 
@@ -2255,6 +2269,15 @@ async def settings_page():
 # body from a page they navigated to.
 @app.get("/admin")
 async def admin_page():
+    return spa_index_response()
+
+
+# The console's tabs are child routes (`/admin/corpus`, `/admin/index`, …), so they have
+# to survive a reload and a pasted link, not only in-app navigation. Registered after the
+# literal `/admin` above, and it cannot shadow the admin API: that lives under
+# `/api/admin/…`, a different prefix entirely.
+@app.get("/admin/{path:path}")
+async def admin_spa_fallback(path: str):
     return spa_index_response()
 
 

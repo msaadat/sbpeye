@@ -789,6 +789,203 @@ export async function deleteUser(id: string): Promise<void> {
   })
 }
 
+/* ------------------------------------------------------------------ admin console
+ *
+ * Read-only operator status. Every call below is a GET that changes nothing — the
+ * console shows what the corpus holds and what the index can reach; syncing, indexing
+ * and AI generation stay on the CLI.
+ */
+
+/** A `{label, count}` row from a group-by, ordered largest first. */
+export interface AdminFacet {
+  label: string
+  count: number
+}
+
+/** How much of the corpus carries one AI-generated output. `total` can be 0. */
+export interface AdminCoverage {
+  feature: string
+  generated: number
+  total: number
+}
+
+export interface AdminCorpusStatus {
+  generated_at: string
+  circulars: {
+    total: number
+    by_status: Record<string, number>
+    by_department: AdminFacet[]
+    by_year: AdminFacet[]
+    earliest_date?: string | null
+    latest_date?: string | null
+    latest?: {
+      id: string
+      reference?: string | null
+      title: string
+      department?: string | null
+      date?: string | null
+    } | null
+    indexed_today: number
+    /** Circulars touched by any analysis feature — not the same as fully analysed. */
+    analysed: number
+    coverage: AdminCoverage[]
+  }
+  attachments: {
+    total: number
+    by_extraction_status: Record<string, number>
+    by_file_type: AdminFacet[]
+    vectorized: number
+    with_text: number
+    with_error: number
+  }
+  laws: {
+    documents: number
+    containers: number
+    parts: number
+    versions: number
+    current_versions: number
+    not_yet_in_force: number
+    circular_backed: number
+    external: number
+    delisted: number
+    stubs: number
+    vectorized_versions: number
+    /** Editions in force carrying any analysis feature. */
+    analysed: number
+    by_doc_type: AdminFacet[]
+    by_extraction_status: Record<string, number>
+    circular_links: number
+    coverage: AdminCoverage[]
+  }
+  relationships: { total: number; resolved: number; by_type: Record<string, number> }
+  entities: { total: number; by_subject_kind: Record<string, number> }
+  consolidations: { total: number; stale: number }
+}
+
+export interface AdminIndexStatus {
+  generated_at: string
+  embedding: { provider: string; model: string; fingerprint: string; chunker_version: string }
+  ledger: {
+    rows: number
+    by_status: Record<string, number>
+    by_source_kind: Record<string, number>
+    expected_chunks: number
+    indexed_chunks: number
+    searchable: number
+    last_indexed_at?: string | null
+    with_error: number
+  }
+  vector_store: { state: string; chunks: number | null; path: string }
+  /** `null` means the FTS table has not been created yet, which is not an error. */
+  fts: { circulars: number | null; laws: number | null }
+  drift: {
+    recorded_fingerprints: string[]
+    recorded_chunker_versions: string[]
+    /** `null` when nothing is recorded — unknown, not "matching". */
+    fingerprint_matches: boolean | null
+    chunker_matches: boolean | null
+  }
+}
+
+export interface AdminIndexAudit {
+  generated_at: string
+  duration_ms: number
+  is_complete: boolean
+  searchable_sources: number
+  status_counts: Record<string, number>
+  unsearchable: Record<string, number>
+  excluded_by_design: Record<string, number>
+  expected_chunks: number
+  indexed_chunks: number
+  orphan_chunks: number
+  stale_sources: number
+  embedding_fingerprint: string
+  chunker_version: string
+}
+
+export interface AdminSyncRun {
+  id: number
+  job_id?: string | null
+  kind: string
+  status: string
+  started_at?: string | null
+  completed_at?: string | null
+  duration_seconds?: number | null
+  processed_count?: number | null
+  skipped_count?: number | null
+  error_count?: number | null
+  parameters?: string | null
+  error?: string | null
+}
+
+export interface AdminAiJob {
+  id: string
+  target_kind: string
+  target_id?: string | null
+  target_label?: string | null
+  feature: string
+  status: string
+  result_status?: string | null
+  progress_completed: number
+  progress_total: number
+  created_at?: string | null
+  started_at?: string | null
+  completed_at?: string | null
+  error?: string | null
+}
+
+export interface AdminRunHistory {
+  generated_at: string
+  sync_runs: AdminSyncRun[]
+  ai_jobs: AdminAiJob[]
+}
+
+export interface AdminFileTree {
+  name: string
+  path: string
+  exists: boolean
+  /** False for the laws archive and the circular files — nothing may prune those. */
+  deletable: boolean
+  files: number | null
+  bytes: number | null
+}
+
+export interface AdminEnvironment {
+  generated_at: string
+  data_root: string
+  databases: Array<{ name: string; path: string; bytes: number | null }>
+  file_trees: AdminFileTree[]
+  capabilities: {
+    checklist_generation: boolean
+    llm_debug_allowed: boolean
+    vector_store: string
+    vector_store_chunks: number | null
+    ecodata_refresh_seconds?: string | null
+  }
+  embedding: { provider: string; model: string; fingerprint: string; chunker_version: string }
+}
+
+export async function getAdminCorpusStatus(): Promise<AdminCorpusStatus> {
+  return requestJson<AdminCorpusStatus>('/admin/corpus')
+}
+
+export async function getAdminIndexStatus(): Promise<AdminIndexStatus> {
+  return requestJson<AdminIndexStatus>('/admin/index')
+}
+
+/** Walks the whole vector store; slow by nature, and writes nothing. */
+export async function runAdminIndexAudit(): Promise<AdminIndexAudit> {
+  return requestJson<AdminIndexAudit>('/admin/index/audit')
+}
+
+export async function getAdminRunHistory(limit = 25): Promise<AdminRunHistory> {
+  return requestJson<AdminRunHistory>(`/admin/runs${toQueryString({ limit })}`)
+}
+
+export async function getAdminEnvironment(): Promise<AdminEnvironment> {
+  return requestJson<AdminEnvironment>('/admin/environment')
+}
+
 export async function getAppStatus(): Promise<AppStatus> {
   return requestJson<AppStatus>('/app/status')
 }

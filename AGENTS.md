@@ -178,6 +178,23 @@ sbpeye dry-run --dept bprd --year 2025  # Preview what would be scraped
 | POST | `/api/settings` | Save AI settings |
 | POST | `/api/settings/test` | Test AI connection |
 
+### Admin console (`api/admin.py`)
+
+Admin-gated at the router, and **read-only by design** — every route is a GET that changes
+nothing. Nothing here syncs, indexes or generates; those remain CLI commands, largely
+because the deployment cannot reach SBP at all (`DEPLOYMENT_PLAN.md` §2.1). The UI is
+`/admin`, whose tabs are child routes (`/admin/corpus`, `/admin/index`, `/admin/runs`,
+`/admin/users`, `/admin/deployment`) served by the `/admin/{path:path}` SPA fallback.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/admin/corpus` | Corpus composition and AI coverage — what `sbpeye stats` and `laws status` print, structured |
+| GET | `/api/admin/index` | Index health as *recorded* by the ledger, plus FTS sizes and embedding-fingerprint drift |
+| GET | `/api/admin/index/audit` | Live `reconcile(write=False)` against the vector store — a measurement, never a repair |
+| GET | `/api/admin/runs` | Sync runs (both corpora) and AI generation jobs, newest first |
+| GET | `/api/admin/environment` | Data root, database and file-tree sizes, and capability flags (docling, vector store, tracing) |
+| GET | `/api/admin/users` | User management (in `auth_routes.py`; shares the prefix) |
+
 ## Running the Project
 
 ```bash
@@ -227,3 +244,4 @@ cd frontend && npm run typecheck  # TypeScript type checking
 - AI config: Settings DB takes priority over env vars. Env vars: `AI_PROVIDER`, `AI_BASE_URL`, `AI_API_KEY`, `AI_MODEL`, `AI_CHAT_MODEL`
 - Circular scraping is done via CLI (`sbpeye circulars sync`), not from the web UI
 - All AI batch operations (summarize, tags, checklist, relationships) are run via CLI and results stored in DB
+- The admin console **reports** on all of the above and starts none of it. Reading corpus or index state must never mutate either — the audit route calls `reconcile(write=False)` for exactly that reason, and `tests/test_admin_status.py` asserts it. A new admin route that writes belongs behind a POST and an explicit operator action, not on a page that reloads

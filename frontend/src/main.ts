@@ -10,6 +10,7 @@ import App from './App.vue'
 import 'primeicons/primeicons.css'
 import './styles.css'
 import './premium.css'
+import './views/admin/adminTab.css'
 
 /*
  * PrimeVue emits its design tokens into a `:root, :host` block that it injects

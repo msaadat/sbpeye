@@ -235,12 +235,13 @@ def test_fetch_page_cached_uses_uuid_filename(monkeypatch, tmp_path):
     response = FakeResponse(b"<html>cached</html>")
     calls = []
 
-    def fake_get(*args, **kwargs):
-        calls.append(args[0])
-        return response
+    class FakeScraper:
+        def get(self, *args, **kwargs):
+            calls.append(args[0])
+            return response
 
     monkeypatch.setattr(scraper, "HTML_CACHE_DIR", tmp_path)
-    monkeypatch.setattr(scraper.requests, "get", fake_get)
+    monkeypatch.setattr(scraper.cloudscraper, "create_scraper", lambda: FakeScraper())
     url = "https://www.sbp.org.pk/circular.htm"
 
     assert scraper.fetch_page_cached(url) == response.content

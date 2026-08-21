@@ -1408,6 +1408,60 @@ a.context-chip:hover {
   margin-top: 0.4rem;
 }
 
+/* Sits above the composer rather than replacing the empty state: the reminder has to
+   stay visible in a conversation that already has messages in it, since an account can
+   lose its key mid-session. */
+.chat-key-notice {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.4rem;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid color-mix(in srgb, var(--sbp-warning) 35%, var(--sbp-border));
+  border-radius: var(--sbp-radius);
+  background: color-mix(in srgb, var(--sbp-warning) 8%, var(--sbp-surface));
+}
+
+.chat-key-notice > .pi {
+  flex: 0 0 auto;
+  color: var(--sbp-warning);
+  font-size: 1.1rem;
+}
+
+.chat-key-notice-text {
+  display: grid;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.chat-key-notice-text strong {
+  color: var(--sbp-text);
+  font-size: var(--sbp-fs-body);
+  font-weight: 600;
+}
+
+.chat-key-notice-text p {
+  margin: 0;
+  color: var(--sbp-muted);
+  font-size: var(--sbp-fs-meta);
+  line-height: 1.45;
+}
+
+.chat-key-notice .p-button {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+@media (max-width: 640px) {
+  .chat-key-notice {
+    flex-wrap: wrap;
+  }
+
+  .chat-key-notice .p-button {
+    margin-left: 0;
+  }
+}
+
 /* ---- Streaming affordances ---- */
 .assistant-activity {
   display: flex;

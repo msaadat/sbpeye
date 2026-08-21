@@ -28,6 +28,7 @@ import {
   type CircularSummary,
   type ResolvedDocument,
 } from '@/lib/api'
+import { useLlmStatus } from '@/lib/useLlmStatus'
 
 const PdfPreviewDialog = defineAsyncComponent(() => import('@/components/PdfPreviewDialog.vue'))
 
@@ -43,6 +44,10 @@ interface TurnStep {
 const route = useRoute()
 const router = useRouter()
 const confirm = useConfirm()
+// Chat runs on the signed-in account's own provider credentials and refuses to fall
+// back to anyone else's, so a session with none configured can only end in an error
+// turn. Better to say so above the composer than to let someone type a question first.
+const { needsProviderKey, load: loadLlmStatus } = useLlmStatus()
 const toast = useToast()
 
 const sessions = ref<ChatSession[]>([])
@@ -1118,6 +1123,9 @@ watch(() => route.params.sessionId, (raw) => {
 })
 
 onMounted(async () => {
+  // Not awaited: it probes the provider over the network, and nothing on this page has
+  // to wait for the answer.
+  void loadLlmStatus()
   await loadSessions()
   const raw = route.params.sessionId
   const sessionId = Array.isArray(raw) ? raw[0] : raw
@@ -1549,6 +1557,21 @@ onBeforeUnmount(() => {
           <span>Jump to latest</span>
         </button>
       </Transition>
+
+      <div v-if="needsProviderKey" class="chat-key-notice" role="status">
+        <i class="pi pi-key" aria-hidden="true" />
+        <div class="chat-key-notice-text">
+          <strong>Add your AI provider key to start chatting</strong>
+          <p>Every account on this deployment answers with its own credentials, so chat stays quiet until yours are saved.</p>
+        </div>
+        <Button
+          label="Open settings"
+          icon="pi pi-cog"
+          size="small"
+          outlined
+          @click="router.push('/settings')"
+        />
+      </div>
 
       <form class="composer" @submit.prevent="sendMessage">
         <div ref="composerShellEl" class="composer-shell">

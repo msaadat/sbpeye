@@ -8,6 +8,7 @@ import Message from 'primevue/message'
 import Password from 'primevue/password'
 import Select from 'primevue/select'
 import { getMyAiSettings, saveMyAiSettings } from '@/lib/api'
+import { useLlmStatus } from '@/lib/useLlmStatus'
 
 /**
  * The signed-in user's own AI credentials, and nothing else.
@@ -19,6 +20,9 @@ import { getMyAiSettings, saveMyAiSettings } from '@/lib/api'
  * beside your chat, the deployment's key beside the corpus work it pays for.
  */
 const toast = useToast()
+// The sidebar badge and the chat reminder both read the shared probe, and saving here is
+// the one thing in the app that changes its answer.
+const { load: reloadLlmStatus } = useLlmStatus()
 
 const providerOptions = [
   { name: 'Mistral AI', value: 'mistral' },
@@ -71,6 +75,7 @@ async function saveMyAi(): Promise<void> {
     })
     myApiKeySet.value = result.api_key_set
     myApiKey.value = ''
+    void reloadLlmStatus(true)
     toast.add({ severity: 'success', summary: 'Your AI settings were saved', life: 3000 })
   } catch (error) {
     myError.value = (error as Error).message
@@ -85,6 +90,7 @@ async function clearMyApiKey(): Promise<void> {
   try {
     const result = await saveMyAiSettings({ provider: myProvider.value, api_key: '' })
     myApiKeySet.value = result.api_key_set
+    void reloadLlmStatus(true)
     toast.add({ severity: 'success', summary: 'Your API key was removed', life: 3000 })
   } catch (error) {
     myError.value = (error as Error).message

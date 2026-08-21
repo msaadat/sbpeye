@@ -1,17 +1,19 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import Button from 'primevue/button'
 import ConfirmDialog from 'primevue/confirmdialog'
 import Message from 'primevue/message'
 import Toast from 'primevue/toast'
 import { useToast } from 'primevue/usetoast'
 import SbpNewsPanel from '@/components/SbpNewsPanel.vue'
-import { getAppStatus, getLlmStatus, logout, startCircularSync, type ApiError, type AppStatus, type CircularSyncStatus, type LlmStatus } from '@/lib/api'
+import { getAppStatus, logout, startCircularSync, type ApiError, type AppStatus, type CircularSyncStatus } from '@/lib/api'
 import { useCurrentUser } from '@/lib/useCurrentUser'
 import { useLlmDebugState } from '@/lib/useLlmDebugState'
+import { useLlmStatus } from '@/lib/useLlmStatus'
 
 const route = useRoute()
+const router = useRouter()
 const toast = useToast()
 const { state: llmDebugState, refreshLlmDebugState } = useLlmDebugState()
 const { email: userEmail, isAdmin, load: loadCurrentUser, clear: clearCurrentUser } = useCurrentUser()
@@ -19,9 +21,14 @@ const darkMode = ref(localStorage.getItem('sbpeye-theme') === 'dark')
 const status = ref<AppStatus | null>(null)
 const statusLoading = ref(false)
 const statusError = ref('')
-const llmStatus = ref<LlmStatus | null>(null)
-const llmLoading = ref(false)
-const llmError = ref('')
+// Shared with the chat view, which shows its own reminder when this account has no
+// provider key. One probe, one answer, no chance of the two disagreeing.
+const {
+  status: llmStatus,
+  loading: llmLoading,
+  error: llmError,
+  load: loadLlmStatus,
+} = useLlmStatus()
 const syncStarting = ref(false)
 let statusPollId: ReturnType<typeof setInterval> | null = null
 
@@ -263,22 +270,9 @@ async function startSync() {
   }
 }
 
-async function loadLlmStatus() {
-  llmLoading.value = true
-  llmError.value = ''
-
-  try {
-    llmStatus.value = await getLlmStatus()
-  } catch (error) {
-    llmStatus.value = null
-    llmError.value = error instanceof Error ? error.message : 'Unable to check LLM backend'
-  } finally {
-    llmLoading.value = false
-  }
-}
-
 const LLM_STATE_LABELS: Record<string, string> = {
   online: 'LLM backend online',
+  not_configured: 'No AI provider configured',
   rate_limited: 'LLM backend rate limited',
   auth_error: 'LLM backend authentication failed',
   not_found: 'LLM model not found',
@@ -297,6 +291,8 @@ const llmStatusIcon = computed(() => {
   switch (llmStatus.value.state) {
     case 'online':
       return 'pi-bolt'
+    case 'not_configured':
+      return 'pi-key'
     case 'rate_limited':
       return 'pi-clock'
     default:
@@ -314,7 +310,9 @@ const llmStatusTone = computed(() => {
   if (llmStatus.value.state === 'online') {
     return 'is-online'
   }
-  if (llmStatus.value.state === 'rate_limited') {
+  // Nothing is broken when a provider is simply unset, so it is not painted as a
+  // failure; the badge points at Settings instead.
+  if (llmStatus.value.state === 'rate_limited' || llmStatus.value.state === 'not_configured') {
     return 'is-warn'
   }
   return 'is-error'
@@ -339,6 +337,16 @@ const llmStatusDetail = computed(() => {
   const detail = llmStatus.value.detail ? `\n${llmStatus.value.detail}` : ''
   return `${provider}${model}${detail}`.trim()
 })
+
+function onLlmStatusClick() {
+  // Re-probing an unset provider can only return the same answer, so the badge offers
+  // the action that would change it instead.
+  if (llmStatus.value?.state === 'not_configured') {
+    void router.push('/settings')
+    return
+  }
+  void loadLlmStatus(true)
+}
 
 function syncThemeClass() {
   document.documentElement.classList.toggle('sbpeye-dark', darkMode.value)
@@ -415,7 +423,7 @@ onBeforeUnmount(() => {
           :class="llmStatusTone"
           :title="llmStatusDetail ? `${llmStatusLabel}\n${llmStatusDetail}` : llmStatusLabel"
           :aria-label="llmStatusLabel"
-          @click="loadLlmStatus"
+          @click="onLlmStatusClick"
         >
           <i class="pi" :class="llmStatusIcon" />
         </button>

@@ -89,6 +89,7 @@ export interface CircularSyncRequest {
 
 export type LlmStatusState =
   | 'online'
+  | 'not_configured'
   | 'rate_limited'
   | 'auth_error'
   | 'not_found'

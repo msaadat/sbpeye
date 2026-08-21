@@ -7,6 +7,7 @@ is the exception: it signs in as a tester, or as nobody, and checks the boundary
 
 import pytest
 
+import sbpeye.ai as ai_module
 import sbpeye.main as main_module
 from conftest import TEST_ADMIN_ID, sign_in, sign_out
 from sbpeye.auth import (
@@ -29,6 +30,7 @@ from sbpeye.models import ChatSession, User
     "/api/chat/sessions",
     "/api/workspaces",
     "/api/settings",
+    "/api/llm/status",
 ])
 def test_api_routes_are_closed_without_a_session(client, path):
     test_client, _ = client
@@ -456,6 +458,60 @@ def test_a_user_without_a_key_is_told_to_add_one(client, db_factory):
     with pytest.raises(MissingUserAIConfig) as excinfo:
         get_ai_client_for_user(unconfigured)
     assert "your own AI provider API key" in str(excinfo.value)
+
+
+def test_the_llm_badge_reports_the_callers_own_provider_not_the_deployments(
+    client, db_factory, monkeypatch
+):
+    """The sidebar indicator has to answer for the backend chat will actually use.
+
+    It used to probe the deployment config, so a tester with no key of their own saw a
+    green light for the admin's provider and then got "add your own API key" on their
+    first chat turn.
+    """
+    test_client, _ = client
+    # The suite stubs the per-user resolver for chat; this test is about the resolution
+    # itself, so it puts the real one back.
+    monkeypatch.setattr(main_module, "get_ai_client_for_user", ai_module.get_ai_client_for_user)
+    sign_out(test_client)
+    sign_in(test_client, db_factory, is_admin=False)
+
+    response = test_client.get("/api/llm/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["state"] == "not_configured"
+    assert payload["available"] is False
+    assert "your own AI provider API key" in payload["detail"]
+    # The admin's provider and model do not travel to an account that cannot use them.
+    assert payload["provider"] is None
+    assert payload["model"] is None
+
+
+def test_the_llm_badge_probes_the_signed_in_user(client, db_factory, monkeypatch):
+    test_client, _ = client
+    probed: list = []
+
+    class ProbedClient:
+        def check_availability(self):
+            return {
+                "available": True, "state": "online", "detail": "Backend reachable",
+                "provider": "mistral", "model": "mistral-large-latest",
+            }
+
+    def resolve(user):
+        probed.append(user.email)
+        return ProbedClient()
+
+    monkeypatch.setattr(main_module, "get_ai_client_for_user", resolve)
+    sign_out(test_client)
+    sign_in(test_client, db_factory, email="tester@example.com", is_admin=False)
+
+    response = test_client.get("/api/llm/status")
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "online"
+    assert probed == ["tester@example.com"]
 
 
 def test_a_hosted_provider_without_a_key_is_not_a_usable_config():

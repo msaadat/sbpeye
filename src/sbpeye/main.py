@@ -833,14 +833,32 @@ async def get_app_status(db: Session = Depends(get_db)):
 
 
 @app.get("/api/llm/status")
-async def get_llm_status(db: Session = Depends(get_db)):
-    """Probe the configured LLM backend's availability.
+async def get_llm_status(user: User = Depends(current_user)):
+    """Probe the availability of *this user's* LLM backend.
+
+    Scoped to the caller, not to the deployment. Chat resolves credentials per user and
+    refuses to fall back (`get_ai_client_for_user`), so probing the deployment config
+    here showed a tester a green light for a backend they will never reach: the badge
+    said online, the next chat turn said "add your own API key". Reading the same config
+    chat reads is what makes the indicator worth looking at — and it keeps the admin's
+    provider and model out of a response every signed-in account can fetch.
 
     Checked on demand (e.g. on page refresh) rather than on a schedule, since a
     local or free-tier backend can go offline or get rate-limited at any time.
     """
     try:
-        client = get_ai_client(db)
+        client = get_ai_client_for_user(user)
+    except MissingUserAIConfig as exc:
+        # A state of its own, not an error: nothing is broken and retrying will not help
+        # until this user sets a key, so the sidebar sends them to Settings instead of
+        # to a network problem they do not have.
+        return {
+            "available": False,
+            "state": "not_configured",
+            "detail": str(exc),
+            "provider": None,
+            "model": None,
+        }
     except Exception as exc:
         return {
             "available": False,

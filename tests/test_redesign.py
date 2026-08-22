@@ -6,16 +6,19 @@ harvesting, and the LLM-preservation migration. All offline (inline HTML, in-mem
 
 from datetime import datetime
 
+import pytest
 from bs4 import BeautifulSoup
 
 from sbpeye.link_routing import normalize_reference, harvest_reference_links
 from sbpeye.scraper.clean_html import extract_sbp_text
 from sbpeye.scraper import circulars as circulars_module
 from sbpeye.scraper.circulars import parse_circular_listing, circular_identity, discover_circulars
+from sbpeye.scraper import ecodata as ecodata_module
+from sbpeye.scraper.ecodata import EcoDataUnavailable, extract_repo_rates
 from sbpeye.scraper.ecodata_index import parse_ecodata_index
 from sbpeye.scraper.news import parse_news_cards
 from sbpeye.migration import snapshot_llm_data, apply_llm_snapshot
-from sbpeye.models import Circular, CircularEntity, CircularRelationship
+from sbpeye.models import Circular, CircularEntity, CircularRelationship, EcoDataSeries
 
 from conftest import make_circular
 
@@ -198,6 +201,84 @@ def test_parse_ecodata_index():
     assert e["last_update"] == "December 04, 2013"
     assert e["format_type"] == "pdf"
     assert e["format_url"].endswith("/assets/document/CNY_1.pdf")
+
+
+# --- overnight repo rate parser ---------------------------------------------------------
+
+# The daily report: one two-column table, one row, SBP's "20-AUG-26" date style.
+DAILY_REPO_TABLES = [[["As on (Date)", "Repo Rate (%)"], ["20-AUG-26", "11.68"]]]
+
+# The archive: pdfplumber returns each of the three side-by-side date/rate pairs as its
+# own table, and the date column's format drifts year by year.
+ARCHIVE_REPO_TABLES = [
+    [["As on (Date)", "Rate (%)"], ["25-May, 2015", "6.58"], ["9-October, 2015", "6.18"]],
+    [["As on Date", "Rate (%)"], ["4-April, 2016", "6.30"], ["11 April, 2016", "6.06"]],
+    [["As on (Date)", "Rate (%)"], ["2 March 2026", "10.71"], ["", ""]],
+]
+
+
+def test_extract_repo_rates_handles_both_report_layouts():
+    assert extract_repo_rates(DAILY_REPO_TABLES) == [(datetime(2026, 8, 20), 11.68)]
+    assert extract_repo_rates(ARCHIVE_REPO_TABLES) == [
+        (datetime(2015, 5, 25), 6.58),
+        (datetime(2015, 10, 9), 6.18),
+        (datetime(2016, 4, 4), 6.30),
+        (datetime(2016, 4, 11), 6.06),
+        (datetime(2026, 3, 2), 10.71),
+    ]
+
+
+def test_extract_repo_rates_drops_unpaired_and_malformed_cells():
+    assert extract_repo_rates([
+        [["As on (Date)", "Rate (%)"]],          # header only
+        [["30-February, 2016", "6.00"]],         # not a real date
+        [["25-May, 2015", ""]],                  # date with no rate
+        [["", "6.58"]],                          # rate with no date
+    ]) == []
+
+
+def test_repo_rate_url_lives_in_the_redesigned_asset_store():
+    # /ecodata/*.pdf now answers 200 with the generic site HTML, not a PDF.
+    assert ecodata_module.REPO_RATE_URL.startswith("https://www.sbp.org.pk/assets/document/")
+    assert ecodata_module.REPO_RATE_ARCHIVE_URL.startswith("https://www.sbp.org.pk/assets/document/")
+
+
+def test_download_pdf_fails_loudly_when_sbp_serves_html(monkeypatch):
+    class HtmlResponse:
+        status_code = 200
+        headers = {"content-type": "text/html; charset=UTF-8"}
+        content = b"\n\n<!DOCTYPE html><html>State Bank of Pakistan</html>"
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(ecodata_module.requests, "get", lambda *a, **kw: HtmlResponse())
+
+    with pytest.raises(EcoDataUnavailable) as excinfo:
+        ecodata_module._download_pdf(ecodata_module.REPO_RATE_URL)
+    assert "%PDF" in str(excinfo.value)
+
+
+def test_scrape_ecodata_writes_parsed_rows_and_is_idempotent(db_factory, monkeypatch):
+    db = db_factory()
+    monkeypatch.setattr(ecodata_module, "fetch_repo_rates", lambda include_archive=True: [
+        (datetime(2026, 8, 19), 11.69),
+        (datetime(2026, 8, 20), 11.68),
+    ])
+
+    assert ecodata_module.scrape_ecodata(db) == 2
+    assert ecodata_module.scrape_ecodata(db) == 0
+
+    rows = (
+        db.query(EcoDataSeries)
+        .filter(EcoDataSeries.name == ecodata_module.REPO_RATE_SERIES)
+        .order_by(EcoDataSeries.date)
+        .all()
+    )
+    assert [(r.date, r.value) for r in rows] == [
+        (datetime(2026, 8, 19), 11.69),
+        (datetime(2026, 8, 20), 11.68),
+    ]
 
 
 # --- news parser ------------------------------------------------------------------------

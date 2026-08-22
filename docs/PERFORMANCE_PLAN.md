@@ -8,9 +8,10 @@ an answer streams.
 Fifteen items, measured rather than guessed, ordered by what a user actually feels per unit of
 work. They are deliberately independent: each can land, ship and be verified on its own.
 
-**Status:** P1, P2, P3, P4, P5, P7, P13 and P14 landed. Circular search **132 → 19 ms**, law
-search **98 → 28 ms**, the landing route ships 206 KB instead of 804 KB, and the laws list went
-from 273 queries to 7. Next up is P6, the one that starts mattering when two testers overlap.
+**Status:** everything except P8–P12 and the deferred P3b. Circular search **132 → 19 ms**, law
+search **98 → 28 ms**, the landing route ships 206 KB instead of 804 KB, the laws list went from
+273 queries to 7, and the server no longer serializes itself under concurrent load. What is left
+is frontend work (P8–P12).
 
 ---
 
@@ -24,7 +25,7 @@ from 273 queries to 7. Next up is P6, the one that starts mattering when two tes
 | **P3b** | Law arm still pays the pre-filter | `search.py:1091` | over-fetch starves — §14 | M | ☐ deferred |
 | **P4** | SQLite WAL + `busy_timeout` | `database.py` | writers stop blocking readers | S | ☑ landed |
 | **P5** | `/api/laws` loads 3.5 MB it never sends | `serializers.py:169` | **273 queries → 7, 4.88 MB → 0** | S | ☑ landed |
-| **P6** | 25 `async def` routes block the event loop | `main.py` | removes a 5 s global stall | S | ☐ |
+| **P6** | 32 blocking routes ran on the event loop | `main.py:502` | **1.50 s → 0.30 s under load** | S | ☑ landed |
 | **P7** | `Cache-Control` on hashed assets | `main.py:517` | **14 revalidations → 0** | XS | ☑ landed |
 | **P8** | Landing route is a 4-deep request chain | `CircularsView.vue` | 4 serial RTTs → 2 | M | ☐ |
 | **P9** | Chat re-renders the thread on every token | `ChatView.vue:943` | stream stutter | M | ☐ |
@@ -37,10 +38,9 @@ from 273 queries to 7. Next up is P6, the one that starts mattering when two tes
 **Order.** Done so far: P1 + P7 (pure configuration, largest win for the least code), P2 + P3
 (the search story), P5, then P13 + P14 (one defect in two places, so one fix).
 
-Remaining, in the order worth taking them: **P6** next — invisible to a single-user benchmark,
-and the one that starts mattering the moment two testers overlap. Then **P10, P11, P12**, which
-are small and independent. **P8 and P9** are real refactors; do them last and alone. **P3b** is
-the one deferred item: it needs a re-index, and nothing is blocked on it.
+Remaining: **P10, P11, P12**, which are small and independent, then **P8 and P9**, which are
+real refactors and want doing alone. **P3b** is deferred rather than pending — it needs a
+re-index of a 330 MB store and nothing is blocked on it.
 
 ---
 
@@ -565,7 +565,85 @@ than the "twice on mount plus every search" the original framing suggested.
 
 ---
 
-## 7. P6 — 25 `async def` routes block the event loop
+## 7. P6 — blocking work on the event loop ☑ landed
+
+**32 handlers**, not the 25 this plan first said — the original count came from a regex looking
+for obvious DB markers and missed routes whose blocking is one call deeper (`export_search_csv`,
+`get_settings`, `export_chat_session`, `login_page`). Re-counted with an AST walk: a route is
+convertible when it is `async def`, contains no `await` anywhere including nested scopes, and
+holds a session dependency.
+
+**Plus the one that mattered most and was not on the list at all.** `require_authentication`
+(`main.py:502`) is `async def` middleware calling `resolve_request_user`, which opens a session
+and queries the user table — on **every authenticated request**, before any handler runs.
+Middleware cannot drop its `async` (Starlette requires the coroutine), so the blocking call now
+goes through `run_in_threadpool`.
+
+### What it actually bought
+
+Measured through the real app over ASGI, with `/healthz` polled alongside the load. Two kinds of
+work, because they behave differently and only one of them is the headline.
+
+```
+CPU-bound: a real corpus search (~20 ms of Python)
+  concurrency  route declared      all done in   /healthz served   its p95
+            1  async def (before)         27ms                 1    31.2ms
+            1  def       (after)          28ms                 5     5.2ms
+            4  async def (before)        147ms                 1   148.2ms
+            4  def       (after)          97ms                16     7.7ms
+            8  async def (before)        227ms                 1   228.2ms
+            8  def       (after)         219ms                35     7.8ms
+
+I/O-bound: a 300 ms wait, which is what /api/llm/status does
+  concurrency  route declared      all done in   /healthz served   its p95
+            1  async def (before)        304ms                 1   303.6ms
+            1  def       (after)         301ms                76     2.3ms
+            4  async def (before)       1203ms                 1  1205.2ms
+            4  def       (after)         306ms                68     3.0ms
+            8  async def (before)       2406ms                 1  2407.7ms
+            8  def       (after)         307ms                67     3.5ms
+```
+
+**Three things worth reading carefully.**
+
+*Single-user throughput is unchanged, and that is expected.* 27 ms against 28 ms. Nobody's search
+got faster. Anyone benchmarking this one request at a time would conclude P6 did nothing, which
+is exactly why it survived this long.
+
+*For CPU-bound work, P6 buys fairness rather than throughput.* At 8 concurrent searches the total
+barely moves (227 → 219 ms) because Python's GIL means threads do not parallelise CPU work
+either way. What changes is who waits: `/healthz` went from **1 request served to 35**, and its
+p95 from **228 ms to 7.8 ms**. A search stopped being able to stall the whole process.
+
+*For I/O-bound work — the `/api/llm/status` case — it is the whole ballgame.* Waiting on a socket
+releases the GIL, so the threadpool genuinely parallelises: **2406 ms → 307 ms at 8 concurrent,
+7.8×**, flat with concurrency instead of linear in it. And a trivial request's p95 goes from
+**2407 ms to 3.5 ms**. With the real 5 s vendor timeout instead of this 300 ms stand-in, that
+column is 40 s of everyone frozen against 5 s of one user waiting.
+
+**19 routes were deliberately left `async def`.** "No `await`" is not the same as "blocks" — the
+SPA-shell handlers (`read_root`, `circulars_spa`, …) return a `FileResponse` object and do no
+I/O, as do `me`, `logout` and `get_my_ai_settings`, which read already-loaded state. Converting
+those would spend one of the threadpool's 40 slots to save nothing, and under load they are
+better served straight off the loop.
+
+**A convention test, because the absence of one is the actual root cause.** Git says every route
+in the initial commit was `async def` — 34 of 34, so it was a default rather than a decision.
+It was corrected exactly once, in `e98cccd` ("feat: integrate FastEmbed and LM Studio for
+embeddings"), which dropped the `async` from `search_circulars` and said nothing about why —
+that being the route where a local embedding model had just made the blocking impossible to
+ignore. The fix stayed local, so later routes kept inheriting the default, while genuinely later
+work (`list_laws`, `healthz`) was written as plain `def` and never was async.
+`tests/test_route_concurrency.py` now fails the build if a blocking `async def` route reappears,
+and `AGENTS.md` carries the rule in prose next to the other invariants.
+
+Full suite: 668 passed. Two tests in `test_chat_retrieval.py` needed updating — they called
+`get_chat_session` through `asyncio.run`, which no longer applies now that it is not a coroutine.
+
+<details>
+<summary>Original finding</summary>
+
+## P6 — 25 `async def` routes block the event loop
 
 **Symptom.** 25 route handlers in `main.py` are declared `async def` but do synchronous,
 blocking work — SQLAlchemy queries, `requests` calls, file reads — with no `await` in the body.
@@ -601,7 +679,9 @@ waits behind the probe; after it, it returns immediately.
 **Note.** `main.py` is otherwise careful about this — `_remote_circular_check_status` already
 does its SBP fetch on a background thread behind a 30-minute TTL, and `healthz`, `list_laws`
 and `search_circulars` are correctly plain `def`. The 25 above look like drift rather than
-intent.
+intent. *(Confirmed by git — see the landed section above.)*
+
+</details>
 
 ---
 

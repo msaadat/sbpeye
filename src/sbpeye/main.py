@@ -8,6 +8,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from sqlalchemy.orm import Session, aliased, selectinload
 from sqlalchemy import func, extract, and_, or_, text
@@ -493,7 +494,12 @@ async def require_authentication(request: Request, call_next):
     if is_public_path(request.url.path):
         return await call_next(request)
 
-    user = resolve_request_user(request)
+    # Off the event loop, because `resolve_request_user` opens a session and queries the
+    # user table — and unlike a route, this runs on *every* authenticated request. A
+    # middleware cannot drop its `async` the way the handlers below it did (Starlette
+    # requires the coroutine), so the blocking call is handed to the same threadpool
+    # FastAPI would have used for a plain `def` handler.
+    user = await run_in_threadpool(resolve_request_user, request)
     if user is None:
         if request.url.path.startswith("/api/"):
             return JSONResponse({"error": "Sign in to continue."}, status_code=401)
@@ -902,7 +908,7 @@ def healthz():
 
 
 @app.get("/api/app/status")
-async def get_app_status(db: Session = Depends(get_db)):
+def get_app_status(db: Session = Depends(get_db)):
     sync_status = _latest_sync_status(db)
     sync_payload = _sync_status_payload(sync_status, _latest_successful_sync(db))
     remote_payload = _remote_circular_check_status()
@@ -929,7 +935,7 @@ async def get_app_status(db: Session = Depends(get_db)):
 
 
 @app.get("/api/llm/status")
-async def get_llm_status(user: User = Depends(current_user)):
+def get_llm_status(user: User = Depends(current_user)):
     """Probe the availability of *this user's* LLM backend.
 
     Scoped to the caller, not to the deployment. Chat resolves credentials per user and
@@ -1099,7 +1105,7 @@ def get_pdf_summary(url: str, db: Session = Depends(get_db)):
 
 
 @app.get("/api/circulars/tags")
-async def get_tags(db: Session = Depends(get_db)):
+def get_tags(db: Session = Depends(get_db)):
     from sqlalchemy import distinct
     rows = db.query(Circular.tags).filter(Circular.tags != None, Circular.tags != "").all()
     tag_counts = {}
@@ -1162,7 +1168,7 @@ def start_circular_sync(data: dict | None = Body(default=None), db: Session = De
 
 
 @app.get("/api/ecodata")
-async def get_ecodata(series: str = "KIBOR_6M", db: Session = Depends(get_db)):
+def get_ecodata(series: str = "KIBOR_6M", db: Session = Depends(get_db)):
     # Retrieve ecodata for charts
     data = db.query(EcoDataSeries).filter(EcoDataSeries.name == series).order_by(EcoDataSeries.date.asc()).all()
     return [{"date": d.date.strftime("%Y-%m-%d"), "value": d.value} for d in data]
@@ -1229,7 +1235,7 @@ def search_circulars(
 
 
 @app.get("/api/circulars/departments")
-async def get_departments(db: Session = Depends(get_db)):
+def get_departments(db: Session = Depends(get_db)):
     from sqlalchemy import func
     results = db.query(
         Circular.department,
@@ -1239,7 +1245,7 @@ async def get_departments(db: Session = Depends(get_db)):
 
 
 @app.get("/api/circulars/years")
-async def get_years(department: str, db: Session = Depends(get_db)):
+def get_years(department: str, db: Session = Depends(get_db)):
     from sqlalchemy import func, extract
     results = db.query(
         extract("year", Circular.date).label("year"),
@@ -1255,7 +1261,7 @@ async def get_years(department: str, db: Session = Depends(get_db)):
 
 
 @app.get("/api/circulars/browse")
-async def browse_circulars(department: str, year: int, db: Session = Depends(get_db)):
+def browse_circulars(department: str, year: int, db: Session = Depends(get_db)):
     from sqlalchemy import extract
     circulars = db.query(Circular).filter(
         Circular.department == department,
@@ -1265,7 +1271,7 @@ async def browse_circulars(department: str, year: int, db: Session = Depends(get
 
 
 @app.get("/api/circulars/browse_recent")
-async def browse_recent_circulars(limit: int = 100, db: Session = Depends(get_db)):
+def browse_recent_circulars(limit: int = 100, db: Session = Depends(get_db)):
     circulars = db.query(Circular).order_by(Circular.date.desc()).limit(limit).all()
     return [
         _circular_summary(c)
@@ -1274,7 +1280,7 @@ async def browse_recent_circulars(limit: int = 100, db: Session = Depends(get_db
 
 
 @app.get("/api/circulars/by_url")
-async def get_circular_by_url(url: str, db: Session = Depends(get_db)):
+def get_circular_by_url(url: str, db: Session = Depends(get_db)):
     c = db.query(Circular).filter(Circular.url == url).first()
     if not c:
         normalized = url.rstrip("/")
@@ -1429,7 +1435,7 @@ def circular_document(circular_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/api/circulars/export_csv")
-async def export_search_csv(
+def export_search_csv(
     q: str = "",
     start_year: str | None = None,
     end_year: str | None = None,
@@ -1465,7 +1471,7 @@ async def export_search_csv(
 
 
 @app.get("/api/circulars/{circular_id}")
-async def get_circular_detail(circular_id: str, db: Session = Depends(get_db)):
+def get_circular_detail(circular_id: str, db: Session = Depends(get_db)):
     # The `regulations` block runs each linked law through `_law_summary`, so this pays
     # the same lazy walk the laws listing does — the text of every version of every law
     # this circular cites, to render titles and version counts. Fewer documents than a
@@ -1558,7 +1564,7 @@ async def get_circular_detail(circular_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/api/circulars/{circular_id}/checklist.xlsx")
-async def export_circular_checklist(circular_id: str, db: Session = Depends(get_db)):
+def export_circular_checklist(circular_id: str, db: Session = Depends(get_db)):
     circular = db.query(Circular).filter(Circular.id == circular_id).first()
     if not circular:
         return JSONResponse({"error": "Circular not found"}, status_code=404)
@@ -1626,7 +1632,7 @@ def _entity_dict(e: CircularEntity, *, include_circular: bool = False) -> dict:
 
 
 @app.get("/api/circulars/entities/query")
-async def query_circular_entities(
+def query_circular_entities(
     metric: str | None = None,
     entity_type: str | None = None,
     unit: str | None = None,
@@ -1795,7 +1801,7 @@ async def generate_circular_intelligence(
 
 
 @app.get("/api/ai/jobs/{job_id}")
-async def get_ai_generation_job(job_id: str, db: Session = Depends(get_db)):
+def get_ai_generation_job(job_id: str, db: Session = Depends(get_db)):
     job = db.query(AIGenerationJob).filter(AIGenerationJob.id == job_id).first()
     if not job:
         return JSONResponse({"error": "Generation job not found"}, status_code=404)
@@ -1803,7 +1809,7 @@ async def get_ai_generation_job(job_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/api/circulars/{circular_id}/relationships")
-async def get_circular_relationships(circular_id: str, db: Session = Depends(get_db)):
+def get_circular_relationships(circular_id: str, db: Session = Depends(get_db)):
     outgoing = db.query(CircularRelationship).filter(
         CircularRelationship.source_id == circular_id
     ).all()
@@ -1839,7 +1845,7 @@ async def get_circular_relationships(circular_id: str, db: Session = Depends(get
 
 
 @app.get("/api/circulars/{circular_id}/consolidation")
-async def get_circular_consolidation(circular_id: str, db: Session = Depends(get_db)):
+def get_circular_consolidation(circular_id: str, db: Session = Depends(get_db)):
     """The consolidated requirement view of the circular's amendment chain.
 
     Shared by every chain member: any circular connected through resolved
@@ -1861,7 +1867,7 @@ def get_sbp_news(db: Session = Depends(get_db)):
 
 
 @app.post("/api/documents/resolve")
-async def resolve_document(
+def resolve_document(
     id: str | None = None,
     url: str | None = None,
     circular_id: str | None = None,
@@ -1945,7 +1951,7 @@ async def resolve_document(
 
 
 @app.get("/api/documents/{attachment_id}/content")
-async def document_content(attachment_id: str, db: Session = Depends(get_db)):
+def document_content(attachment_id: str, db: Session = Depends(get_db)):
     attachment = db.query(Attachment).filter(Attachment.id == attachment_id).first()
     if not attachment:
         attachment = db.query(CachedDocument).filter(CachedDocument.id == attachment_id).first()
@@ -2365,7 +2371,7 @@ async def debug_page():
 
 
 @app.get("/api/settings", dependencies=[Depends(require_admin)])
-async def get_settings(db: Session = Depends(get_app_db)):
+def get_settings(db: Session = Depends(get_app_db)):
     config = AIConfig.from_db(db) or AIConfig.from_env()
     embedding = EmbeddingConfig.from_db(db)
     return _settings_payload(config, embedding, db)
@@ -2551,7 +2557,7 @@ def test_ai_connection(db: Session = Depends(get_db)):
 # --- Research Workspaces ---
 
 @app.get("/api/workspaces")
-async def list_research_workspaces(
+def list_research_workspaces(
     db: Session = Depends(get_db), app_db: Session = Depends(get_app_db)
 ):
     _ensure_default_workspace(app_db)
@@ -2571,7 +2577,7 @@ async def list_research_workspaces(
 
 
 @app.get("/api/workspaces/default")
-async def get_default_research_workspace(
+def get_default_research_workspace(
     db: Session = Depends(get_db), app_db: Session = Depends(get_app_db)
 ):
     workspace = _ensure_default_workspace(app_db)
@@ -2613,7 +2619,7 @@ async def create_research_workspace(
 
 
 @app.get("/api/workspaces/{workspace_id}")
-async def get_research_workspace(
+def get_research_workspace(
     workspace_id: str,
     db: Session = Depends(get_db),
     app_db: Session = Depends(get_app_db),
@@ -2674,7 +2680,7 @@ async def update_research_workspace(
 
 
 @app.delete("/api/workspaces/{workspace_id}")
-async def delete_research_workspace(workspace_id: str, app_db: Session = Depends(get_app_db)):
+def delete_research_workspace(workspace_id: str, app_db: Session = Depends(get_app_db)):
     workspace = app_db.query(ResearchWorkspace).filter(
         ResearchWorkspace.id == workspace_id
     ).first()
@@ -2743,7 +2749,7 @@ async def pin_workspace_circular(
 
 
 @app.delete("/api/workspaces/{workspace_id}/circulars/{circular_id}")
-async def unpin_workspace_circular(
+def unpin_workspace_circular(
     workspace_id: str,
     circular_id: str,
     db: Session = Depends(get_db),
@@ -2784,7 +2790,7 @@ async def chat_spa_fallback(path: str):
 
 
 @app.get("/api/chat/sessions")
-async def list_chat_sessions(
+def list_chat_sessions(
     db: Session = Depends(get_db),
     app_db: Session = Depends(get_app_db),
     user: User = Depends(current_user),
@@ -2830,7 +2836,7 @@ async def list_chat_sessions(
 
 
 @app.get("/api/chat/sessions/{session_id}")
-async def get_chat_session(
+def get_chat_session(
     session_id: str,
     db: Session = Depends(get_db),
     app_db: Session = Depends(get_app_db),
@@ -2892,7 +2898,7 @@ async def get_chat_session(
 
 
 @app.get("/api/chat/sessions/{session_id}/export.md")
-async def export_chat_session(
+def export_chat_session(
     session_id: str,
     db: Session = Depends(get_db),
     app_db: Session = Depends(get_app_db),
@@ -2953,7 +2959,7 @@ async def rename_chat_session(
 
 
 @app.delete("/api/chat/sessions/{session_id}")
-async def delete_chat_session(
+def delete_chat_session(
     session_id: str,
     app_db: Session = Depends(get_app_db),
     user: User = Depends(current_user),
@@ -3039,7 +3045,7 @@ def _truncate_chat_messages(
 
 
 @app.delete("/api/chat/sessions/{session_id}/messages/{message_id}")
-async def truncate_chat_session(
+def truncate_chat_session(
     session_id: str,
     message_id: str,
     app_db: Session = Depends(get_app_db),

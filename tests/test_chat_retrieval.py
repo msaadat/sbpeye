@@ -1,6 +1,5 @@
 from types import SimpleNamespace
 from conftest import TEST_ADMIN_ID
-import asyncio
 import json
 from datetime import datetime
 
@@ -578,9 +577,7 @@ def test_session_context_is_authoritative_including_empty_selection():
     # Corpus and application sessions; this module collapses both onto one engine.
     # Called directly rather than over HTTP, so the owner the route would get from
     # the request has to be supplied here.
-    payload = asyncio.run(
-        get_chat_session(session.id, db, db, SimpleNamespace(id=TEST_ADMIN_ID))
-    )
+    payload = get_chat_session(session.id, db, db, SimpleNamespace(id=TEST_ADMIN_ID))
     assert [item["id"] for item in payload["circulars"]] == ["one"]
 
     session.circular_ids = "[]"
@@ -588,9 +585,7 @@ def test_session_context_is_authoritative_including_empty_selection():
     # Corpus and application sessions; this module collapses both onto one engine.
     # Called directly rather than over HTTP, so the owner the route would get from
     # the request has to be supplied here.
-    payload = asyncio.run(
-        get_chat_session(session.id, db, db, SimpleNamespace(id=TEST_ADMIN_ID))
-    )
+    payload = get_chat_session(session.id, db, db, SimpleNamespace(id=TEST_ADMIN_ID))
     assert payload["circulars"] == []
 
 
@@ -611,9 +606,7 @@ def test_chat_session_returns_each_messages_context_snapshot():
     # Corpus and application sessions; this module collapses both onto one engine.
     # Called directly rather than over HTTP, so the owner the route would get from
     # the request has to be supplied here.
-    payload = asyncio.run(
-        get_chat_session(session.id, db, db, SimpleNamespace(id=TEST_ADMIN_ID))
-    )
+    payload = get_chat_session(session.id, db, db, SimpleNamespace(id=TEST_ADMIN_ID))
 
     assert payload["messages"][0]["circular_ids"] == ["one"]
 

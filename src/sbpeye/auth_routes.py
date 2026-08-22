@@ -246,7 +246,7 @@ f.addEventListener('submit',async ev=>{
 
 
 @router.get("/login")
-async def login_page(request: Request):
+def login_page(request: Request):
     """A plain server-rendered page, deliberately not part of the SPA.
 
     The bundle is behind the same gate as everything else, so a login view inside it
@@ -354,7 +354,7 @@ async def set_my_ai_settings(
 
 
 @router.get("/api/admin/users")
-async def list_users(
+def list_users(
     _: User = Depends(require_admin), app_db: Session = Depends(get_app_db)
 ):
     users = app_db.query(User).order_by(User.created_at).all()
@@ -402,7 +402,7 @@ async def add_user(
 
 
 @router.delete("/api/admin/users/{user_id}")
-async def delete_user(
+def delete_user(
     user_id: str,
     admin: User = Depends(require_admin),
     app_db: Session = Depends(get_app_db),

@@ -1,7 +1,7 @@
 # SBPEye Chat Benchmark — Pilot v1 Answer Key (GRADER ONLY)
 
-Every fact below was verified against the SBPEye corpus on **2026-08-19**. Source is named
-per item so a grader can re-check it.
+Every fact below was verified against the SBPEye corpus on **2026-08-19**, except P11, added
+and verified on **2026-08-23**. Source is named per item so a grader can re-check it.
 
 **Freshness-sensitive items are marked ⏱ — re-verify before each round.**
 
@@ -240,17 +240,265 @@ the boundary of its own authority, which is what the 1-point tier exists to rewa
 
 ---
 
+## P11 · Outward remittance to digital service providers — Hard · Threshold + superseded figure ⏱
+
+**Source:** **Para 14A, Chapter 14 (Commercial Remittances) of the Foreign Exchange Manual**,
+as updated and reissued vide **EPD Circular Letter No. 09 of 2025, dated 11 September 2025**.
+Para 14A was originally inserted by **FE Circular No. 04 of 2020, dated 13 August 2020**.
+
+**Required facts:**
+- **USD 400,000 per year** (or equivalent in other currencies), for each company / firm /
+  sole proprietorship incorporated or established in Pakistan, on account of commercial
+  payments pertaining to **digital services** in favour of digital service provider companies.
+- Of that annual limit, at most **USD 40,000** may be remitted to providers **not** listed in
+  **Appendix V-147**; the ultimate beneficiary must otherwise be a company (or its affiliates
+  / associated entities) **listed in Appendix V-147**.
+- E=2 also needs the gating condition: remittances only through an Authorized Dealer
+  **designated by the remitter and acknowledged by FEOD, SBP-BSC**.
+
+**Credit but not required:** the year runs from the date of designation of the Authorized
+Dealer; payment receipts to the designated AD within **7 working days** of the beneficiary
+receiving the amount; the AD monitors limits in real time and holds future remittances on
+non-submission (resumption allowed twice a year); the applicant must be on FBR's active
+taxpayer list; **Appendix V-147 was most recently enhanced by EPD Circular Letter No. 01 of
+2026, dated 13 January 2026**, which expressly left all other instructions unchanged.
+
+**Currency (D) — this is where the item bites.** FE Circular No. 04 of 2020 set the limit at
+**USD 200,000, with USD 25,000 for non-listed providers**. Those figures are superseded.
+
+- 200,000 / 25,000 given as the current position → **A=0, D=0**.
+- Correct 400,000 / 40,000 but cited only to FE Circular No. 04 of 2020 → **B=1, D=1**: the
+  operative text is now the updated Chapter 14, and the 2020 circular does not say 400,000.
+
+**Trap — adjacent frameworks. Tick S** (silent substitution, rubric §3a) if the answer gives,
+as though it were the answer to this question:
+
+- **USD 5 million per entity per year** — that is **Para 11A**, Distribution of Services by
+  Intermediaries/Aggregators (**FE Circular No. 01 of 2026, dated 22 May 2026**, list at
+  **Appendix V-151**), a separate framework for aggregators remitting locally collected
+  rupees; or
+- the **ESFCA** route for IT companies and freelancers (**EPD Circular Letter No. 06 of 2026,
+  dated 6 April 2026**), which sets no fixed annual cap.
+
+Naming either as a *distinct* framework, correctly labelled and separated from Para 14A, is a
+plus, not a substitution.
+
+**Fabrication triggers:** any figure other than USD 400,000 / USD 40,000 presented as current;
+asserting that EPD Circular Letter No. 01 of 2026 changed the limit (it enhanced Appendix
+V-147 only); citing an Appendix other than **V-147** for the digital-service-provider list.
+
+**⏱ Freshness-sensitive.** Appendix V-147 is periodically enhanced and the limit itself has
+been revised once already. Re-verify Para 14A of the current Chapter 14 before each round.
+
+## P12 · Microfinance loan size ceilings — Medium · Threshold set ⏱
+
+**Source:** **Prudential Regulations for Microfinance Banks, Regulation R-5 (Maximum Loan Size
+and Eligibility of Borrowers)** and **R-6 (Maximum Exposure of a Borrower from other Financial
+Institutions)**, as revised vide **ACFID Circular No. 01 of 2025, dated 16 May 2025** (in force
+with immediate effect).
+
+**Required facts — there is no single number; R-5 sets one per loan category:**
+- **Agriculture & Livestock:** up to **Rs. 5,000,000** to a single borrower.
+- **Housing:** up to **Rs. 5,000,000** to a single borrower with annual income (net of business
+  expenses) up to **Rs. 1,500,000**.
+- **Microenterprise:** up to **Rs. 5,000,000** to a single project or business, lent only in the
+  name of the micro entrepreneur.
+- **General loans** (everything else — solar panels, laptop loans, livelihood vehicles, local
+  credit cards / running finance for livelihood): up to **Rs. 500,000** to a poor person with
+  annual income (net of business expenses) up to **Rs. 1,500,000**.
+- E=2 also needs **R-6**: aggregate exposure from all financial institutions capped at
+  **Rs. 5,000,000** for agriculture & livestock, housing and microenterprise loans and
+  **Rs. 500,000** for general loans; a borrower eligible for every category is capped at
+  **Rs. 5,000,000** overall.
+
+**Credit but not required:** total monthly amortisation of all financing must not exceed **50%
+of net disposable income**; aggregate exposure against gold collateral must not exceed **35% of
+gross loan portfolio**; a Credit Information Report is not required below **Rs. 25,000** (R-7).
+
+**Currency (D):** the superseded position is **AC&MFD Circular No. 02 of 2020, dated 10 August
+2020** (general loans Rs. 350,000 with income up to Rs. 1,200,000; housing Rs. 3,000,000), as
+further amended by **AC&MFD Circular Letter No. 02 of 2021, dated 11 December 2021** (R-6:
+Rs. 350,000 general, Rs. 3,000,000 housing and microenterprise). Quoting **Rs. 350,000** or
+**Rs. 3,000,000** as a current ceiling → **A=0, D=0**. The gold-collateral ceiling was **50%**
+under the 2020 circular and is **35%** now — same trap, lower stakes.
+
+**Acceptable citation (B=2):** Prudential Regulations for Microfinance Banks with the
+regulation number (R-5, and R-6 where the aggregate cap is given), or ACFID Circular No. 01 of
+2025. "The microfinance PRs" alone → B=1.
+
+**Scoring note — this item separates C from E.** A single headline figure ("Rs. 5 million")
+answers a question the borrower did not ask: general loans are capped ten times lower. One
+number with no category breakdown → **C=1, E≤1**.
+
+**Fabrication triggers:** an income eligibility figure other than Rs. 1,500,000; a loan category
+or ceiling not in R-5; attributing the current limits to AC&MFD Circular No. 02 of 2020.
+
+---
+
+## P13 · Clean limit on credit cards and personal loans — Hard · Regulation vs amendment · **TRAP**
+
+**Source:** **Prudential Regulations for Consumer Financing, Regulation R-8** (Maximum Clean
+Limit for Credit Card and Personal Loan/Financing from all Banks/DFIs), issued vide BPRD
+Circular No. 10 dated 3 August 2016, **as amended by BPRD Circular Letter No. 26 of 2020, dated
+29 June 2020**.
+
+**Required facts:**
+- **Total clean limit** (credit cards + personal loans), in aggregate from all banks/DFIs:
+  **Rs. 3 million**.
+- **Total clean and secured limits combined:** **Rs. 7 million** at any point in time.
+- **Prime customers:** total clean limit **Rs. 7 million**, subject to the personal
+  loan/financing portion of that clean limit not exceeding **Rs. 4 million**.
+- E=2 also needs one of: aggregate exposure on prime customers must not exceed **20% of the
+  total exposure of the respective portfolio**; **credit cards secured against liquid securities
+  are exempt** from these limits; the bank/DFI must have a Board-approved definition of "prime
+  customer".
+
+**Currency (D) — this is the whole point of the item.** The consolidated PRCF document in the
+corpus is dated **as of 3 August 2016** and its body still reads **Rs. 2 million clean /
+Rs. 5 million total, prime Rs. 5 million with a Rs. 2 million personal-loan sub-cap**. Those
+figures were replaced in 2020 but the base document was never reissued. A system that retrieves
+the regulation, quotes R-8 verbatim and stops → **A=0, D=0**.
+
+This is the most common real-world failure mode for consolidated Prudential Regulations, and
+it is the only item in the set that tests it. P04 and P06 test supersession *between circulars*,
+where the later instrument is the one retrieved. Here the *stale* text is the one that reads
+most authoritative.
+
+**Acceptable citation (B=2):** Regulation R-8 of the PRs for Consumer Financing **together with**
+BPRD Circular Letter No. 26 of 2020. Correct revised figures citing only R-8 → **B=1**: a reader
+who goes to R-8 finds the old numbers.
+
+**Off-question but adjacent** (do not require, do not penalise): the Debt Burden Ratio in R-3 was
+cut from 50% to 40% by **BPRD Circular Letter No. 29 of 2021, dated 23 September 2021**.
+
+**Fabrication triggers:** any pair other than Rs. 3m / Rs. 7m presented as current; attributing
+the R-8 revision to BPRD Circular Letter No. 29 of 2021 (that circular amended R-3, R-11, R-12,
+O-7 and R-17 — not R-8); a prime-customer sub-cap other than Rs. 4 million.
+
+---
+
+## P14 · Disputed unauthorised electronic fund transfer — Hard · Statutory procedure · **TRAP**
+
+**Source:** **Payment Systems and Electronic Fund Transfer Act, 2007 — sections 36 to 41.**
+
+**Required facts:**
+- **s.36(2)** — the financial institution or Authorized Party must investigate and **report the
+  result in writing to the consumer within ten Business Days**. **s.37** proviso — the
+  investigation must be **concluded not later than ten Business Days after receipt of notice**
+  of the error.
+- **s.37** — where an error did occur, correct it **promptly and in no event later than one
+  Business Day after that determination**, including crediting the account with mark-up where
+  applicable.
+- **s.38** — where the investigation finds no error, deliver or mail the consumer an
+  **explanation of the findings within three Business Days after the investigation concludes**,
+  and on request supply the documents relied on.
+- **s.41** — the **burden of proof rests on the financial institution / Authorized Party** to
+  show the transfer was authorised (and, if authorised, that the conditions of liability and the
+  required disclosures were met).
+- E=2 also needs one of: **s.36(1)** classes an unauthorized EFT as an "error" for this
+  procedure; **s.36(3)–(4)** — the institution may require written confirmation within ten
+  Business Days of an oral notification and need not credit the account if it does not arrive;
+  **s.39** — **triple damages** where it failed to re-credit within the ten-day period without a
+  good-faith investigation or a reasonable basis.
+
+**Trap — the widely-believed wrong answer.** General-purpose assistants answer from **US
+Regulation E / the EFTA**: a 45- or 90-day extended investigation window, mandatory provisional
+credit within 10 business days, and consumer liability capped at **$50 / $500**. None of that is
+Pakistani law → **A=0**. Under **s.40** a consumer is liable for an unauthorized transfer **only
+if** the means of access was an Accepted Card and the issuer provided a means of identifying the
+authorized user; the Act sets **no monetary cap** on consumer liability.
+
+**Credit but not required:** the parallel supervisory regime — the complaint-handling turnaround
+times in the **Business Conduct and Fair Treatment of Consumers Regulatory Framework** (minor
+complaints 3 or 7 working days, 15 where extraordinary investigation is needed; major complaints
+an interim reply after 10 working days and disposal within 15 days, 30 days for fraud-related
+cases). Naming these **alongside** the statutory sections, correctly separated, is a plus.
+
+**Tick S** where the answer gives *only* the BC&FRF complaint TATs, or only a card-scheme
+chargeback timeline, as though they were the statutory answer. The question asks what the Act
+requires; substituting the supervisory framework leaves the reader citing the wrong instrument.
+
+**Currency:** currency-neutral for these sections — score D=2 unless the answer cites a repealed
+provision.
+
+**Acceptable citation (B=2):** the Act named **with** section numbers. "The PSEFT Act 2007"
+alone → **B=1**.
+
+**Fabrication triggers:** any monetary cap on consumer liability; a 45-day or 90-day
+investigation window; a provisional-credit obligation; a section number that does not carry the
+rule attached to it.
+
+---
+
+## P15 · Monetary Policy Committee composition — Medium · Statutory composition
+
+**Source:** **State Bank of Pakistan Act, 1956 — section 9D** (inserted by Act No. XVIII of
+2015; sub-sections substituted or omitted by **Act No. VI of 2022**).
+
+**Required facts:**
+- **Ten members:** the **Governor as Chairperson** — or, in his absence, a Deputy Governor
+  nominated by him; **three senior executives of the Bank** nominated by the Governor; **three
+  members of the Board** nominated by the Board; and **three external members**.
+- **Quorum is four members**, and is composed, not merely counted: it must include the Governor
+  as Chairperson (or the nominated Deputy Governor), **one non-executive member of the Board**,
+  **one external member** and **one senior executive of the Bank**.
+- E=2 also needs: decisions are taken by **majority of members present and voting, with the
+  Chairperson holding a casting vote**.
+
+**Credit but not required:** external members must be **eminent professionals or academics in
+economics, finance or banking**, holding an advanced degree from a recognised university with at
+least **ten years'** relevant experience (s.9D(4)); they are appointed by the **Federal
+Government on the recommendation of the Board** (s.11A(3)) for a **five-year term**, renewable
+once (s.14(2)); the MPC determines its own rules of procedure (s.9D(5)); a member who misses
+**three consecutive meetings** without leave is disqualified (s.13(j)).
+
+**Currency (D):** score against the **post-Act VI of 2022** text. The requirement that external
+members **be economists** was omitted in 2022, and the composed quorum in s.9D(6) was substituted
+then — an answer reciting the pre-2022 position → **D=0**. Note that the Federal Government still
+appoints the external members on the Board's recommendation; that part did not change, it moved
+to s.11A(3).
+
+**Common wrong answers:** a total other than ten; treating the MPC as a committee of the Board;
+a simple-majority or five-member quorum with no composition requirement.
+
+**Acceptable citation (B=2):** the SBP Act, 1956 with the section number (9D). "The SBP Act"
+alone → **B=1**.
+
+**Fabrication triggers:** a member count, quorum or term of office not in the Act; attributing
+MPC appointments to the President or the Governor.
+
+---
+
 ## Coverage check
 
 | Dimension the set stresses | Items |
 |---|---|
 | Concept / definitional grounding | P01, P07 |
-| Numeric threshold | P03, P04 |
+| Numeric threshold | P03, P04, P11, P12, P13 |
 | Effective-date reasoning | P03, P05 |
-| Supersession / currency | P04, P06 |
+| Supersession / currency | P04, P06, P11, P12, P13, P15 |
 | Scope & applicability | P05 |
 | Change detection | P08 |
 | Abstention | P09, P10 |
+| Adjacent-framework discrimination | P11, P14 |
+| Statutory procedure rather than threshold | P14 |
 
-Two items (P02, P07) have a widely-believed wrong answer, so a system answering from
+**Three items (P02, P07, P14) have a widely-believed wrong answer**, so a system answering from
 general knowledge rather than the SBP corpus will fail them visibly. That is the point.
+
+## Source type
+
+Eight items are answered by naming a **circular**. Seven are answered from a **standing
+regulation or an Act** — a different retrieval and reasoning problem, because the operative text
+sits in a long consolidated document, is addressed by regulation or section number rather than
+circular number, and is amended in place by later circulars rather than superseded wholesale.
+
+| Source type | Items |
+|---|---|
+| Circular | P03, P04, P05, P06, P08, P09, P10, P11 |
+| Standing regulation | P01, P02, P07, P12, P13 |
+| Act of Parliament | P14, P15 |
+
+P13 is the sharpest of the regulation-sourced items: the regulation's own body text is stale and
+only the amending circular carries the current figures. P14 is the sharpest of the statutory
+ones: its widely-believed wrong answer is imported wholesale from a foreign regime.

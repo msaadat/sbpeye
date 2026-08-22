@@ -1,6 +1,6 @@
 # SBPEye Chat Benchmark — Pilot Question Set v1
 
-**10 items.** Give these verbatim to each system under test, one per fresh conversation
+**15 items.** Give these verbatim to each system under test, one per fresh conversation
 (no carry-over context unless the item says otherwise). Record the answer text exactly as
 returned.
 
@@ -18,6 +18,11 @@ returned.
 | P08 | Medium | Recent change detection |
 | P09 | — | False premise (ABSTAIN) |
 | P10 | — | Out of scope (ABSTAIN) |
+| P11 | Hard | Threshold + superseded figure |
+| P12 | Medium | Threshold set + regulation currency |
+| P13 | Hard | Regulation vs amending circular |
+| P14 | Hard | Statutory procedure + timelines |
+| P15 | Medium | Statutory composition |
 
 ---
 
@@ -49,3 +54,17 @@ banks.
 
 **P10.** What are the listing requirements for a company seeking to list on the Pakistan
 Stock Exchange?
+
+**P11.** What is the limit on outward remittance to digital service providers?
+
+**P12.** We are a microfinance bank. What is the maximum loan size we may extend to a single
+borrower, and what income makes a borrower eligible?
+
+**P13.** What is the maximum clean limit one customer can hold across credit cards and
+personal loans from all banks and DFIs?
+
+**P14.** A customer has disputed an electronic fund transfer they say they never authorised.
+What are our statutory timelines for investigating and correcting it, and who has to prove
+the transfer was authorised?
+
+**P15.** Who sits on the Monetary Policy Committee, and what is the quorum for its meetings?

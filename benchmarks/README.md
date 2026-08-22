@@ -12,7 +12,7 @@ number plus a hallucination rate.
 | File | Purpose |
 |------|---------|
 | `rubric-v1.md` | The scoring rubric. Five weighted dimensions, a fabrication gate, a silent-substitution tick, and the rater protocol. |
-| `pilot-v1-questions.md` | The 10 pilot questions. The single source of truth — `run_pilot.py` parses them from here. |
+| `pilot-v1-questions.md` | The pilot questions (15 items). The single source of truth — `run_pilot.py` parses them from here. |
 | `pilot-v1-answer-key.md` | **Grader only.** Verified facts, acceptable citations, and the traps each item sets. |
 | `scoresheet-template.csv` | One pre-filled row per item for a rater to complete. |
 | `run_pilot.py` | Puts the questions to a running SBPEye and captures the answers. |
@@ -48,7 +48,7 @@ Other systems under test are prompted by hand; save their answers in the same JS
 
 ## What the pilot is for
 
-The pilot tests the **rubric**, not the systems. Ten items cannot rank anything — the
+The pilot tests the **rubric**, not the systems. A set this size cannot rank anything — the
 question to answer is whether two raters independently produce the same score. If they do,
 scale to ~60 items and start reporting comparisons. If they do not, the anchors need repair
 first.
@@ -56,6 +56,12 @@ first.
 The first round (2026-08-19) already showed the instrument hitting its ceiling: every
 substantive item scored full marks, so the set needs harder items before it can discriminate.
 See that round's `assessment.md`.
+
+Five items were added on 2026-08-23 in response to that finding — P11 through P15. Four of
+them (P12–P15) are answered from a standing regulation or an Act rather than from a circular,
+which the first ten items barely tested. They have not been through a scored round yet, so
+their difficulty is asserted, not measured: check their tier labels against the first round
+that includes them.
 
 ## Grade the reference, not the plumbing
 

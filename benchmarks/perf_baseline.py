@@ -101,13 +101,64 @@ def section_assets() -> None:
     files = _landing_payload()
     for path in files:
         size = path.stat().st_size
-        gz = len(gzip.compress(path.read_bytes(), 9))
+        gz = len(gzip.compress(path.read_bytes(), 6))
         raw += size
         compressed += gz
         print(f"  {path.name:<64} {size:>7}  gz {gz:>7}")
     print(f"  {'TOTAL (' + str(len(files)) + ' requests)':<64} {raw:>7}  gz {compressed:>7}")
     print(f"  raw {raw // 1024} KB   gzipped {compressed // 1024} KB "
           f"({100 - compressed * 100 // raw}% smaller)")
+
+
+def section_wire(base_url: str) -> None:
+    """What a running server actually puts on the wire — P1 and P7 verification.
+
+    The section above costs the *files*; this costs the **responses**, which is the thing
+    a tester waits for. Needs a server (`.claude/launch.json` → `sbpeye-perf`), and only
+    touches `/spa/assets`, which is public — no auth, no corpus.
+    """
+    import urllib.request
+
+    print(f"\n### over the wire from {base_url}")
+
+    def fetch(path: str, encoding: str | None):
+        request = urllib.request.Request(f"{base_url}{path}")
+        request.add_header("Accept-Encoding", encoding or "identity")
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return len(response.read()), dict(response.headers)
+
+    raw_total = wire_total = 0
+    cache_control = set()
+    files = _landing_payload()
+    print(f"  {'file':<64} {'identity':>9} {'gzip':>9}")
+    for path in files:
+        url = f"/spa/assets/{path.name}"
+        raw, _ = fetch(url, None)
+        wire, headers = fetch(url, "gzip")
+        raw_total += raw
+        wire_total += wire
+        cache_control.add(headers.get("cache-control"))
+        print(f"  {path.name:<64} {raw:>9} {wire:>9}")
+
+    print("  " + "-" * 84)
+    print(f"  {'TOTAL (' + str(len(files)) + ' requests)':<64} "
+          f"{raw_total:>9} {wire_total:>9}")
+    print(f"  raw {raw_total // 1024} KB  ->  on the wire {wire_total // 1024} KB "
+          f"({100 - wire_total * 100 // raw_total}% smaller)")
+    print(f"  Cache-Control served: {cache_control.pop() if len(cache_control) == 1 else cache_control}")
+
+    # P7's real payoff is the second load: a revalidation that costs a round trip each.
+    _, headers = fetch(f"/spa/assets/{files[0].name}", "gzip")
+    conditional = urllib.request.Request(f"{base_url}/spa/assets/{files[0].name}")
+    conditional.add_header("If-None-Match", headers["etag"])
+    try:
+        urllib.request.urlopen(conditional, timeout=10)
+        print("  conditional GET: 200 (unexpected — etag did not match)")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 304:
+            print(f"  conditional GET: 304, Cache-Control: "
+                  f"{exc.headers.get('cache-control')!r} "
+                  f"(with max-age the browser skips this request entirely)")
 
 
 # --------------------------------------------------------------------------
@@ -288,15 +339,21 @@ SECTIONS = {
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--section", choices=sorted(SECTIONS), action="append",
+    parser.add_argument("--section", choices=sorted(SECTIONS) + ["wire"],
+                        action="append",
                         help="run only these sections (repeatable)")
+    parser.add_argument("--server", default="http://localhost:8124",
+                        help="base URL for the `wire` section")
     args = parser.parse_args()
 
     print("=" * 70)
     print("SBPEye server-side read cost — warm cache, minimum of 3 runs")
     print("=" * 70)
     for name in (args.section or SECTIONS):
-        SECTIONS[name]()
+        if name == "wire":
+            section_wire(args.server)
+        else:
+            SECTIONS[name]()
     print("\n" + "=" * 70)
 
 

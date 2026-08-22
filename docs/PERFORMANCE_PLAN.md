@@ -8,7 +8,7 @@ an answer streams.
 Twelve items, measured rather than guessed, ordered by what a user actually feels per unit of
 work. They are deliberately independent: each can land, ship and be verified on its own.
 
-**Status:** P4 landed (uncommitted, §5). Nothing else started.
+**Status:** P1, P4 and P7 landed. Next up is P2 + P3, which is the search story.
 
 ---
 
@@ -16,13 +16,13 @@ work. They are deliberately independent: each can land, ship and be verified on 
 
 | # | Item | Where | Measured effect | Effort | State |
 |---|---|---|---|---|---|
-| **P1** | Enable response compression | `main.py` | 804 KB → 205 KB first paint | XS | ☐ |
+| **P1** | Enable response compression | `main.py:480` | **804 KB → 206 KB on the wire** | XS | ☑ landed |
 | **P2** | `best_window` is O(words × window × tokens) | `search.py:453` | 12–14× on the function | S | ☐ |
 | **P3** | Drop the Chroma `doc_type` pre-filter | `search.py:968`, `:1018` | 60.1 ms → 5.0 ms | S | ☐ |
 | **P4** | SQLite WAL + `busy_timeout` | `database.py` | writers stop blocking readers | S | ☑ landed |
 | **P5** | `/api/laws` loads 3.5 MB it never sends | `serializers.py` | 17.6 ms → 3.9 ms | S | ☐ |
 | **P6** | 25 `async def` routes block the event loop | `main.py` | removes a 5 s global stall | S | ☐ |
-| **P7** | `Cache-Control` on hashed assets | `main.py:492` | 14 revalidations → 0 | XS | ☐ |
+| **P7** | `Cache-Control` on hashed assets | `main.py:517` | **14 revalidations → 0** | XS | ☑ landed |
 | **P8** | Landing route is a 4-deep request chain | `CircularsView.vue` | 4 serial RTTs → 2 | M | ☐ |
 | **P9** | Chat re-renders the thread on every token | `ChatView.vue:943` | stream stutter | M | ☐ |
 | **P10** | `/api/circulars/{id}` N+1 + blob reads | `main.py:1426` | 102 queries → 2 | S | ☐ |
@@ -50,6 +50,15 @@ no LLM — so it reports the cost of a request *minus* framework overhead, which
 worth optimising. `--section assets|laws|search|chroma|status|detail` narrows the run. The
 asset section reads the route's dependency closure out of the build's own `__vite__mapDeps`
 table, so it stays correct when chunks move.
+
+`--section wire` is the exception: it measures a **running server**, which is how P1 and P7 are
+verified. `/spa/assets` is public, so it needs no auth and touches no corpus — start the
+`sbpeye-perf` config in `.claude/launch.json` (port 8124, empty data root, scraper off) and it
+runs beside the real server on 8000 rather than restarting it:
+
+```bash
+.venv/bin/python benchmarks/perf_baseline.py --section wire
+```
 
 **Two caveats, and they matter for reading everything below.**
 
@@ -100,7 +109,61 @@ as written                                    5.3 ms
 
 ---
 
-## 2. P1 — Enable response compression
+## 2. P1 — Enable response compression ☑ landed
+
+`main.py:480`, one line plus the reasoning around it. Verified over the wire:
+
+```
+### over the wire from http://localhost:8124
+  file                                                        identity      gzip
+  index-C1V1oRPN.js                                             485534    120454
+  index-pH_cJlMR.css                                             82214     15720
+  purify.es-B_voZNbR.js                                          67949     22603
+  index-BM0mHMtT.js                                              68740     16951
+  …10 more
+  ---------------------------------------------------------------------------
+  TOTAL (14 requests)                                           823509    211384
+  raw 804 KB  ->  on the wire 206 KB (75% smaller)
+```
+
+Regression tests in `tests/test_response_headers.py`. Full suite: 658 passed.
+
+**Two things worth knowing, both found during the change.**
+
+*Middleware order is load-bearing, and the obvious order is wrong.* Registered outside the
+authentication middleware — the natural reading of "compress everything" — `minimum_size`
+silently never fires. `@app.middleware("http")` builds a `BaseHTTPMiddleware`, which re-emits
+every response as a stream, and Starlette's GZip responder can only apply its size threshold to
+a single-shot body. Measured: an 85-byte `/healthz` went out compressed, saving one byte, having
+paid for a gzip stream. Registering it *inside* the auth middleware fixes it; the cost is that
+the 401 and the login redirect go out uncompressed, and both are under 100 bytes.
+`test_small_responses_are_not_compressed` is what keeps that from regressing.
+
+*The SSE risk this plan flagged does not exist in this Starlette.* 1.3.1 carries
+`DEFAULT_EXCLUDED_CONTENT_TYPES = ("text/event-stream",)` and skips compression for it outright,
+so `/api/chat/stream` is unaffected. That is the library's decision rather than ours, so
+`test_event_stream_is_never_compressed` asserts it — the existing stream test collects the whole
+body before asserting and would not notice buffering.
+
+*`compresslevel=6`, not the default 9.* On the 485 KB entry chunk:
+
+| level | bytes | time |
+|---|---|---|
+| 1 | 144,776 | 3 ms |
+| 4 | 127,203 | 5 ms |
+| 6 | 120,581 | 9 ms |
+| 9 | 120,016 | 11 ms |
+
+9 buys 565 bytes (0.5%) for 22% more CPU, on a shared vCPU, on every cache miss.
+
+**Still open.** Nothing compresses ahead of time, so each cache miss re-compresses the same
+485 KB. P7 means a given browser pays that once, and at test-deployment traffic it does not
+matter — but if the tester count grows, pre-compressed `.js.gz` on disk is the next move.
+Brotli would beat gzip by a further ~15% here, but needs a dependency and Railway terminates
+TLS in front of us. Not worth it at this size.
+
+<details>
+<summary>Original finding</summary>
 
 **Symptom.** Every response goes out uncompressed. Against the running server:
 
@@ -129,11 +192,9 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 **Verify.** The same curl grows a `content-encoding: gzip` header and a `content-length` near
 120 KB. Confirm `/api/circulars/search` is compressed too, and that the SSE stream at
-`/api/chat/stream` still arrives incrementally — Starlette's `GZipMiddleware` passes streaming
-responses through, but this is exactly the pairing worth eyeballing once rather than assuming.
+`/api/chat/stream` still arrives incrementally.
 
-**Note.** Brotli would beat gzip by a further ~15% on this payload, but needs a dependency and
-Railway terminates TLS in front of us anyway. Not worth it at this size.
+</details>
 
 ---
 
@@ -230,7 +291,7 @@ before and after; a change at rank 20 is acceptable, a change at rank 1–5 is n
 
 ## 5. P4 — SQLite WAL ☑ landed
 
-Already done in the working tree, in the admin-console change: `database.py` now applies
+Already done in `4666e74` (the admin-console change): `database.py` now applies
 `journal_mode=WAL`, `busy_timeout=30000` and `synchronous=NORMAL` per engine on connect, with a
 `wal_checkpoint(TRUNCATE)` on shutdown so the corpus copies as a whole file.
 
@@ -326,7 +387,28 @@ intent.
 
 ---
 
-## 8. P7 — No `Cache-Control` on hashed assets
+## 8. P7 — `Cache-Control` on hashed assets ☑ landed
+
+`ImmutableStaticFiles` at `main.py:517`, mounted at `/spa/assets` only. Served headers:
+
+```
+cache-control: public, max-age=31536000, immutable
+conditional GET: 304, Cache-Control: 'public, max-age=31536000, immutable'
+```
+
+**One detail that is easy to get wrong.** `StaticFiles.file_response` decides on the 304
+*before* returning, so a subclass that only decorates the 200 leaves the `NotModifiedResponse`
+with no freshness information — and a 304 that says nothing about freshness asks the browser to
+re-validate again next time, which is the exact round trip this item removes. The override sets
+the header on whatever comes back, 200 or 304. `test_not_modified_still_carries_cache_control`
+pins it.
+
+`index.html` is deliberately excluded — it is the file that names the new hashes after a
+deploy, and a year of caching would strand testers on the old build.
+`test_index_html_is_not_cached_forever` pins that.
+
+<details>
+<summary>Original finding</summary>
 
 **Symptom.** `app.mount("/spa/assets", StaticFiles(...))` (`main.py:492`). Starlette's
 `StaticFiles` sends `etag` and `last-modified` but no `Cache-Control`, so a browser revalidates
@@ -342,6 +424,8 @@ The filenames are content-hashed. They are immutable by construction.
 
 **Verify.** Reload twice with the network panel open: the second load shows the assets served
 from disk cache with no request, and only `index.html` and the API calls on the wire.
+
+</details>
 
 ---
 

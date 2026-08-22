@@ -1,8 +1,10 @@
 from fastapi import FastAPI, Depends, Request, BackgroundTasks, Form, Body
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import (
     FileResponse,
     JSONResponse,
     RedirectResponse,
+    Response,
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
@@ -454,6 +456,30 @@ async def http_exception_as_error(request: Request, exc: StarletteHTTPException)
     return JSONResponse(payload, status_code=exc.status_code, headers=exc.headers)
 
 
+# Registered *before* the authentication middleware below, which puts it inside it: the
+# request reaches auth first, and compression wraps only what the router produces.
+#
+# The order is load-bearing, and the obvious one is wrong. `@app.middleware("http")`
+# builds a `BaseHTTPMiddleware`, which re-emits every response as a stream — so a GZip
+# layer sitting *outside* it never sees a single-shot body, and `minimum_size` can never
+# fire. An 85-byte `/healthz` was being run through the compressor to save one byte.
+# Inside, the short-circuit works and small JSON goes out untouched.
+#
+# What this gives up is compression of the two responses auth returns itself, the 401 and
+# the login redirect. Both are under 100 bytes.
+#
+# It still covers the SPA bundle: middleware wraps `app.router`, and the `/spa/assets`
+# mount is a route on it. That is the 804 KB → 206 KB the landing route was waiting for.
+#
+# `compresslevel=6` rather than the library's 9: on the 485 KB entry chunk 9 buys 565
+# bytes (0.5%) for 22% more CPU, and this compresses on every cache miss.
+#
+# Streaming is safe by construction — Starlette excludes `text/event-stream`, so
+# `/api/chat/stream` still arrives token by token rather than sitting in the compressor's
+# buffer. That exclusion is the library's, so re-check it on a Starlette upgrade.
+app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=6)
+
+
 @app.middleware("http")
 async def require_authentication(request: Request, call_next):
     """The authentication boundary for the whole application.
@@ -487,9 +513,36 @@ SPA_DIR = STATIC_DIR / "spa"
 SPA_INDEX = SPA_DIR / "index.html"
 SPA_ASSETS_DIR = SPA_DIR / "assets"
 
+
+class ImmutableStaticFiles(StaticFiles):
+    """`StaticFiles` that tells the browser these files never change.
+
+    Vite content-hashes every filename under `/spa/assets`, so a given URL's bytes are
+    fixed for all time — a new build produces new names, it does not rewrite old ones.
+    Starlette sends `etag` and `last-modified` but no `Cache-Control`, so a browser
+    re-validated all 14 files on every load: 14 conditional requests, each a full round
+    trip, all of them answered 304, before the landing route could paint. Uvicorn speaks
+    HTTP/1.1 with no server push, so those cost real time on a high-latency link.
+
+    Only for the hashed directory. `index.html` is the file that names the new hashes
+    after a deploy, and caching it for a year would pin testers to the old build.
+    """
+
+    def file_response(self, *args, **kwargs) -> Response:
+        response = super().file_response(*args, **kwargs)
+        # Set on whatever came back, including the 304: a `NotModifiedResponse` that
+        # carries no freshness information asks to be re-validated again next time.
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
+
+
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 if SPA_ASSETS_DIR.exists():
-    app.mount("/spa/assets", StaticFiles(directory=SPA_ASSETS_DIR), name="spa-assets")
+    app.mount(
+        "/spa/assets",
+        ImmutableStaticFiles(directory=SPA_ASSETS_DIR),
+        name="spa-assets",
+    )
 
 
 _CIRCULAR_SYNC_LOCK = threading.Lock()

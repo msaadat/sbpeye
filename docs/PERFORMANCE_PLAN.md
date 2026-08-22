@@ -5,10 +5,12 @@ is not what this document is about. This is about everything *else* the user wai
 bytes before first paint, the search round trip, the detail pane, and the frames dropped while
 an answer streams.
 
-Twelve items, measured rather than guessed, ordered by what a user actually feels per unit of
+Fourteen items, measured rather than guessed, ordered by what a user actually feels per unit of
 work. They are deliberately independent: each can land, ship and be verified on its own.
 
-**Status:** P1, P4 and P7 landed. Next up is P2 + P3, which is the search story.
+**Status:** P1, P2, P3, P4 and P7 landed — circular search is **132 ms → 22 ms**, and the
+landing route ships 206 KB instead of 804 KB. Next up is P6, the one that starts mattering
+when two testers use the app at once.
 
 ---
 
@@ -17,8 +19,9 @@ work. They are deliberately independent: each can land, ship and be verified on 
 | # | Item | Where | Measured effect | Effort | State |
 |---|---|---|---|---|---|
 | **P1** | Enable response compression | `main.py:480` | **804 KB → 206 KB on the wire** | XS | ☑ landed |
-| **P2** | `best_window` is O(words × window × tokens) | `search.py:453` | 12–14× on the function | S | ☐ |
-| **P3** | Drop the Chroma `doc_type` pre-filter | `search.py:968`, `:1018` | 60.1 ms → 5.0 ms | S | ☐ |
+| **P2** | `best_window` is O(words × window × tokens) | `search.py:453` | **12–14× on the function** | S | ☑ landed |
+| **P3** | Drop the Chroma pre-filter (circular arm) | `search.py:965` | **61.1 ms → 7.9 ms** | S | ☑ landed |
+| **P3b** | Law arm still pays the pre-filter | `search.py:1091` | over-fetch starves — §14 | M | ☐ deferred |
 | **P4** | SQLite WAL + `busy_timeout` | `database.py` | writers stop blocking readers | S | ☑ landed |
 | **P5** | `/api/laws` loads 3.5 MB it never sends | `serializers.py` | 17.6 ms → 3.9 ms | S | ☐ |
 | **P6** | 25 `async def` routes block the event loop | `main.py` | removes a 5 s global stall | S | ☐ |
@@ -28,12 +31,16 @@ work. They are deliberately independent: each can land, ship and be verified on 
 | **P10** | `/api/circulars/{id}` N+1 + blob reads | `main.py:1426` | 102 queries → 2 | S | ☐ |
 | **P11** | Markdown re-parsed on every render | `SummarySection.vue:41` | −84 KB initial, less churn | S | ☐ |
 | **P12** | Google Fonts blocks first render | `index.html` | one cross-origin RTT | XS | ☐ |
+| **P13** | `_scan_documents` previews whole attachments | `search.py:1345` | the last of the 22 ms — §15 | S | ☐ |
 
-**Suggested order.** P1 and P7 first — they are the largest user-visible win for the least
-code, and they are pure configuration. Then P2 + P3 together, which is the search story and
-wants one round of verification, not two. Then P6, which is the one that stops mattering only
-until two testers use the app at once. P5, P10, P11, P12 are small and independent — take them
-whenever. P8 and P9 are real refactors; do them last and alone.
+**Order.** Done so far: P1 + P7 (pure configuration, largest win for the least code), then
+P2 + P3 (the search story, verified once rather than twice).
+
+Remaining, in the order worth taking them: **P6** next — invisible to a single-user benchmark,
+and the one that starts mattering the moment two testers overlap. Then **P5, P10, P11, P12**,
+which are small and independent. **P8 and P9** are real refactors; do them last and alone.
+**P3b and P13** are follow-ups this work uncovered — neither blocks anything, and both trade a
+migration or a behaviour change for their remaining milliseconds.
 
 ---
 
@@ -70,7 +77,8 @@ runs beside the real server on 8000 rather than restarting it:
 So "search costs 132 ms" here plausibly means 300–500 ms on Railway, and the 804 KB of P1 is
 gated by the tester's uplink, not by ours.
 
-**Baseline, this machine, 2026-08-22:**
+**Baseline before any of this landed** (this machine, 2026-08-22). Re-run the benchmark for
+current numbers; the landed sections carry their own after-figures.
 
 ```
 ### initial payload for GET /circulars  (CircularsView)
@@ -126,7 +134,7 @@ as written                                    5.3 ms
   raw 804 KB  ->  on the wire 206 KB (75% smaller)
 ```
 
-Regression tests in `tests/test_response_headers.py`. Full suite: 658 passed.
+Regression tests in `tests/test_response_headers.py`. Full suite: 660 passed.
 
 **Two things worth knowing, both found during the change.**
 
@@ -198,7 +206,26 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 ---
 
-## 3. P2 — `best_window` is 87% of search time
+## 3. P2 — `best_window` is 87% of search time ☑ landed
+
+`search.py:453`. Each word is now tested against the query once and the window score rolls —
+add the word entering on the right, subtract the one leaving on the left. O(N·tokens) instead
+of O(N·window·tokens).
+
+**Verified exactly, not approximately.** The rewrite was diffed against the previous
+implementation over the whole attachment corpus plus 400 circular bodies, across seven token
+sets including the degenerate ones (a token matching almost every word, a token matching none,
+and the empty set) and hand-written edge cases around the window boundary:
+
+```
+12117 comparisons over 1728 documents, 0 mismatches
+```
+
+Tie-breaking is preserved: both take the *first* window of a maximal score, so identical input
+gives a byte-identical snippet.
+
+<details>
+<summary>Original finding</summary>
 
 **Symptom.** `cProfile` over three `search("AML CFT")` calls:
 
@@ -238,11 +265,58 @@ rather than trusting the reasoning — that is how the table above was produced.
 **Worth considering alongside.** Even at 13× this is scanning a 100k-word document to pick 25
 words, on a path the docstring calls a fallback. Capping the scan (first ~20k words, or a
 window around the first hit) would make the remaining cost independent of document size. That
-is a behaviour change, so it is a separate decision from the rewrite, which is not.
+is a behaviour change, so it is a separate decision from the rewrite, which is not. **Still
+open** — see P13.
+
+</details>
 
 ---
 
-## 4. P3 — The Chroma metadata pre-filter costs 35×
+## 4. P3 — The Chroma metadata pre-filter costs 35× ☑ landed (circular arm only)
+
+`_query_chunks` at `search.py:965`. The circular arm now over-fetches `CANDIDATE_COUNT × 5`
+neighbours with no `where=` and drops law chunks in Python.
+
+**This plan assumed it would work for both arms. It does not.** The assumption was that the two
+corpora were comparably sized; they are not. Of 44,395 chunks, 36,226 are circular or attachment
+and only **8,169 are law**. So a circular query's neighbourhood is overwhelmingly circular
+chunks and the over-fetch has room to spare, while a law query's neighbourhood is *also* mostly
+circular chunks and the law arm starves — measured across five law queries, the top 150 held as
+few as **4** law chunks against the 50 the arm needs.
+
+Buying that margin back costs more than the filter it replaces:
+
+| law arm | time | yield (worst of 5) | |
+|---|---|---|---|
+| `where={"kind": "law"}`, n=50 | 21.1 ms | 50 | **kept** |
+| no filter, n=150 | 4.6 ms | 4 | starved |
+| no filter, n=500 | 16.7 ms | 11 | starved |
+| no filter, n=1000 | 33.4 ms | 56 | barely enough, and slower |
+
+So the law arm keeps its pre-filter. It is also much cheaper than the circular arm's was
+(21.1 ms against 61.1 ms) because `$eq` over a small subset is not the same query as `$in` over
+a large one — which is why the original 35× headline overstated the law side. Tracked as **P3b**.
+
+**The over-fetch is sized on adversarial queries, not friendly ones.** At the ×3 this plan
+originally proposed, the worst case over law-flavoured phrasing, single stopwords and junk was
+59 against 50 needed — a 1.2× margin, one unlucky query from starving. ×5 gives 2.6× for 2.7 ms:
+
+| n_results | worst time | worst yield | margin |
+|---|---|---|---|
+| 150 (×3) | 5.2 ms | 59 | 1.2× |
+| **250 (×5)** | **8.6 ms** | **128** | **2.6×** |
+| 400 (×8) | 14.2 ms | 220 | 4.4× |
+
+**And a margin is not a guarantee, so there is a fallback.** If the over-fetch does come up
+short, the arm re-runs the old filtered query rather than handing back fewer candidates than
+the rest of the fusion was sized for. The arm can therefore never be *weaker* than before this
+change — only occasionally slower, on queries that do not arise in practice. Three tests cover
+it, including that a store smaller than the over-fetch is not mistaken for a starved
+neighbourhood (without that distinction a freshly indexed deployment would pay the slow query
+on every search).
+
+<details>
+<summary>Original finding</summary>
 
 **Symptom.** `_vector_ranks` (`search.py:968`) passes
 `where={"doc_type": {"$in": ["circular", "attachment"]}}`. That pre-filter makes Chroma scan
@@ -281,11 +355,73 @@ cyber security incident reporting          113.0ms        18.3ms      6.2x
 MEAN                                       133.3ms        19.0ms      7.0x
 ```
 
-**Verify.** Top-20 result *order* was identical on six of the seven queries above, with 19/20
-overlap on `islamic banking mudarabah` — a law chunk displacing a marginal circular at the
-tail of the over-fetch. That single-result drift is the price of the no-migration option and
-is the reason to prefer separate collections eventually. Diff the top-20 for a fixed query set
-before and after; a change at rank 20 is acceptable, a change at rank 1–5 is not.
+**Verify.** Diff the top-20 for a fixed query set before and after; a change at rank 20 is
+acceptable, a change at rank 1–5 is not.
+
+</details>
+
+### As landed: 132 ms → 22 ms
+
+```
+query                                        before      after   speedup
+capital adequacy                            159.6ms      26.5ms      6.0x
+foreign exchange remittance                 101.3ms      18.5ms      5.5x
+AML CFT                                     219.4ms      30.9ms      7.1x
+minimum capital requirement banks            84.1ms      15.6ms      5.4x
+know your customer                           76.5ms      15.2ms      5.0x
+islamic banking mudarabah                   180.2ms      28.7ms      6.3x
+cyber security incident reporting           113.8ms      21.4ms      5.3x
+microfinance institutions ordinance         102.2ms      17.6ms      5.8x
+prudential regulations                       74.4ms      12.6ms      5.9x
+deposit protection                           85.2ms      16.6ms      5.1x
+------------------------------------------------------------------------
+MEAN                                        119.7ms      20.4ms      5.9x
+```
+
+Law search is byte-identical before and after, as it must be — that arm did not change.
+
+**Circular results moved on 2 of 10 queries, and the movement is worth understanding rather
+than waving through.** Both are *insertions*, not reorderings:
+
+```
+islamic banking mudarabah   rank 4  gained IBD Circular No. 04 of 2008
+                            rank 20 dropped BPD Circular Letter No. 40 of 2005
+deposit protection          rank 12 gained BPRD Circular No. 07 of 2011
+                            rank 20 dropped BPRD Circular No. 10 of 2019
+```
+
+Everything above the insertion point is unchanged; everything below shifts down one and the
+old rank 20 falls off. The cause is not the Python filter — it is that HNSW is *approximate*,
+and `ef` scales with `n_results`. Searching for 250 neighbours explores more of the graph than
+searching for 50, so the new path finds near neighbours the old one missed. The inserted result
+for an Islamic-banking query is an IBD (Islamic Banking Department) circular joining three
+other IBD circulars at the top, which reads as better recall rather than drift.
+
+**Both were then checked against the documents themselves**, rather than left as inference.
+
+*`islamic banking mudarabah` — the change is an improvement.* The gained circular is
+*Instructions and Guidelines for Shariah Compliance in Islamic Banking Institutions* (vector
+neighbour #49, distance 0.5776; body: "islamic" ×6, "shariah" ×2). The dropped one is *R-6(1B)
+20% Limit on Investment in Shares* — which had **no chunk in the top 250 at all** and sat at
+lexical rank 50, the last position the lexical arm emits. It was in the results because
+`mudarabah` expands to `investment, profit, sharing` and the circular is about *investment in
+shares*: the same word in an unrelated sense. A false friend at rank 20, replaced by a document
+that is squarely on topic at rank 4.
+
+*`deposit protection` — the change is marginal, and the query has no right answer here.* The
+gained circular is *Service Charges on PLS Deposit Accounts*, whose matched passage is about
+small depositors declining as service charges rose — depositor-protection-adjacent, and new to
+the vector arm. The dropped one is *Branchless Banking Regulations*, whose matched passage is a
+**glossary definition of the word "Deposit"**. So the substantive document displaced the
+boilerplate one. But the corpus holds **no Deposit Protection Corporation or deposit-insurance
+circulars** — the seven title matches are depositor grievances, sponsor shares and Islamic
+returns — so both results are weak and the swap is low-stakes churn.
+
+One correction worth recording, because the obvious reading of the diff is wrong: the dropped
+document here was **not evicted from the vector arm**. It is still in it, at rank 10; it fell
+below the top 20 because the newcomer pushed everything down one. The aggregate check that the
+wider search is not returning worse neighbours is the distance of the last chunk kept, which
+improved slightly — 0.6581 before, 0.6551 after.
 
 ---
 
@@ -577,7 +713,43 @@ in Inter.
 
 ---
 
-## 14. Checked and not worth doing
+## 14. P3b — One Chroma collection per corpus
+
+**Deferred, not rejected.** It is the fix that deletes a heuristic rather than tuning one.
+
+Circulars and laws share a single collection, so each arm has to exclude the other's chunks —
+and every way of doing that is a compromise. The circular arm over-fetches and filters in
+Python, which works only because it is the majority corpus and which needs a fallback for when
+that fails (§4). The law arm cannot do even that and pays 21.1 ms of pre-filter per search.
+Separate collections make both arms a plain ANN query at **1.9 ms**, with no over-fetch, no
+margin to size, no fallback path, and no approximate-recall difference to reason about.
+
+The cost is a re-index of a 330 MB store plus a migration for the deployed volume — which is
+exactly why it was not the first move, and why it is worth doing once the corpus grows or the
+law search path gets real use. Note the numbers scale against us: the over-fetch margin is a
+function of how lopsided the two corpora are, so it narrows as the law corpus grows.
+
+---
+
+## 15. P13 — `_scan_documents` previews whole attachments
+
+**Left open by P2 deliberately.** The rewrite made `best_window` 13× faster; it did not stop it
+being handed a 99,321-word document to pick 25 words out of.
+
+`_scan_documents` (`search.py:1345`) is the fallback for circulars the vector arm did not cover.
+It calls `make_preview` on entire attachment texts — which `best_window`'s own docstring says
+never to do, because term density over a whole document prefers prose *about* a subject to the
+table that states it. So this is a correctness smell and the remaining bulk of the 22 ms, in the
+same place.
+
+Capping the scan — the first ~20k words, or a window around the first token hit — makes the cost
+independent of document size. Unlike P2 that is a **behaviour change**: it can change which
+passage is previewed for a long attachment. It therefore needs a judgement about snippet quality
+rather than an equality check, which is why it is its own item.
+
+---
+
+## 16. Checked and not worth doing
 
 Recorded so the same ground is not covered twice.
 

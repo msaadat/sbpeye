@@ -468,15 +468,29 @@ def best_window(text: str, query_tokens: set[str], window: int = SNIPPET_WINDOW)
     if len(words) <= window:
         return text
 
-    words_lower = [re.sub(r"[^\w]", "", w).lower() for w in words]
-    best_score = -1
+    # Each word is tested against the query once, then the window score *rolls*: add the
+    # word entering on the right, subtract the one leaving on the left. Scoring each
+    # window from scratch re-tested all 25 words at every one of the N positions, so a
+    # word was examined 25 times over — O(N·window·tokens) to compute something that is
+    # O(N·tokens) plus a running total.
+    #
+    # It read as a detail because the docstring above promises this only ever sees a
+    # passage. `_scan_documents` does not keep that promise: on the lexical-only fallback
+    # it previews *whole attachments*, and the largest in the corpus is 99,321 words. That
+    # made this single function 87% of a search — 17.3 million inner comparisons for three
+    # queries, half a second for one document. Same snippet, verified byte-for-byte
+    # against the previous implementation across the attachment corpus.
+    strip_punctuation = re.compile(r"[^\w]").sub
+    hits = [
+        1 if any(qt in w for qt in query_tokens) else 0
+        for w in (strip_punctuation("", word).lower() for word in words)
+    ]
+
+    score = sum(hits[:window])
+    best_score = score
     best_pos = 0
-    for i in range(len(words) - window + 1):
-        score = sum(
-            1
-            for w in words_lower[i : i + window]
-            if any(qt in w for qt in query_tokens)
-        )
+    for i in range(1, len(words) - window + 1):
+        score += hits[i + window - 1] - hits[i - 1]
         if score > best_score:
             best_score = score
             best_pos = i
@@ -868,6 +882,7 @@ def _result_sort_date(item) -> float:
 
 class SearchEngine:
     CANDIDATE_COUNT = 50           # candidates per retrieval method
+    VECTOR_OVERFETCH = 5           # neighbours fetched per candidate — see _query_chunks
     RRF_K = 60                     # RRF damping constant
     TITLE_MATCH_BONUS = 0.05       # per-word title overlap bonus
     DEPT_MATCH_BONUS = 0.02        # per-word department overlap bonus
@@ -947,6 +962,77 @@ class SearchEngine:
             )
         return q_obj
 
+    def _query_chunks(self, query: str, keep_chunk, where: dict) -> dict:
+        """Nearest chunks matching `keep_chunk`, filtered in Python rather than by Chroma.
+
+        Circulars and laws share one collection, so each arm has to see only its own
+        chunks. Expressing that as a `where=` on the query is the obvious way and is
+        startlingly expensive: a metadata pre-filter makes Chroma walk all 44,395 chunks
+        instead of descending the HNSW index. Measured, same query, `n_results=50`:
+
+            where={"doc_type": {"$in": ["circular", "attachment"]}}   60.1 ms
+            where={"doc_type": {"$ne": "law"}}                        49.7 ms
+            no filter                                                  1.9 ms
+            no filter, n_results=150                                   5.0 ms
+
+        So: ask for `VECTOR_OVERFETCH` times as many neighbours with no filter, drop the
+        foreign ones here, and keep the nearest `CANDIDATE_COUNT` of what is left.
+
+        **This only works because circular chunks are the bulk of the store** — 36,226 of
+        44,395 against the law corpus's 8,169. A circular query's 150 nearest neighbours
+        are overwhelmingly circular chunks (worst case measured across 14 queries: 99, so
+        twice what the arm needs). The mirror image is not true and `_law_vector_ranks`
+        deliberately does not call this; the note there has the numbers.
+
+        A majority is not a guarantee, so `where` is kept as a fallback rather than
+        deleted: if the over-fetch does come up short the query is simply re-run the old
+        way, and the arm is never weaker than it was before this optimisation — only
+        sometimes slower, on queries that do not arise in practice. `VECTOR_OVERFETCH` is
+        sized to keep that path cold. Measured worst case over ten queries chosen to be
+        hostile (law-flavoured phrasing, single stopwords, junk):
+
+            n_results=150   5.2 ms   worst yield  59   1.2x margin
+            n_results=250   8.6 ms   worst yield 128   2.6x margin   (this)
+            n_results=400  14.2 ms   worst yield 220   4.4x margin
+
+        The version with no heuristic at all is one collection per corpus (the 1.9 ms
+        row), which costs a re-index of a 330 MB store; see `docs/PERFORMANCE_PLAN.md` P3.
+        """
+        embeddings = embedding_backend.embed_queries([query])
+        results = collection.query(
+            query_embeddings=embeddings,
+            n_results=self.CANDIDATE_COUNT * self.VECTOR_OVERFETCH,
+            include=["metadatas", "documents", "distances"],
+        )
+
+        metas = results["metadatas"][0] if results.get("metadatas") else []
+        keep = [i for i, meta in enumerate(metas) if keep_chunk(meta)]
+
+        if len(keep) < self.CANDIDATE_COUNT and len(metas) >= (
+            self.CANDIDATE_COUNT * self.VECTOR_OVERFETCH
+        ):
+            # Short, and not merely because the store holds fewer chunks than we asked
+            # for. Pay the pre-filter rather than hand back a thinner arm.
+            logger.debug(
+                "Vector over-fetch yielded %d of %d candidates for %r — "
+                "falling back to the metadata filter",
+                len(keep), self.CANDIDATE_COUNT, query,
+            )
+            return collection.query(
+                query_embeddings=embeddings,
+                n_results=self.CANDIDATE_COUNT,
+                where=where,
+                include=["metadatas", "documents", "distances"],
+            )
+
+        keep = keep[: self.CANDIDATE_COUNT]
+        # Rebuilt in Chroma's own shape so `_collect_evidence` cannot tell the difference.
+        return {
+            field: [[results[field][0][i] for i in keep]]
+            for field in ("ids", "metadatas", "documents", "distances")
+            if results.get(field)
+        }
+
     def _vector_ranks(
         self, query: str
     ) -> tuple[dict[str, int], dict[str, list[MatchEvidence]]]:
@@ -958,15 +1044,13 @@ class SearchEngine:
         failure degrades to an empty arm rather than taking the whole search down.
         """
         try:
-            query_embeddings = embedding_backend.embed_queries([query])
-            results = collection.query(
-                query_embeddings=query_embeddings,
-                n_results=self.CANDIDATE_COUNT,
-                # Laws share the collection; without this their chunks would enter the
-                # circular candidate set as ids that resolve to no circular, silently
-                # displacing real hits. Every circular/attachment chunk carries doc_type.
+            # Laws share the collection; without this filter their chunks would enter the
+            # circular candidate set as ids that resolve to no circular, silently
+            # displacing real hits. Every circular/attachment chunk carries doc_type.
+            results = self._query_chunks(
+                query,
+                lambda meta: meta.get("doc_type") in ("circular", "attachment"),
                 where={"doc_type": {"$in": ["circular", "attachment"]}},
-                include=["metadatas", "documents", "distances"],
             )
         except Exception:
             logger.exception(
@@ -1010,6 +1094,21 @@ class SearchEngine:
         """Rank laws via Chroma, restricted to law chunks.
 
         Returns ``({document_id: rank}, {document_id: [MatchEvidence, …]})``.
+
+        Keeps the metadata pre-filter that `_vector_ranks` was able to drop, because here
+        the trade runs the other way. Laws are 8,169 of 44,395 chunks, so they are sparse
+        in any unfiltered neighbourhood and the over-fetch starves: across five law
+        queries the top 150 held as few as 4 law chunks against the 50 this arm needs.
+        Buying the margin back costs more than the filter does — measured, worst of five:
+
+            where={"kind": "law"}, n=50   20.5 ms   yields 50   (this)
+            no filter, n=150              4.6 ms    yields 4    starved
+            no filter, n=500              16.7 ms   yields 11   starved
+            no filter, n=1000             33.4 ms   yields 56   barely enough, slower
+
+        Cheaper than the circular arm's old filter (60.1 ms) because `$eq` over a small
+        subset is not the same query as `$in` over a large one. Separate collections would
+        make this 1.9 ms and delete the whole trade-off.
         """
         try:
             results = collection.query(

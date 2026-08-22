@@ -218,38 +218,65 @@ def section_search() -> None:
 
 
 def section_chroma() -> None:
-    """P3 in isolation: what the doc_type pre-filter costs."""
+    """P3 in isolation: what the metadata pre-filter costs, and the over-fetch's margin.
+
+    The two arms landed differently and this section shows why: circulars are the bulk of
+    the collection so they can be filtered in Python off an unfiltered over-fetch, while
+    laws are too sparse for that to yield a full arm and keep their pre-filter.
+    """
     from sbpeye.database import collection, embedding_backend
+    from sbpeye.search import search_engine
+
+    need = search_engine.CANDIDATE_COUNT
+    overfetch = need * search_engine.VECTOR_OVERFETCH
 
     print("\n### Chroma query strategies (n_results=50 unless noted)")
-    print(f"  collection holds {collection.count():,} chunks")
-    embeddings = embedding_backend.embed_queries(
-        ["anti money laundering customer due diligence"]
-    )
+    print(f"  collection holds {collection.count():,} chunks; "
+          f"arms need {need}, over-fetch asks {overfetch}")
 
-    def query(**kwargs):
-        return lambda: collection.query(
-            query_embeddings=embeddings,
-            include=["metadatas", "documents", "distances"],
-            **kwargs,
+    # Deliberately hostile to the over-fetch: law-flavoured phrasing pulls the circular
+    # arm's neighbourhood toward the corpus it has to filter out.
+    queries = ["anti money laundering customer due diligence",
+               "microfinance institutions ordinance",
+               "state bank of pakistan act"]
+    embeddings = {q: embedding_backend.embed_queries([q]) for q in queries}
+
+    def worst(**kwargs):
+        return max(
+            bench(lambda e=e, k=kwargs: collection.query(
+                query_embeddings=e,
+                include=["metadatas", "documents", "distances"], **k))
+            for e in embeddings.values()
         )
 
-    report('$in ["circular","attachment"]  (current)',
-           bench(query(n_results=50, where={"doc_type": {"$in": ["circular", "attachment"]}})))
-    report('$ne "law"',
-           bench(query(n_results=50, where={"doc_type": {"$ne": "law"}})))
-    report("no filter, n=50",
-           bench(query(n_results=50)))
-    report("no filter, n=150  (over-fetch + filter in python)",
-           bench(query(n_results=150)))
+    print("  -- circular arm --")
+    report('$in ["circular","attachment"]  (before P3)',
+           worst(n_results=need, where={"doc_type": {"$in": ["circular", "attachment"]}}))
+    report('$ne "law"', worst(n_results=need, where={"doc_type": {"$ne": "law"}}))
+    report("no filter, n=50  (floor: no filtering at all)", worst(n_results=need))
+    report(f"no filter, n={overfetch}  (landed)", worst(n_results=overfetch))
 
-    # Does over-fetching actually leave enough candidates?
-    result = collection.query(query_embeddings=embeddings, n_results=150,
-                              include=["metadatas"])
-    kept = sum(1 for m in result["metadatas"][0]
-               if m.get("doc_type") in ("circular", "attachment"))
-    print(f"  top-150 unfiltered retains {kept} circular/attachment chunks "
-          f"(50 needed)")
+    print("  -- law arm --")
+    report('where={"kind": "law"}  (landed — over-fetch starves here)',
+           worst(n_results=need, where={"kind": "law"}))
+
+    # The margin is the whole argument for the over-fetch, so print it rather than assert
+    # it in prose: this is the number that decides VECTOR_OVERFETCH.
+    print("  -- over-fetch yield, worst of the queries above --")
+    for label, predicate in (
+        ("circular/attachment", lambda m: m.get("doc_type") in ("circular", "attachment")),
+        ("law", lambda m: m.get("kind") == "law"),
+    ):
+        yields = [
+            sum(1 for m in collection.query(query_embeddings=e, n_results=overfetch,
+                                            include=["metadatas"])["metadatas"][0]
+                if predicate(m))
+            for e in embeddings.values()
+        ]
+        low = min(yields)
+        print(f"  {label:<24} worst yield {low:>4} of {overfetch}  "
+              f"-> {low / need:.1f}x margin"
+              f"{'' if low >= need else '   STARVED, needs the pre-filter'}")
 
 
 # --------------------------------------------------------------------------

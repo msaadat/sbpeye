@@ -306,15 +306,38 @@ def test_delisted_documents_are_left_out_of_empty_query_browse(no_vectors):
     assert total == 1
 
 
+def _mixed_chunks(law_count: int, circular_count: int) -> dict:
+    """A Chroma response holding both corpora, laws first so they are the near ones."""
+    metas = [
+        {"doc_type": "law", "kind": "law", "document_id": f"law-{i}"}
+        for i in range(law_count)
+    ] + [
+        {"doc_type": "circular", "circular_id": f"circ-{i}"}
+        for i in range(circular_count)
+    ]
+    return {
+        "ids": [[f"chunk-{i}" for i in range(len(metas))]],
+        "metadatas": [metas],
+        "documents": [["text" for _ in metas]],
+        "distances": [[0.1 for _ in metas]],
+    }
+
+
 def test_the_circular_vector_arm_excludes_law_chunks(monkeypatch):
-    """Law chunks share the Chroma collection and must never enter circular candidates."""
+    """Law chunks share the Chroma collection and must never enter circular candidates.
+
+    Asserted on the candidates rather than on the `where=` argument, because the filtering
+    moved out of Chroma and into Python for speed (`_query_chunks`, and P3 in
+    docs/PERFORMANCE_PLAN.md). The invariant is the same one; this states it in terms of
+    what comes out, which also catches the Python filter being wrong — the argument check
+    could not.
+    """
     db, _ = make_session()
-    captured = {}
 
     class FakeCollection:
         def query(self, **kwargs):
-            captured.update(kwargs)
-            return {"ids": [[]], "metadatas": [[]]}
+            # Laws first and in the majority: if the arm leaked, it would leak here.
+            return _mixed_chunks(law_count=200, circular_count=60)
 
     monkeypatch.setattr("sbpeye.search.collection", FakeCollection())
     monkeypatch.setattr(
@@ -322,9 +345,69 @@ def test_the_circular_vector_arm_excludes_law_chunks(monkeypatch):
     )
     monkeypatch.setattr(SearchEngine, "_law_vector_ranks", lambda self, query: ({}, {}))
 
-    search_engine.search("SME financing", db)
+    ranks, evidence = search_engine._vector_ranks("SME financing")
 
-    assert captured["where"] == {"doc_type": {"$in": ["circular", "attachment"]}}
+    assert ranks, "the circular arm returned nothing at all"
+    assert all(key.startswith("circ-") for key in ranks), ranks
+    assert all(key.startswith("circ-") for key in evidence), evidence
+
+
+def test_the_circular_vector_arm_falls_back_when_overfetch_is_starved(monkeypatch):
+    """A neighbourhood with too few circular chunks must not yield a thinner arm.
+
+    The over-fetch is a majority argument, not a guarantee (`_query_chunks`). When it does
+    not pay off the arm re-queries with the metadata filter rather than handing back fewer
+    candidates than every other arm was sized for.
+    """
+    db, _ = make_session()
+    calls = []
+
+    class FakeCollection:
+        def query(self, **kwargs):
+            calls.append(kwargs)
+            if "where" in kwargs:
+                return _mixed_chunks(law_count=0, circular_count=50)
+            # Over-fetch comes back full, but almost entirely laws.
+            asked = kwargs["n_results"]
+            return _mixed_chunks(law_count=asked - 5, circular_count=5)
+
+    monkeypatch.setattr("sbpeye.search.collection", FakeCollection())
+    monkeypatch.setattr(
+        "sbpeye.search.embedding_backend.embed_queries", lambda queries: [[0.0]]
+    )
+
+    ranks, _ = search_engine._vector_ranks("SME financing")
+
+    assert len(calls) == 2, "expected the filtered fallback to run"
+    assert "where" not in calls[0]
+    assert calls[1]["where"] == {"doc_type": {"$in": ["circular", "attachment"]}}
+    assert len(ranks) == 50
+    assert all(key.startswith("circ-") for key in ranks)
+
+
+def test_the_circular_vector_arm_does_not_fall_back_on_a_small_store(monkeypatch):
+    """A store smaller than the over-fetch is not a starved neighbourhood.
+
+    Without this distinction a fresh or lightly indexed deployment would pay the slow
+    filtered query on every single search, having already been handed everything there is.
+    """
+    db, _ = make_session()
+    calls = []
+
+    class FakeCollection:
+        def query(self, **kwargs):
+            calls.append(kwargs)
+            return _mixed_chunks(law_count=0, circular_count=3)
+
+    monkeypatch.setattr("sbpeye.search.collection", FakeCollection())
+    monkeypatch.setattr(
+        "sbpeye.search.embedding_backend.embed_queries", lambda queries: [[0.0]]
+    )
+
+    ranks, _ = search_engine._vector_ranks("SME financing")
+
+    assert len(calls) == 1, "the whole store came back; there was nothing to fall back to"
+    assert len(ranks) == 3
 
 
 def test_the_law_vector_arm_filters_to_law_chunks(monkeypatch):

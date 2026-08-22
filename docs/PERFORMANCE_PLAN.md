@@ -8,9 +8,9 @@ an answer streams.
 Fifteen items, measured rather than guessed, ordered by what a user actually feels per unit of
 work. They are deliberately independent: each can land, ship and be verified on its own.
 
-**Status:** P1, P2, P3, P4, P5 and P7 landed — circular search is **132 ms → 22 ms**, the
-landing route ships 206 KB instead of 804 KB, and the laws list went from 273 queries to 7.
-Next up is P6, the one that starts mattering when two testers use the app at once.
+**Status:** P1, P2, P3, P4, P5, P7, P13 and P14 landed. Circular search **132 → 19 ms**, law
+search **98 → 28 ms**, the landing route ships 206 KB instead of 804 KB, and the laws list went
+from 273 queries to 7. Next up is P6, the one that starts mattering when two testers overlap.
 
 ---
 
@@ -31,17 +31,16 @@ Next up is P6, the one that starts mattering when two testers use the app at onc
 | **P10** | `/api/circulars/{id}` N+1 + blob reads | `main.py:1426` | 102 queries → 2 | S | ☐ |
 | **P11** | Markdown re-parsed on every render | `SummarySection.vue:41` | −84 KB initial, less churn | S | ☐ |
 | **P12** | Google Fonts blocks first render | `index.html` | one cross-origin RTT | XS | ☐ |
-| **P13** | `_scan_documents` previews whole attachments | `search.py:1345` | the last of the 22 ms — §15 | S | ☐ |
-| **P14** | Law search is 5× slower than circular search | `search.py:1261` | **121 ms → ~25 ms** — §16 | S | ☐ |
+| **P13** | `_scan_documents` previews whole attachments | `search.py:552` | **24.2 ms → 19.4 ms** | S | ☑ landed |
+| **P14** | Law search is 5× slower than circular search | `search.py:552` | **97.7 ms → 28.0 ms** | S | ☑ landed |
 
-**Order.** Done so far: P1 + P7 (pure configuration, largest win for the least code), then
-P2 + P3 (the search story, verified once rather than twice).
+**Order.** Done so far: P1 + P7 (pure configuration, largest win for the least code), P2 + P3
+(the search story), P5, then P13 + P14 (one defect in two places, so one fix).
 
 Remaining, in the order worth taking them: **P6** next — invisible to a single-user benchmark,
 and the one that starts mattering the moment two testers overlap. Then **P10, P11, P12**, which
-are small and independent. **P8 and P9** are real refactors; do them last and alone.
-**P3b, P13 and P14** are follow-ups this work uncovered; none blocks anything. P13 and P14 are
-the same defect in two places and are worth taking together.
+are small and independent. **P8 and P9** are real refactors; do them last and alone. **P3b** is
+the one deferred item: it needs a re-index, and nothing is blocked on it.
 
 ---
 
@@ -814,7 +813,69 @@ function of how lopsided the two corpora are, so it narrows as the law corpus gr
 
 ---
 
-## 15. P13 — `_scan_documents` previews whole attachments
+## 15. P13 + P14 — previewing a whole document ☑ landed
+
+One defect in two places, so one fix: `make_preview` now locates a region before scoring it
+(`_preview_region`, `search.py:552`). Its only two callers are the fallback paths — `_law_result`
+(P14) and `_scan_documents` (P13) — and callers holding a real passage already went straight to
+`best_window`, so nothing else is touched.
+
+```
+law search — /laws box (per_page=100)      before      after   speedup
+foreign exchange                          120.6ms      32.5ms      3.7x
+banking companies                         137.8ms      34.3ms      4.0x
+microfinance                              109.5ms      28.1ms      3.9x
+MEAN                                       97.7ms      28.0ms      3.5x
+
+circular search — /circulars (per_page=20)
+MEAN                                       24.2ms      19.4ms      1.3x
+```
+
+P14 was the win; P13 is small, as expected — `_scan_documents` only fires for results the
+vector arm did not cover, and attachments (12 KB average) were never as expensive as law
+editions (45 KB).
+
+**The design retreated once, and the reason is worth keeping.** The first version located the
+*densest* region: find every query match with `finditer`, two-pointer for the span containing
+most of them. It got 3.1× where the current one gets 12.5× on the same input. The intuition is
+backwards — `finditer` is cheap on a document full of matches and expensive on one nearly empty
+of them, because it must reach the end to prove there are no more. `search` stops at the first
+hit. And the documents that dominated the bill were precisely the weak matches, where the
+densest window was never meaningful. Capping the match list (`islice`) did not help either: 4.3×
+at 30 hits, because the scan, not the list, was the cost.
+
+| strategy | laws | attachments | snippet unchanged |
+|---|---|---|---|
+| densest, all hits | 3.1× | 2.5× | 44% / 79% |
+| densest, first 30 hits | 4.3× | 2.9× | 45% / 79% |
+| **first hit** | **12.5×** | **4.8×** | 36% / 76% |
+
+**A rejected refinement, also worth keeping.** `best_window` strips punctuation inside a word
+before testing, so it matches "sme" in "S.M.E"; the region regex does not, and closing that gap
+by allowing `[\W_]*` between characters made things worse — the loose pattern matches letters
+scattered across unrelated words, so it confidently selects a region containing no whole query
+term. Over the corpus it turned **3 such misses into 192**. The strict pattern's 3 misses fall
+back to the opening of the document, which is a reasonable preview; the loose pattern's 192 land
+on noise.
+
+**This is a visible behaviour change, and the honest number is that 64% of law previews and 24%
+of attachment previews now show different text.** What did not change: in 6,640 attachment
+previews and 555 law previews, the number that stopped containing a query term at all is **3**,
+all from the punctuation gap above, all pre-existing in the sense that they fall back to the
+document opening rather than to nonsense. The old behaviour was not a quality baseline worth
+preserving either — `best_window`'s own docstring says density across a whole document prefers
+prose *about* a subject to the table that states it.
+
+Four tests in `tests/test_snippet_evidence.py`, where the "locating is a separate job from
+cutting" framing already lives: a term buried 140 KB into a document is still found, the region
+is capped whatever the document size, cut edges are marked with ellipses, and a document with no
+match falls back to its opening. Three of the four fail against a naive first-N-characters
+truncation. Full suite: 666 passed.
+
+<details>
+<summary>Original finding</summary>
+
+## P13 — `_scan_documents` previews whole attachments
 
 **Left open by P2 deliberately.** The rewrite made `best_window` 13× faster; it did not stop it
 being handed a 99,321-word document to pick 25 words out of.
@@ -832,7 +893,7 @@ rather than an equality check, which is why it is its own item.
 
 ---
 
-## 16. P14 — Law search is now 5× slower than circular search
+### P14 — Law search is now 5× slower than circular search
 
 **Found while tracing P5's user paths.** Circular search is 22 ms after P2 + P3. Law search —
 the `/laws` search box — is **111–121 ms**, and the profile is the one P2 already fixed once:

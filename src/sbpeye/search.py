@@ -3,6 +3,7 @@ import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from sqlalchemy import text
 from sqlalchemy.orm import Session, joinedload
 
@@ -519,11 +520,102 @@ def highlight_terms(text: str, query_tokens: set[str]) -> str:
     return text
 
 
+# Characters of document kept around the densest run of query terms, before the
+# word-level window is cut out of it. Roughly 300 words — an order of magnitude more
+# context than the 25-word window needs, so the fine pass still has room to choose.
+PREVIEW_REGION_CHARS = 2000
+
+
+@lru_cache(maxsize=128)
+def _token_scan_pattern(tokens: frozenset[str]):
+    """One compiled alternation matching any query token as a substring.
+
+    Mirrors `best_window`'s test (`qt in word`, case-folded) rather than
+    `highlight_terms`'s word-boundary one: this decides *where to look*, so being stricter
+    than the scorer that follows would hide a region the scorer would have picked.
+
+    It is still very slightly stricter in one case, and deliberately so. `best_window`
+    strips punctuation *inside* a word before testing, so it matches "sme" in "S.M.E";
+    this pattern does not. Allowing `[\\W_]*` between characters closes that gap and opens
+    a worse one — the loose form matches letters scattered across unrelated words, which
+    sent the preview to a region containing no whole query term at all. Measured over the
+    corpus, the loose pattern turned 3 such misses into 192. The strict form's 3 misses
+    fall back to the opening of the document, which is a reasonable preview; the loose
+    form's 192 land on noise.
+    """
+    terms = sorted((t for t in tokens if t), key=len, reverse=True)
+    if not terms:
+        return None
+    return re.compile("|".join(re.escape(term) for term in terms), re.IGNORECASE)
+
+
+def _preview_region(
+    text: str, query_tokens: set[str], span: int = PREVIEW_REGION_CHARS
+) -> tuple[str, bool, bool]:
+    """The `span` characters around the first query match, and whether text was cut off.
+
+    A coarse pass in front of the fine one, and the reason previews stopped being the most
+    expensive thing a search does.
+
+    `best_window` scores every word position in Python. That is linear, but the constant is
+    a Python-level loop and the input was a whole document: law editions average 45 KB and
+    the largest attachment in the corpus is 99,321 words. Running it over the full text
+    made it 87% of a law search. `best_window`'s own docstring says never to do this — not
+    for speed, but because density across a whole document prefers prose *about* a subject
+    to the table that states it — so no quality argument was holding the old behaviour up.
+
+    **First match rather than densest**, which is a deliberate retreat from an earlier
+    version of this function. Locating *every* match to pick the densest region costs 3×
+    against 12×, and the reason is the opposite of the intuition: `finditer` is cheap when
+    a document is full of matches and expensive when it is nearly empty of them, because it
+    has to reach the end to prove there are no more. `search` stops at the first hit. The
+    documents that dominate the bill are the weak matches, and those are exactly the ones
+    where the densest window was never meaningful anyway.
+
+    Measured over the corpus (five token sets, every law version and attachment):
+
+        strategy              laws          attachments   snippet unchanged
+        densest, all hits     3.1x          2.5x          44% / 79%
+        first hit  (this)     12.5x         4.8x          36% / 76%
+
+    Returns the region and whether text was dropped before and after it, so the caller can
+    keep the ellipses honest.
+    """
+    if len(text) <= span:
+        return text, False, False
+
+    pattern = _token_scan_pattern(frozenset(query_tokens))
+    match = pattern.search(text) if pattern else None
+    if match is None:
+        # Nothing matches, so every window scores zero and `best_window` takes the first.
+        # Handing it the opening of the document reaches the same answer without the scan.
+        return text[:span], False, True
+
+    # A little lead-in, so the window is not forced to begin mid-sentence on the match.
+    start = max(0, match.start() - 40)
+    end = min(len(text), start + span)
+    return text[start:end], start > 0, end < len(text)
+
+
 def make_preview(
     text: str, query_tokens: set[str], window: int = SNIPPET_WINDOW
 ) -> str:
-    """A short highlighted blurb for the search UI: locate a window, then mark it up."""
-    return highlight_terms(best_window(text, query_tokens, window), query_tokens)
+    """A short highlighted blurb for the search UI: locate a window, then mark it up.
+
+    Only ever called on whole documents — the two fallback paths that have no retrieved
+    chunk to quote (`_law_result`, `_scan_documents`). Callers holding a real passage go
+    straight to `best_window`, which is what it is documented for.
+    """
+    region, cut_before, cut_after = _preview_region(text, query_tokens)
+    snippet = best_window(region, query_tokens, window)
+    # `best_window` marks its own edges, but it only sees the region — so a window sitting
+    # flush against a cut looks like the start or end of the document unless said here.
+    if snippet:
+        if cut_before and not snippet.startswith("…"):
+            snippet = "…" + snippet
+        if cut_after and not snippet.endswith("…"):
+            snippet = snippet + "…"
+    return highlight_terms(snippet, query_tokens)
 
 
 def _window_density(window_text: str, query_tokens: set[str]) -> int:

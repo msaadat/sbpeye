@@ -17,7 +17,9 @@ import pytest
 
 from sbpeye.models import Attachment, RegDocument, RegDocumentVersion
 from sbpeye.search import (
+    PREVIEW_REGION_CHARS,
     MatchEvidence,
+    _preview_region,
     backfill_fts,
     best_window,
     choose_evidence,
@@ -74,6 +76,55 @@ def test_short_passage_is_returned_whole():
 
 def test_preview_is_empty_without_query_tokens():
     assert make_preview("some text", set()) == ""
+
+
+# --- previewing a whole document is bounded ------------------------------
+#
+# `make_preview` is the fallback for results with no retrieved chunk to quote, so unlike
+# `best_window` it is handed entire documents. It used to scan all of one — 87% of a law
+# search — and now locates a region first (P13/P14 in docs/PERFORMANCE_PLAN.md). These pin
+# what that region selection must not break.
+
+
+def test_preview_finds_a_term_buried_deep_in_a_long_document():
+    """The property the exhaustive scan gave for free, and the one bounding could lose."""
+    filler = "alpha beta gamma delta " * 6000  # ≈ 140 KB before the term appears
+    text = filler + "the quuxreport threshold is fifty " + filler
+
+    preview = make_preview(text, {"quuxreport"})
+
+    assert "quuxreport" in preview
+    assert "<mark>quuxreport</mark>" in preview
+
+
+def test_preview_region_is_capped_regardless_of_document_size():
+    """Bounded means bounded: the word-level scorer never sees more than one region."""
+    text = "alpha beta " * 50_000 + "quuxreport" + " gamma delta " * 50_000
+
+    region, cut_before, cut_after = _preview_region(text, {"quuxreport"})
+
+    assert len(region) <= PREVIEW_REGION_CHARS
+    assert "quuxreport" in region
+    assert cut_before and cut_after
+
+
+def test_preview_marks_both_edges_when_the_region_was_cut():
+    """The region is a slice of a document, so its edges are elisions, not the document's."""
+    filler = "alpha beta gamma delta " * 2000
+    preview = make_preview(filler + "quuxreport here" + filler, {"quuxreport"})
+
+    assert preview.startswith("…")
+    assert preview.endswith("…")
+
+
+def test_preview_without_any_match_falls_back_to_the_opening():
+    """No match means every window scores zero, so the opening is as good an answer."""
+    text = "alpha beta gamma delta " * 2000
+
+    preview = make_preview(text, {"quuxreport"})
+
+    assert preview.startswith("alpha beta")
+    assert not preview.startswith("…")
 
 
 # --- choosing among matched passages -------------------------------------

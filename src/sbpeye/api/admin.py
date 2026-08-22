@@ -41,6 +41,7 @@ from ..env import (
 )
 from ..inventory.fingerprint import CHUNKER_VERSION, embedding_fingerprint
 from ..llm_debug import debug_allowed
+from ..sbp_reachability import ARMS, TARGETS, run_probe
 from ..models import (
     AIGenerationJob,
     Attachment,
@@ -67,6 +68,11 @@ router = APIRouter(
 # one expensive route here, and two admins refreshing the tab at once would page the
 # whole collection twice for the same answer. Non-blocking, like the sync lock in `main`.
 _AUDIT_LOCK = threading.Lock()
+
+# The reachability probe is slow by construction — it sleeps between requests so the
+# edge sees traffic shaped like the scrapers rather than a burst. One at a time, or two
+# admins pressing the button turn a measurement of the block into a cause of it.
+_REACHABILITY_LOCK = threading.Lock()
 
 # The AI outputs a circular can carry, paired with the column that records when each was
 # produced. Presence of the timestamp is the coverage signal rather than presence of the
@@ -714,3 +720,39 @@ def environment(db: Session = Depends(get_db)) -> dict:
         },
         "embedding": _embedding_section(),
     }
+
+
+@router.get("/sbp-reachability")
+def sbp_reachability(
+    attempts: int = Query(3, ge=1, le=20, description="Attempts per target per client arm"),
+    target: list[str] | None = Query(None, description="Restrict to named targets"),
+    arm: list[str] | None = Query(None, description="Restrict to named client arms"),
+    delay: float = Query(1.0, ge=0.0, le=10.0, description="Seconds between requests"),
+) -> dict:
+    """Measure, from this container, how often SBP answers.
+
+    The one route in this module that talks to the network, and the reason it exists is
+    that `/environment` cannot answer the question that matters here. A capability flag
+    is a boolean, and the block SBP applies is not: some requests get through. An
+    operator deciding whether to retry, to sync from elsewhere, or to escalate the IP
+    needs the rate and the Cloudflare ray IDs, and this is the only place that runs the
+    check from the address SBP actually sees — `railway run` executes on the laptop, and
+    the laptop is not blocked.
+
+    Still read-only in the sense the module header means: it writes nothing to the
+    corpus, the vector store or the ledger. It does cost wall-clock, so it is bounded
+    (20 attempts per cell) and serialized.
+    """
+    if not _REACHABILITY_LOCK.acquire(blocking=False):
+        return JSONResponse(
+            {"error": "A reachability probe is already running; try again shortly."},
+            status_code=409,
+        )
+    try:
+        return run_probe(attempts=attempts, targets=target, arms=arm, delay=delay)
+    except ValueError as exc:
+        # The only ValueError `run_probe` raises is an unknown target or arm, which is
+        # bad input rather than a failed probe.
+        return JSONResponse({"error": str(exc), "targets": sorted(TARGETS), "arms": list(ARMS)}, status_code=400)
+    finally:
+        _REACHABILITY_LOCK.release()

@@ -124,6 +124,47 @@ Every outbound SBP request goes through `cloudscraper` — `_get_sbp`
 JavaScript challenge, not an IP-reputation block. From a datacenter range there is nothing to
 solve. This is not a bug in the app and no amount of retrying fixes it.
 
+#### Measuring it rather than guessing
+
+The block is applied per request at Cloudflare's edge, so it is not all-or-nothing: some
+requests get through and one `curl` tells you only what happened once. `sbp_reachability`
+measures the rate instead — N attempts against each URL the scrapers use, with a control
+host to rule out "no outbound HTTP at all", body checks so a Cloudflare interstitial
+served as `200` is not counted as success, and four client arms so a spread between them
+says the fix is in our code and a flat rate says it is IP reputation.
+
+The arms are a fresh `cloudscraper` per call (what every scraper does today), one reused
+across calls, plain `requests`, and `curl_cffi` impersonating Chrome. That last one is
+the arm to watch, because the fingerprints are not close. Measured against a
+fingerprinting service:
+
+| client | JA4 | ALPN |
+|---|---|---|
+| `requests` | `t13d1712h1_ab0a1bf427ad_882d495ac381` | HTTP/1.1 |
+| `cloudscraper` | `t13d1713h1_95e1cefdbe28_8e6e362c5eac` | HTTP/1.1 |
+| `curl_cffi` (chrome131) | `t13d1516h2_8daaf6152771_02713d6af862` | HTTP/2 |
+
+The third row is real Chrome's JA4. `cloudscraper` sends a Chrome 120 User-Agent over an
+OpenSSL handshake with no HTTP/2 at all, and Cloudflare scores exactly that disagreement.
+`cloudscraper` was built for the 2016-era JS challenge; it does not address fingerprinting
+and, on a clean IP, the probe shows it performing no better than plain `requests` — it is
+solving nothing on the happy path.
+
+Whether that is what tips the deployment is not answerable from here, because a clean IP
+passes on every arm. It needs a run from the blocked address.
+
+It has to run from the address SBP sees, which rules out `railway run` — that executes
+locally, and a maintainer's machine is not blocked:
+
+```
+railway ssh -- python -m sbpeye.sbp_reachability --attempts 20
+```
+
+or, without a shell, `GET /api/admin/sbp-reachability?attempts=5` (admin-only, serialized,
+capped at 20 attempts per cell). Same code behind both. It reports the Cloudflare ray IDs,
+which are what SBP's side needs to look up a specific refusal. Run the same command
+locally for the baseline to compare against.
+
 What it takes out, all of it at request time:
 
 | Path | Who reaches it |

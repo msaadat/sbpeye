@@ -27,6 +27,7 @@ ADMIN_ROUTES = (
     "/api/admin/index/audit",
     "/api/admin/runs",
     "/api/admin/environment",
+    "/api/admin/sbp-reachability",
 )
 
 

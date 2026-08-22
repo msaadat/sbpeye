@@ -86,6 +86,11 @@ const router = createRouter({
           component: () => import('@/views/admin/AdminIndexTab.vue'),
         },
         {
+          path: 'sync',
+          name: 'admin-sync',
+          component: () => import('@/views/admin/AdminSyncTab.vue'),
+        },
+        {
           path: 'runs',
           name: 'admin-runs',
           component: () => import('@/views/admin/AdminRunsTab.vue'),

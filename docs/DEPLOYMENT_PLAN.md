@@ -34,7 +34,8 @@ created on its own first boot has been done. `chromadb.PersistentClient` is cons
 import (`database.py:88`), so that redeploy was the only thing that could pick it up; before
 it, search returned nothing against a 522 MB store sitting on the volume.
 
-Volume budget: roughly 1.55 GB at rest against Hobby's 5 GB.
+Volume budget: 985 MB in use of 4.6 GB, measured 2026-08-22. The full corpus is ~1.55 GB, so
+closing the `files/circulars` gap still leaves well over half the volume free.
 
 ### 0.2 Test baseline
 
@@ -62,9 +63,10 @@ Three items are outstanding, all of which need the running service.
    (boot ~6 s, correct semantically relevant hits) but has not been confirmed on Railway
    itself.
 
-   The PDF arm is worth being precise about: download-on-miss cannot succeed from Railway at
-   all while the IP block stands (§2.1), so what needs confirming is that documents and law
-   PDFs **serve from the volume**, not that they refetch.
+   The PDF arm is worth being precise about, and it changed twice. Download-on-miss now
+   works — SBP is reachable (§2.1) — but `files/circulars` is not on the volume (§2.3), so
+   circular attachments are *all* serving by refetch rather than from disk. Law PDFs and the
+   HTML cache do serve from the volume. Confirming both halves separately is the point.
 
 2. **Redeploy test.** Change a setting through the UI, redeploy the same image, confirm the
    setting survived and the uploaded corpus was untouched. This is what proves `DATA_ROOT`
@@ -226,19 +228,17 @@ because `fetch_page_cached` consults the cache before the network and the key is
 **Set `SBPEYE_ECODATA_REFRESH_SECONDS=0`** unless the block is lifted, or the scheduler throws
 hourly into the logs for a scrape that cannot succeed.
 
-#### The operating model this forces
+#### The operating model this replaces
 
-Corpus updates happen on a machine whose IP is not blocked: sync locally, then re-upload
-`sbpeye.db`, `chroma_db/` (§2.4) and whatever new cache and attachment files the sync produced
-(§2.5).
+The block forced corpus updates onto a machine whose IP was not blocked: sync locally, then
+re-upload `sbpeye.db`, `chroma_db/` (§2.4) and whatever new cache and attachment files the sync
+produced (§2.5). Re-upload was a routine operation, and the admin console could report but
+never write.
 
-That is less of a departure than it sounds — every corpus write was already admin-only, and
-this moves "admin" from a session on the deployment to a shell on the maintainer's machine. It
-does mean the admin UI's sync and generation buttons cannot work from the deployment, and it
-makes re-upload a routine operation rather than a one-off.
-
-If the deployment should ever sync for itself, the options are an egress proxy with a
-residential or allowlisted IP, or asking SBP to allow the range. Neither is in scope.
+**Sync now runs on the deployment**, from the admin console's Sync tab (§2.8). Uploading is the
+fallback, not the path. The one tree that keeps the old model is `files/laws`: it is an archive
+nothing may re-fetch (invariant 3.7), so it goes up through `scripts/sync_volume.py` and only
+ever that way.
 
 ### 2.2 Environment
 
@@ -247,7 +247,7 @@ residential or allowlisted IP, or asking SBP to allow the range. Neither is in s
 | `SBPEYE_DATA_DIR` | `/data` |
 | `SBPEYE_SECRET_KEY` | Cookie signing and key encryption. The container refuses to start without it; 32 characters minimum |
 | `SBPEYE_ADMIN_EMAIL` / `SBPEYE_ADMIN_PASSWORD` | First-admin seeding. Only consulted when no admin exists, so leaving them set does not resurrect a deleted account |
-| `SBPEYE_ECODATA_REFRESH_SECONDS` | `0` while the IP block stands (§2.1). Default 3600 |
+| `SBPEYE_ECODATA_REFRESH_SECONDS` | Default 3600. **Currently unset in production**, so the scheduler runs hourly — see §2.8 for what that writes |
 | `AI_PROVIDER`, `AI_BASE_URL`, `AI_MODEL`, `AI_CHAT_MODEL` | Deployment-level config for admin corpus generation. Defaults to `mistral`, so a missing value is a provider error rather than a localhost connection error. Testers' chat uses their own keys (§3.5) |
 | Provider key (`OPENAI_API_KEY`, `GROQ_API_KEY`, …) | Per chosen provider |
 | `EMBEDDING_PROVIDER` | Leave at `fastembed`. It must match the model the uploaded Chroma index was built with (`BAAI/bge-base-en-v1.5`) or search returns nonsense rather than an error |
@@ -277,10 +277,39 @@ files/
     └── parses/
 ```
 
+**`files/circulars` is not on the volume.** Measured 2026-08-22: the push in §2.5 covered
+`laws` and `cache` and stopped there, so the volume holds 985 MB of a 1.5 GB corpus and
+`/data/files` has two entries, not three. The ledger in `sbpeye.db` says those 570 MB of
+attachments exist; the disk says otherwise, and every attachment open is a download-on-miss
+that only started working again when SBP became reachable. Closing the gap is now a
+**Re-download** sync from the console (§2.8) rather than an upload — the deployment fetching
+570 MB itself beats pushing it through the CLI. Headroom is not the constraint: 3.6 GB free.
+
+```
+/data/files/laws     76M   ✓        /data/chroma_db  522M  ✓
+/data/files/cache   318M   ✓        /data/sbpeye.db   70M  ✓
+/data/files/circulars      ✗ absent
+```
+
 No data ships in the image: `sbpeye.db`, `chroma_db/` and `files/` are all excluded by
 `.dockerignore`, which takes the build context from 7.5 GB to 17.9 MB.
 
 ### 2.4 Re-uploading the corpus
+
+**Checkpoint first.** The databases run in WAL mode (invariant 3.14), which means recent commits
+sit in `sbpeye.db-wal` until something folds them back into `sbpeye.db`. Uploading is a file
+copy, so a `.db` taken from a running or killed app ships without them. This is not theoretical
+and not subtle in size: an interrupted sync left `sbpeye.db` at 4 KB with 869 KB stranded in the
+sidecar — a file that reads correctly through SQLite locally and arrives on the volume empty.
+
+Stopping the app cleanly is enough; `checkpoint_sqlite()` runs on lifespan shutdown and leaves a
+zero-length `-wal`. If the process was killed, reopen the database once and close it, or run:
+
+```bash
+sqlite3 sbpeye.db 'PRAGMA wal_checkpoint(TRUNCATE);'
+```
+
+Then check `ls -l sbpeye.db-wal` reads 0 before uploading anything.
 
 Two known paths replaced wholesale, so `--overwrite` is **required**, not optional — the paths
 already exist:
@@ -329,6 +358,13 @@ path. Git Bash rewrites a leading slash before the CLI sees it — `list /` beca
 `Failed to list remote directory /data/D:/Progs/Git/`.
 
 ### 2.5 Pushing the file trees
+
+**This is the fallback path now, with one exception.** With SBP reachable, `circulars` and
+`cache` are cheaper for the deployment to fetch than for a maintainer to upload, so they come
+from a console sync (§2.8). `files/laws` is the exception and stays upload-only: SBP replaces
+law PDFs in place and keeps no history, two superseded editions already exist nowhere else, and
+a re-fetch cannot reproduce them (invariant 3.7). The tool also remains the recovery path for
+a volume that has to be rebuilt from a known-good local tree.
 
 Use `scripts/sync_volume.py`, never a raw directory upload. **Operator runbook:
 [VOLUME_SYNC.md](VOLUME_SYNC.md).**
@@ -401,6 +437,42 @@ Kept because it is the recovery procedure, not because anything here is pending.
    provider** in the admin console so corpus generation has credentials too.
 10. **Add testers** from the admin console. Each sets their own provider key on first sign-in;
     chat does not work for them until they do, by design (§3.5).
+
+### 2.8 Syncing from the admin console
+
+**Admin → Sync.** Three controls, in the order the tab presents them, because that is the order
+the questions arrive in.
+
+**Can this server reach SBP?** runs `sbp_reachability` from the container and reports a verdict,
+the egress IP and the per-arm success rate. It is a button rather than a page load because it
+costs ~2.5 s per attempt and talks to SBP; it writes nothing. Run it before a large sync — the
+block was silent once and would be again.
+
+**Circular sync** posts to `POST /api/circulars/sync`, which is where it always lived. Pressed
+with defaults it is the same incremental run as the sidebar button: newest first, stopping at
+the latest date the corpus already holds, one worker. The options that matter:
+
+| Option | What it is for |
+|---|---|
+| **Workers** | Concurrent writers against the database this deployment serves from. 2–3 shortens a backfill; 8 is for a machine with no users on it |
+| **Walk the full listing** | Ignores the stop-at-date, reads every listing page. Needed to backfill older years |
+| **Re-download files already held** | Refetches attachments the ledger claims exist. **This is how to close the `files/circulars` gap in §2.3** |
+
+There is no progress on the wire — `SyncStatus` gets its counts written once, at the end — so
+the tab shows a state, not a bar. A run killed by a redeploy is released as `failed` on the next
+boot by `fail_interrupted_sync_jobs`, so nothing stays "running" for ever.
+
+**EcoData index** re-scrapes the economic-data index: entry rows only, no files and no vectors.
+It is a `DELETE` of `ecodata_entries` followed by a re-insert of whatever parsed, so a refresh
+against a partial page leaves a partial index until the next good one. The scheduler runs this
+too, hourly, and `SBPEYE_ECODATA_REFRESH_SECONDS` is unset in production (§2.2) — meaning the
+deployment already rewrites that table on its own, unattended. Set the variable to `0` if that
+is not wanted; it is the only unattended corpus writer.
+
+**What did not move.** `api/admin.py` is still read-only, all of it. The writes stayed on
+`/circulars/sync` and `/ecodata/refresh` in `main.py`, where they already held the process-wide
+lock and already wrote the `SyncStatus` rows the Runs tab reads; the console calls across.
+Re-indexing, laws sync and corpus-wide AI generation are still CLI commands.
 
 ---
 
@@ -486,6 +558,17 @@ it is idempotent and safe to re-run.
 `backfill_fts` in a background thread on every boot and writes to the corpus if they are empty,
 which would be a large corpus write on first boot with no admin involved. The current
 `sbpeye.db` has them.
+
+**3.14 The databases are WAL, so a `.db` file alone is not the database.** `database.py` sets
+`journal_mode=WAL` on all three engines, because sync now runs inside the web process — up to
+eight worker sessions writing while users read — and under the default rollback journal that is
+`database is locked` on ordinary page loads, not a slow sync. The cost is that recent commits
+live in `sbpeye.db-wal` until checkpointed, and **every path that moves this corpus between
+machines is a file copy**: §2.4's upload, `scripts/sync_volume.py`, and `git add sbpeye.db`,
+which is tracked. `checkpoint_sqlite()` runs on lifespan shutdown so a clean stop leaves a
+zero-length `-wal`; a killed process does not. Check `ls -l sbpeye.db-wal` before copying, and
+never copy one out from under a running app. The sidecars are gitignored so they cannot be
+committed alongside a stale `.db`.
 
 ---
 

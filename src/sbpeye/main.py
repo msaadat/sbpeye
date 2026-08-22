@@ -21,7 +21,7 @@ import json
 import uuid
 import threading
 
-from .database import PROJECT_ROOT, AppSessionLocal, engine, Base, get_app_db, get_db, SessionLocal, has_vector_store_data
+from .database import PROJECT_ROOT, AppSessionLocal, engine, Base, checkpoint_sqlite, get_app_db, get_db, SessionLocal, has_vector_store_data
 from .models import AIGenerationJob, Attachment, CachedDocument, SyncStatus, circular_sync_only, Circular, CircularEntity, CircularRelationship, EcoDataSeries, EcoDataEntry, RegDocument, RegDocumentVersion, Settings, ChatSession, ChatMessage, ResearchWorkspace, User, WorkspaceCircular, upsert_settings
 from .api.admin import router as admin_router
 from .api.debug import router as debug_router
@@ -82,7 +82,6 @@ from .auth_routes import (
 )
 from .env import CIRCULAR_FILES_DIR, LAWS_ARCHIVE_DIR
 from .scraper.laws import download_law_file
-from .scraper.ecodata import scrape_ecodata
 from .scraper.clean_html import clean_sbp_html, extract_sbp_text
 from .scraper.ecodata_index import scrape_ecodata_index
 from .scraper.pdf_summarizer import summarize_pdf, is_summarizable
@@ -383,6 +382,11 @@ async def app_lifespan(_app: FastAPI):
         # not leave a scraper running against a database the next process owns.
         _ecodata_stop.set()
         ecodata_thread.join(timeout=5)
+        # Last, and after the scraper has stopped: under WAL the recent commits live in a
+        # `-wal` sidecar until something folds them back, and the corpus is moved between
+        # machines by copying `sbpeye.db`. Without this a clean stop can still leave the
+        # bulk of a sync outside the file the upload picks up.
+        checkpoint_sqlite()
 
 
 # Create all tables

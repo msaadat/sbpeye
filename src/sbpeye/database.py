@@ -2,7 +2,7 @@ import chromadb
 import logging
 import os
 from pathlib import Path
-from sqlalchemy import bindparam, create_engine, inspect, text
+from sqlalchemy import bindparam, create_engine, event, inspect, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
@@ -37,14 +37,57 @@ APP_DATABASE_PATH = Path(
 )
 APP_DATABASE_URL = f"sqlite:///{APP_DATABASE_PATH}"
 
+# SQLite defaults to a rollback journal, under which a writer holds an exclusive lock on
+# the whole file and every reader queues behind it. That was invisible for as long as
+# corpus writes happened on a maintainer's machine, against a database nobody was serving
+# from. It stops being invisible the moment sync runs on the deployment: `scrape_circulars`
+# fans out to as many as eight worker sessions inside the web process, while users browse
+# the same file, and under a rollback journal that surfaces as `database is locked` on
+# ordinary page loads rather than as a slow sync.
+#
+# WAL is what makes the two coexist — readers see the last committed snapshot while one
+# writer appends, so browsing stays served for the whole run. `busy_timeout` covers the
+# case WAL does not: writers still serialize against each other, and without it the second
+# one raises immediately instead of waiting its turn. `synchronous=NORMAL` is the
+# documented-safe pairing for WAL: it can lose the last transactions to a power cut, but
+# not to a process crash, which is the failure this deployment actually has.
+#
+# Applied per engine rather than through a global `Engine` listener, because Chroma keeps
+# its own SQLite file behind its own client and nothing here should reach into it.
+_SQLITE_PRAGMAS = (
+    ("journal_mode", "WAL"),
+    ("busy_timeout", "30000"),
+    ("synchronous", "NORMAL"),
+)
+
+
+def _configure_sqlite(target_engine) -> None:
+    """Apply the pragmas above to every new connection on `target_engine`.
+
+    Journal mode is a property of the file and persists once set, but the other two are
+    per-connection, so this runs on connect rather than once at import.
+    """
+
+    @event.listens_for(target_engine, "connect")
+    def _set_sqlite_pragmas(dbapi_connection, _connection_record):
+        cursor = dbapi_connection.cursor()
+        try:
+            for pragma, value in _SQLITE_PRAGMAS:
+                cursor.execute(f"PRAGMA {pragma}={value}")
+        finally:
+            cursor.close()
+
+
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
 )
+_configure_sqlite(engine)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 debug_engine = create_engine(
     DEBUG_DATABASE_URL, connect_args={"check_same_thread": False}
 )
+_configure_sqlite(debug_engine)
 DebugSessionLocal = sessionmaker(
     autocommit=False, autoflush=False, bind=debug_engine
 )
@@ -52,6 +95,7 @@ DebugSessionLocal = sessionmaker(
 app_engine = create_engine(
     APP_DATABASE_URL, connect_args={"check_same_thread": False}
 )
+_configure_sqlite(app_engine)
 AppSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=app_engine)
 
 Base = declarative_base()
@@ -61,6 +105,36 @@ DebugBase = declarative_base()
 # Likewise for runtime state: its own metadata keeps `create_all` on either of the
 # other two bases from resurrecting these tables in the wrong file.
 AppBase = declarative_base()
+
+def checkpoint_sqlite() -> None:
+    """Fold the write-ahead logs back into the database files.
+
+    WAL keeps recent commits in a `-wal` sidecar until something checkpoints them. SQLite
+    does that on its own as the log grows, and again when the last connection closes — but
+    "the last connection closes" is exactly what a killed container does not do, and the
+    residue is a corpus that reads correctly through SQLite and copies as an empty file.
+    An interrupted sync here left `sbpeye.db` at 4 KB with 869 KB stranded in `sbpeye.db-wal`.
+
+    That matters because uploading the corpus is a *file copy*: deployment plan 2.4 moves
+    `sbpeye.db` to the volume, and `scripts/sync_volume.py` moves file trees the same way.
+    Calling this on shutdown means a cleanly stopped app leaves a complete file behind, so
+    the copy is the whole corpus rather than its first page.
+
+    Best-effort by design: this runs while the process is on its way out, and a failure to
+    tidy up must not turn a clean stop into a crash. TRUNCATE rather than PASSIVE because
+    the point is to leave nothing behind, not to reclaim what it can.
+    """
+    for name, target_engine in (
+        ("corpus", engine),
+        ("app", app_engine),
+        ("debug", debug_engine),
+    ):
+        try:
+            with target_engine.connect() as connection:
+                connection.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception:
+            logging.warning("Could not checkpoint the %s database", name, exc_info=True)
+
 
 def get_db():
     db = SessionLocal()

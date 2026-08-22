@@ -19,6 +19,7 @@ const { user: currentUser, isAdmin, load: loadCurrentUser } = useCurrentUser()
 const tabs = [
   { label: 'Corpus', icon: 'pi pi-database', to: '/admin/corpus' },
   { label: 'Index', icon: 'pi pi-sitemap', to: '/admin/index' },
+  { label: 'Sync', icon: 'pi pi-cloud-download', to: '/admin/sync' },
   { label: 'Runs', icon: 'pi pi-history', to: '/admin/runs' },
   { label: 'Users', icon: 'pi pi-users', to: '/admin/users' },
   { label: 'Deployment', icon: 'pi pi-server', to: '/admin/deployment' },
@@ -33,7 +34,7 @@ onMounted(loadCurrentUser)
   <div class="admin-view">
     <header class="admin-header">
       <h1>Admin console</h1>
-      <p>Corpus and index status, run history, accounts, and deployment configuration.</p>
+      <p>Corpus and index status, corpus sync, run history, accounts, and deployment configuration.</p>
     </header>
 
     <!--

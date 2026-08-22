@@ -2,10 +2,18 @@
 
 Operator runbook for `scripts/sync_volume.py`.
 
-The `files/` tree — 5251 files, 963 MB — has to reach the Railway volume because SBP blocks
-the deployment's IP, so anything the app would otherwise fetch on demand has to be there
-already (`DEPLOYMENT_PLAN.md` §2.1). It is gitignored and not in the image, so upload is
-the only route.
+**This is the fallback path now.** SBP is reachable from the deployment again
+(`DEPLOYMENT_PLAN.md` §2.1), so `circulars` and `cache` are cheaper for the app to fetch itself
+from the admin console's Sync tab (§2.8) than to push from here. Use this tool for:
+
+- **`files/laws`, always and only.** The archive cannot be re-fetched — SBP replaces law PDFs
+  in place and keeps no history, and two superseded editions exist nowhere else (invariant 3.7).
+  A console sync can never reproduce it, so this is the sole route.
+- **Rebuilding a volume** from a known-good local tree.
+- **Bulk backfill**, when pushing bytes beats waiting on a long unattended sync.
+
+The `files/` tree is 5251 files, 963 MB. It is gitignored and not in the image, so for the laws
+archive upload remains the only route.
 
 `railway volume files upload` cannot do this on its own. Read §"Why not the CLI directly"
 below before reaching for it — the failure is silent, not loud.

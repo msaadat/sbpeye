@@ -791,9 +791,16 @@ export async function deleteUser(id: string): Promise<void> {
 
 /* ------------------------------------------------------------------ admin console
  *
- * Read-only operator status. Every call below is a GET that changes nothing — the
- * console shows what the corpus holds and what the index can reach; syncing, indexing
- * and AI generation stay on the CLI.
+ * Operator status, and the two corpus writes the console can trigger.
+ *
+ * Everything under `/admin/*` is still a GET that changes nothing — that module is
+ * read-only by design, down to `/index/audit` running its reconciler with `write=False`.
+ * The writes live where they always have, on `/circulars/sync` and `/ecodata/refresh` in
+ * `main.py`, and the console calls across to them rather than moving them: they already
+ * hold the process-wide sync lock and already write the `SyncStatus` rows the Runs tab
+ * reads, and a second import path for a module-level `threading.Lock` is two locks.
+ *
+ * Re-indexing and corpus-wide AI generation stay on the CLI.
  */
 
 /** A `{label, count}` row from a group-by, ordered largest first. */
@@ -1002,6 +1009,52 @@ export async function startCircularSync(payload: CircularSyncRequest): Promise<C
     },
     body: JSON.stringify(payload),
   })
+}
+
+/** Result of one EcoData re-scrape. 409 while another is already running. */
+export interface EcoDataRefreshResult {
+  ok: boolean
+  entries: number
+}
+
+export async function refreshEcoDataIndex(): Promise<EcoDataRefreshResult> {
+  return requestJson<EcoDataRefreshResult>('/ecodata/refresh', { method: 'POST' })
+}
+
+/** One `{target, arm}` cell of a reachability probe. */
+export interface SbpReachabilityCell {
+  target: string
+  arm: string
+  attempts: number
+  ok: number
+  forbidden: number
+  challenged: number
+  short: number
+  errors: number
+  median_ms: number | null
+  ok_rate: number
+  rays: string[]
+}
+
+export interface SbpReachability {
+  started_at: string
+  finished_at: string
+  duration_s: number
+  egress: { ok: boolean; ip?: string | null; elapsed_ms?: number | null; error?: string | null }
+  attempts_per_cell: number
+  verdict: string
+  summary: SbpReachabilityCell[]
+  skipped_arms: string[]
+}
+
+/**
+ * Measure, from the server, how often SBP answers.
+ *
+ * Serial and slow by design — roughly two seconds per attempt — so callers pick the
+ * attempt count and wait. Read-only despite the cost: it writes nothing anywhere.
+ */
+export async function runSbpReachability(attempts = 3): Promise<SbpReachability> {
+  return requestJson<SbpReachability>(`/admin/sbp-reachability${toQueryString({ attempts })}`)
 }
 
 export async function getLlmStatus(): Promise<LlmStatus> {

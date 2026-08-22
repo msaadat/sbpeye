@@ -6,8 +6,9 @@
  * They are shown together here on purpose: the sidebar banner needs to isolate circular
  * runs, but someone asking "what happened to this corpus" wants one timeline.
  *
- * Runs still *start* from the CLI (or, for circular sync, the sidebar button). This tab
- * only reports.
+ * This tab only reports. Circular sync and the EcoData refresh start from the Sync tab
+ * or the sidebar button; laws sync, re-indexing and corpus-wide generation are still CLI
+ * commands, and they land in this table just the same.
  */
 import { computed, onMounted, ref } from 'vue'
 import Button from 'primevue/button'

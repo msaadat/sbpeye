@@ -2,15 +2,20 @@
 
 Everything here answers a question an administrator could previously only answer by
 opening a shell on the machine holding the corpus and running `sbpeye stats`,
-`sbpeye laws status` or `sbpeye inventory status`. The deployment cannot reach SBP
-(deployment plan 2.1), so corpus *writes* happen on a maintainer's machine — but
-knowing what is in the corpus, what is searchable and what has run is exactly the thing
-you want from wherever you are.
+`sbpeye laws status` or `sbpeye inventory status` — knowing what is in the corpus, what
+is searchable and what has run is exactly the thing you want from wherever you are.
 
 **Every route in this module is read-only.** No route writes to the corpus, the vector
 store or the ledger — `/index/audit` runs the reconciler with `write=False` precisely so
 that looking at the index cannot change it. Anything that repairs, re-indexes or
 generates stays on the CLI for now.
+
+That is a contract, not a description of what happens to be here. The deployment *can*
+now write the corpus — it reaches SBP again (deployment plan 2.1) and the admin console
+grew a Sync tab — but those writes stayed on `/circulars/sync` and `/ecodata/refresh` in
+`main.py`, where they already held the process-wide lock and already wrote their
+`SyncStatus` rows. The console calls across to them. Nothing was relaxed here, so a
+reader can still take the paragraph above at its word.
 
 Sessions are corpus sessions throughout (invariant 3.1): every table read here —
 circulars, attachments, reg documents, the ledger, sync rows, generation jobs — lives in

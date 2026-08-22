@@ -5,6 +5,12 @@ operator can look at the corpus and the index without a shell — and looking mu
 change what is being looked at. `test_audit_does_not_write_the_ledger` is the guard: the
 reconciler it calls has a `write=True` mode, and reaching for it here would turn a page
 load into a corpus write with no admin action behind it.
+
+`test_the_admin_router_exposes_only_reads` is the structural half of the same guarantee.
+The admin console does trigger corpus writes now that the deployment can reach SBP, but
+they were deliberately left on `/api/circulars/sync` and `/api/ecodata/refresh` in
+`main.py` rather than moved here. That decision is only worth anything if something
+notices when it is quietly reversed.
 """
 
 from datetime import datetime
@@ -29,6 +35,32 @@ ADMIN_ROUTES = (
     "/api/admin/environment",
     "/api/admin/sbp-reachability",
 )
+
+
+def test_the_admin_router_exposes_only_reads():
+    """No route in `api/admin.py` may be anything but a GET.
+
+    The module header promises this and the console is built on it — the Sync tab calls
+    across to `main.py` precisely so that this stays true. A POST appearing here is how
+    that erodes: one write route, then the header is a lie and `/index/audit`'s
+    `write=False` stops being something a reader can take on trust.
+
+    Inspects the router object rather than the app, so `/api/admin/users` — which is
+    registered by `auth_routes.py` and merely shares the prefix — is correctly out of
+    scope. It manages accounts, not the corpus.
+    """
+    from sbpeye.api.admin import router
+
+    offenders = []
+    for route in router.routes:
+        methods = set(getattr(route, "methods", set())) - {"HEAD", "OPTIONS"}
+        if methods - {"GET"}:
+            offenders.append(f"{sorted(methods)} {route.path}")
+
+    assert not offenders, (
+        "api/admin.py is read-only by design; corpus writes belong on the existing "
+        f"main.py routes. Offending route(s): {offenders}"
+    )
 
 
 def _seed_corpus(db_factory):

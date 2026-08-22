@@ -68,26 +68,37 @@ export function humanize(value: string): string {
 }
 
 /**
- * A tone name for a run or source status.
+ * A tone name for a run, source, or reachability status.
  *
- * The vocabulary is shared across three tabs and two backends (`SyncStatus.status`,
- * `AIGenerationJob.status`, `SemanticIndexSource.status`), which overlap but are not
- * identical — hence one mapping rather than a ternary per table cell.
+ * The vocabulary is shared across four tabs and three backends (`SyncStatus.status`,
+ * `AIGenerationJob.status`, `SemanticIndexSource.status` and the verdicts from
+ * `sbp_reachability`), which overlap but are not identical — hence one mapping rather
+ * than a ternary per table cell.
+ *
+ * The reachability verdicts are here rather than local to the Sync tab because falling
+ * through to `neutral` is not a harmless default for them: it renders `blocked` and
+ * `reachable` as the same grey dot, on the one control that decides whether pressing
+ * Start can do anything.
  */
 export function statusTone(status: string): 'ok' | 'warn' | 'error' | 'busy' | 'neutral' {
   switch (status) {
     case 'success':
     case 'succeeded':
     case 'indexed':
+    case 'reachable':
       return 'ok'
     case 'failed':
     case 'index_error':
     case 'extraction_error':
+    case 'blocked':
+    case 'no-outbound-http':
       return 'error'
     case 'stale':
     case 'empty':
     case 'unsupported':
     case 'completed_with_gaps':
+    case 'intermittent':
+    case 'intermittent-client-dependent':
       return 'warn'
     case 'running':
     case 'queued':

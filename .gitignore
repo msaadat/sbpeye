@@ -38,6 +38,14 @@ src/sbpeye/static/spa/
 /sbpeye_app.db
 *.db.backup-*
 
+# WAL sidecars. The databases run in WAL mode (see `database.py`) so a sync can write
+# while users read, which means an open database has uncheckpointed commits sitting in
+# `-wal` rather than in the file git tracks. Committing or uploading `sbpeye.db` while
+# the app holds it open therefore ships a corpus missing its most recent writes: stop
+# the app, or run `PRAGMA wal_checkpoint(TRUNCATE)`, before either.
+*.db-wal
+*.db-shm
+
 # Benchmark runs — captured answers and scores. The methodology in benchmarks/ is
 # tracked; results are per-run, per-model evidence and stay local.
 /benchmarks/results/

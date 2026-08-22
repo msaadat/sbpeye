@@ -180,11 +180,14 @@ sbpeye dry-run --dept bprd --year 2025  # Preview what would be scraped
 
 ### Admin console (`api/admin.py`)
 
-Admin-gated at the router, and **read-only by design** — every route is a GET that changes
-nothing. Nothing here syncs, indexes or generates; those remain CLI commands, largely
-because the deployment cannot reach SBP at all (`DEPLOYMENT_PLAN.md` §2.1). The UI is
-`/admin`, whose tabs are child routes (`/admin/corpus`, `/admin/index`, `/admin/runs`,
-`/admin/users`, `/admin/deployment`) served by the `/admin/{path:path}` SPA fallback.
+Admin-gated at the router, and **read-only by design** — every route in this module is a GET
+that changes nothing, and that is a contract rather than a description. The deployment *can*
+now write the corpus (`DEPLOYMENT_PLAN.md` §2.1), and the console's Sync tab drives it, but the
+writes stayed on `/api/circulars/sync` and `/api/ecodata/refresh` in `main.py` where they
+already hold the process-wide lock and write their own `SyncStatus` rows. Nothing here syncs;
+re-indexing and generation remain CLI commands. The UI is `/admin`, whose tabs are child routes
+(`/admin/corpus`, `/admin/index`, `/admin/sync`, `/admin/runs`, `/admin/users`,
+`/admin/deployment`) served by the `/admin/{path:path}` SPA fallback.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -242,6 +245,8 @@ cd frontend && npm run typecheck  # TypeScript type checking
 - PDF links automatically get preview buttons injected by the SPA
 - Navigational content from SBP pages is stripped via `clean_sbp_html()` helper in main.py
 - AI config: Settings DB takes priority over env vars. Env vars: `AI_PROVIDER`, `AI_BASE_URL`, `AI_API_KEY`, `AI_MODEL`, `AI_CHAT_MODEL`
-- Circular scraping is done via CLI (`sbpeye circulars sync`), not from the web UI
+- Circular scraping runs from the CLI (`sbpeye circulars sync`) or from the admin console's
+  Sync tab, which posts to `/api/circulars/sync` in `main.py`
 - All AI batch operations (summarize, tags, checklist, relationships) are run via CLI and results stored in DB
-- The admin console **reports** on all of the above and starts none of it. Reading corpus or index state must never mutate either — the audit route calls `reconcile(write=False)` for exactly that reason, and `tests/test_admin_status.py` asserts it. A new admin route that writes belongs behind a POST and an explicit operator action, not on a page that reloads
+- `api/admin.py` **reports** and writes nothing. Reading corpus or index state must never mutate either — the audit route calls `reconcile(write=False)` for exactly that reason, and `tests/test_admin_status.py` asserts it. A new admin route that writes belongs behind a POST and an explicit operator action, not on a page that reloads; the sync controls live in `main.py` and the console calls across to them, which is what keeps this module's guarantee literally true
+- The databases run in **WAL** (`database.py`), so `sbpeye.db` alone is not the whole database — recent commits sit in `sbpeye.db-wal` until checkpointed. Anything that *copies* the corpus (the volume upload, `scripts/sync_volume.py`, `git add sbpeye.db`) must checkpoint first; `checkpoint_sqlite()` runs on clean shutdown, a killed process leaves the sidecar full

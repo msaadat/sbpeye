@@ -111,48 +111,79 @@ Each is a knowing trade for a test deploy, and each is wrong for production.
 
 ## 2. Operating the deployment
 
-### 2.1 The deployment is read-only toward SBP
+### 2.1 Reaching SBP from the deployment
 
-SBP blocks the deployment's IP. Opening a circular returned:
+**Resolved 2026-08-22. This section previously said SBP blocked the deployment's IP. That
+was wrong**, and the mistake is worth keeping on the page because it cost months of manual
+corpus syncing. The address was never the problem — `cloudscraper` was.
+
+The symptom was real enough:
 
 ```
 403 Client Error: Forbidden for url: https://www.sbp.org.pk/circulars/bprd-circular-letter-no-16-of-2026
 ```
 
-Every outbound SBP request goes through `cloudscraper` — `_get_sbp`
-(`scraper/circulars.py:78`) and `scrape_ecodata_index` both — and cloudscraper solves a
-JavaScript challenge, not an IP-reputation block. From a datacenter range there is nothing to
-solve. This is not a bug in the app and no amount of retrying fixes it.
+and intermittent, which is what made "IP reputation" look like the answer. Measured from
+the deployment, 20 attempts per client against `/circulars/`:
 
-#### Measuring it rather than guessing
+| client | ok | median |
+|---|---|---|
+| `cloudscraper`, fresh per call | 9/20 | 54ms |
+| `cloudscraper`, session reused | 0/20 | 7ms |
+| `requests` | 20/20 | 2440ms |
+| `curl_cffi` (chrome131) | 20/20 | 2381ms |
 
-The block is applied per request at Cloudflare's edge, so it is not all-or-nothing: some
-requests get through and one `curl` tells you only what happened once. `sbp_reachability`
-measures the rate instead — N attempts against each URL the scrapers use, with a control
-host to rule out "no outbound HTTP at all", body checks so a Cloudflare interstitial
-served as `200` is not counted as success, and four client arms so a spread between them
-says the fix is in our code and a flat rate says it is IP reputation.
+The latencies give it away. A success takes ~2400ms because Cloudflare has to fetch from
+the origin in Karachi; the failures come back in 7-54ms, which is an edge WAF refusing at
+the door with nothing reaching Pakistan at all. And plain `requests` — no challenge
+solving, no impersonation — never once saw it.
 
-The arms are named for the library that issues the request: `cloudscraper` (a fresh
-`create_scraper()` per call, what every scraper does today), `cloudscraper-reuse`,
-`requests` as the control, and `curl_cffi` impersonating Chrome. That last one is the arm
-to watch, because the fingerprints are not close. Measured against a fingerprinting
-service:
+The cause is that `cloudscraper` rolls a **random browser profile per
+`create_scraper()` call** (six calls returned five different profiles, among them Firefox
+52, Goanna 4.1 and an Android 3.1 tablet) and emits Chrome's cipher list over HTTP/1.1:
 
 | client | JA4 | ALPN |
 |---|---|---|
 | `requests` | `t13d1712h1_ab0a1bf427ad_882d495ac381` | HTTP/1.1 |
-| `cloudscraper` | `t13d1713h1_95e1cefdbe28_8e6e362c5eac` | HTTP/1.1 |
-| `curl_cffi` (chrome131) | `t13d1516h2_8daaf6152771_02713d6af862` | HTTP/2 |
+| `cloudscraper` | `t13d1513h1_`**`8daaf6152771`**`_8e6e362c5eac` | HTTP/1.1 |
+| real Chrome / `curl_cffi` | `t13d1516h2_`**`8daaf6152771`**`_02713d6af862` | HTTP/2 |
 
-The third row is real Chrome's JA4. `cloudscraper` sends a Chrome 120 User-Agent over an
-OpenSSL handshake with no HTTP/2 at all, and Cloudflare scores exactly that disagreement.
-`cloudscraper` was built for the 2016-era JS challenge; it does not address fingerprinting
-and, on a clean IP, the probe shows it performing no better than plain `requests` — it is
-solving nothing on the happy path.
+Note the shared middle field: `cloudscraper` copies Chrome's ciphers but delivers them
+with non-Chrome extensions and no HTTP/2, so it reads as *something imitating Chrome and
+failing*. Cloudflare flags the imitation. Generic Python it lets through. Every call site
+also passed its own `HEADERS`, overriding whatever User-Agent the rolled profile wanted —
+so the profile varied per request and so did the verdict. That is the whole of the
+"sometimes it works".
 
-Whether that is what tips the deployment is not answerable from here, because a clean IP
-passes on every arm. It needs a run from the blocked address.
+`cloudscraper` was built for the 2016-era JavaScript challenge. It does not address
+fingerprinting, and here it was not failing to help — it was the thing being blocked.
+
+**Every SBP call site now uses plain `requests`** (`_get_sbp` and `fetch_page` in
+`scraper/circulars.py`, `scrape_sbp_news`, `scrape_ecodata_index`, `_download_pdf`, and
+three in `main.py`), and the dependency is gone. Two things to keep in mind:
+
+* **Send `HEADERS`.** Without them `requests` announces itself as `python-requests/2.x`,
+  which is a louder signal than the one that was getting refused. `scraper/ecodata.py` was
+  the one call site passing none, because `cloudscraper` had been supplying a User-Agent
+  of its own; it passes `HEADERS` now.
+* **`_get_sbp` validates redirects again.** It passes `allow_redirects=False` and walks
+  each hop through `normalize_sbp_url`. Under `cloudscraper`, which follows redirects
+  itself, the loop never saw a 3xx and every hop was taken unchecked — the docstring
+  promised validation that was not happening.
+
+#### Confirming it, here or anywhere else
+
+`sbp_reachability` is what produced the table above and is the tool to re-run if this ever
+regresses. It measures a *rate*: N attempts, a control host so "no outbound HTTP at all"
+is not mistaken for a block, body checks so a Cloudflare interstitial served as `200` is
+not scored as success, and two arms — `requests` (what the scrapers use) and `curl_cffi`
+(Chrome's real fingerprint). If they ever diverge, the fix is a client change and
+`curl_cffi` is where to go; if they fail alike, it is the address.
+
+`curl_cffi` is **not** a dependency — 38 MB of libcurl-impersonate for a diagnostic arm,
+against a Dockerfile that already turns down weight it does not need (§9.1.3). Its arm
+skips itself when absent, so run `uv add curl-cffi` and redeploy if an investigation wants
+the comparison back.
 
 It has to run from the address SBP sees, which rules out `railway run` — that executes
 locally, and a maintainer's machine is not blocked:
@@ -163,15 +194,21 @@ railway ssh -- python -m sbpeye.sbp_reachability --attempts 20
 
 or, without a shell, `GET /api/admin/sbp-reachability?attempts=5` (admin-only, serialized,
 capped at 20 attempts per cell). Same code behind both. It reports the Cloudflare ray IDs,
-which are what SBP's side needs to look up a specific refusal. Run the same command
-locally for the baseline to compare against.
+which are what SBP's side needs to look up a specific refusal.
 
 It probes `/circulars/` only unless given `-t`, and it is serial, so budget roughly three
-seconds per request: the default run is 12 requests. Progress goes to stderr as each one
+seconds per request: the default run is 6 requests. Progress goes to stderr as each one
 lands — a silent run of this is a bug, not patience, because "hung" and "the network is
 being blocked" are precisely the two things it has to tell apart.
 
-What it takes out, all of it at request time:
+#### What this unblocks
+
+The rest of this section described an operating model built on the block: corpus updates
+performed on a maintainer's machine and re-uploaded, `SBPEYE_ECODATA_REFRESH_SECONDS=0` to
+stop the scheduler throwing hourly, and on-demand fetches failing for users. **None of
+that is forced any more.** Before lifting any of it, re-run the probe from the deployment
+and confirm `requests` still scores 20/20 — the measurement is cheap and the failure mode
+is silent. The paths that were affected:
 
 | Path | Who reaches it |
 |---|---|

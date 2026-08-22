@@ -12,7 +12,7 @@ from sqlalchemy import func, extract, and_, or_, text
 from urllib.parse import quote, urljoin, urlparse, urlencode
 from pathlib import Path
 from contextlib import asynccontextmanager
-import cloudscraper
+import requests
 from bs4 import BeautifulSoup
 import re as _re
 import logging
@@ -2198,7 +2198,7 @@ def pdf_preview(url: str):
         return {"error": "Only SBP PDFs are supported."}
 
     try:
-        resp = cloudscraper.create_scraper().get(url, headers=HEADERS, timeout=20)
+        resp = requests.get(url, headers=HEADERS, timeout=20)
         resp.raise_for_status()
 
         pdf = pdfplumber.open(io.BytesIO(resp.content))
@@ -2230,7 +2230,7 @@ def pdf_proxy(url: str):
         return JSONResponse({"error": "Only PDF files are supported."}, status_code=400)
 
     try:
-        resp = cloudscraper.create_scraper().get(url, headers=HEADERS, timeout=30)
+        resp = requests.get(url, headers=HEADERS, timeout=30)
         resp.raise_for_status()
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=502)
@@ -3342,7 +3342,7 @@ def batch_download(
             safe_ref = (c.reference or c.id).replace("/", "_").replace("\\", "_")
             if c.url.lower().endswith(".pdf"):
                 try:
-                    resp = cloudscraper.create_scraper().get(c.url, headers=HEADERS, timeout=20)
+                    resp = requests.get(c.url, headers=HEADERS, timeout=20)
                     resp.raise_for_status()
                     zip_file.writestr(f"{safe_ref}.pdf", resp.content)
                 except Exception as e:

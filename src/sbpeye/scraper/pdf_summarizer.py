@@ -1,4 +1,4 @@
-import cloudscraper
+import requests
 import pdfplumber
 from io import BytesIO
 from datetime import datetime
@@ -39,7 +39,7 @@ def is_summarizable(url: str) -> bool:
     return lowered.endswith(".pdf") and lowered.startswith(ECODATA_DOC_PREFIXES)
 
 def _download_pdf(url: str) -> bytes:
-    resp = cloudscraper.create_scraper().get(url, headers=HEADERS, timeout=30)
+    resp = requests.get(url, headers=HEADERS, timeout=30)
     resp.raise_for_status()
     return resp.content
 

@@ -82,7 +82,7 @@ and the current `sbpeye.db`.
    and a future "(Updated 2027)" resolve to the same document.
 3. **Versions = content hashes.** No trust in URLs, dates, or titles for change detection.
 4. **Archive immutably.** Never overwrite a downloaded file; never delete a delisted row.
-5. **Reuse existing plumbing:** `_get_sbp`/cloudscraper, HTML disk cache, pdfplumber
+5. **Reuse existing plumbing:** `_get_sbp`/`requests`, HTML disk cache, pdfplumber
    extraction, `extract_sbp_text()`, FTS5 + Chroma indexing conventions, Click CLI verbs.
 6. **Every text-mutating code path pairs its FTS write with its Chroma write** (same rule
    AGENTS.md states for circulars).

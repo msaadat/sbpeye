@@ -1,4 +1,4 @@
-import cloudscraper
+import requests
 import uuid
 from bs4 import BeautifulSoup, Tag
 from urllib.parse import urljoin
@@ -103,7 +103,7 @@ def parse_ecodata_index(soup: BeautifulSoup) -> list[dict]:
 
 
 def scrape_ecodata_index(db: Session) -> list[dict]:
-    resp = cloudscraper.create_scraper().get(INDEX_URL, headers=HEADERS, timeout=30)
+    resp = requests.get(INDEX_URL, headers=HEADERS, timeout=30)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.content, "html.parser")
     entries = parse_ecodata_index(soup)

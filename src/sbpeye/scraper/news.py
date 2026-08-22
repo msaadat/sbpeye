@@ -3,7 +3,7 @@
 import re
 from urllib.parse import urljoin
 
-import cloudscraper
+import requests
 from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
 
@@ -67,7 +67,7 @@ def scrape_sbp_news(db: Session | None = None) -> dict:
     releases (documents under the press-release store) and other new items are returned
     in separate lists to preserve the existing API shape.
     """
-    resp = cloudscraper.create_scraper().get(f"{SBP_BASE}/", headers=HEADERS, timeout=15)
+    resp = requests.get(f"{SBP_BASE}/", headers=HEADERS, timeout=15)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.content, "html.parser")
 

@@ -16,19 +16,13 @@ Three things make the answer trustworthy rather than anecdotal:
 * **200 is not success.** A Cloudflare interstitial is served as `200 text/html` with a
   challenge body. Counting it as reachable is how a probe reports green while every
   scrape returns nothing usable, so bodies are checked for challenge markers.
-* **Four client arms**, each named for the library that issues the request, so the output
-  never needs a legend. `cloudscraper` is what the app does today — a fresh
-  `create_scraper()` per call. `cloudscraper-reuse` keeps one across attempts, `requests`
-  is the bare control, and `curl_cffi` presents Chrome's real TLS and HTTP/2
-  fingerprints. If the arms differ, the block is partly a client problem and the fix is
-  in our code; if they all fail alike, it is IP reputation and no client change will help.
-
-  The `curl_cffi` arm is the one worth watching. `cloudscraper` sends a Chrome
-  User-Agent over a Python TLS stack: measured against a fingerprinting service, its JA4
-  is `t13d1713h1_...` — an OpenSSL handshake over HTTP/1.1 — while real Chrome 120 is
-  `t13d1516h2_...` over HTTP/2. `curl_cffi` reproduces the latter exactly. Cloudflare
-  scores UA/fingerprint disagreement, so the two arms are asking different questions of
-  the edge, and only a run from the blocked address says whether that is what tips it.
+* **Two client arms**, each named for the library that issues the request, so the output
+  never needs a legend. `requests` is what every scraper uses; `curl_cffi` presents
+  Chrome's real TLS and HTTP/2 fingerprint. If they diverge, the fix is a client change
+  and `curl_cffi` is where to go; if they fail alike, it is the address and no client
+  change will help. `curl_cffi` is not installed by default, so most runs are one-armed;
+  `uv add curl-cffi` restores the comparison. `DEPLOYMENT_PLAN.md` §2.1 has the run that
+  settled this the first time.
 
 Run it from inside the environment being questioned — the egress path is the subject, so
 `railway run` (which executes locally) proves nothing:
@@ -49,7 +43,6 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
-import cloudscraper
 import requests
 
 # The pages the scrapers hit, one per code path that fails when the block is on. Kept as
@@ -99,24 +92,19 @@ HEADERS = {
 # question you have to rule out before blaming the destination.
 EGRESS_IP_URL = "https://api.ipify.org?format=json"
 
-# `curl_cffi` is optional. It carries a statically linked libcurl-impersonate, so an
-# image that has it needs no system packages — but the currently deployed image predates
-# this arm, and a probe that cannot start is worse than one that reports three arms.
+# `curl_cffi` is deliberately not a dependency: 38 MB of statically linked
+# libcurl-impersonate that no application code path touches. Its arm is skipped when the
+# package is absent, and `uv add curl-cffi` brings it back for an investigation that
+# needs it.
 try:  # pragma: no cover - presence depends on the environment being probed
     from curl_cffi import requests as curl_requests
 except ImportError:
     curl_requests = None
 
-# Named after the library that actually issues the request, so every line of output says
-# which client produced it without a legend:
-#
-#   cloudscraper        a new `create_scraper()` per request — exactly what every call
-#                       site in `scraper/` does today, and the arm to compare against
-#   cloudscraper-reuse  one scraper reused across requests
-#   requests            plain `requests`, the control: if it matches cloudscraper,
-#                       cloudscraper is contributing nothing
-#   curl_cffi           Chrome's real TLS and HTTP/2 fingerprint
-ARMS = ("cloudscraper", "cloudscraper-reuse", "requests", "curl_cffi")
+# Named after the library that issues the request, so every line of output says which
+# client produced it without a legend. `requests` is what every call site in `scraper/`
+# uses; `curl_cffi` presents Chrome's real TLS and HTTP/2 fingerprint.
+ARMS = ("requests", "curl_cffi")
 
 # Only circulars by default. Probing all four targets is 4x the wall clock to answer the
 # same question — the block is applied per request at the edge, not per page — and a full
@@ -202,14 +190,6 @@ def _egress_ip(timeout: int) -> dict:
 
 def _client(arm: str, cache: dict):
     """Return the client for an arm, creating per-call or reusing as the arm intends."""
-    if arm == "cloudscraper":
-        # Deliberately not cached: reproducing `cloudscraper.create_scraper().get(...)`
-        # at every call site in `scraper/` is the whole point of this arm.
-        return cloudscraper.create_scraper()
-    if arm == "cloudscraper-reuse":
-        if arm not in cache:
-            cache[arm] = cloudscraper.create_scraper()
-        return cache[arm]
     if arm == "requests":
         if arm not in cache:
             cache[arm] = requests.Session()

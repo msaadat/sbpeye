@@ -1,10 +1,11 @@
-import cloudscraper
+import requests
 import pdfplumber
 import pandas as pd
 from io import BytesIO
 from datetime import datetime
 from sqlalchemy.orm import Session
 from ..models import EcoDataSeries
+from .circulars import HEADERS
 
 BASE_URL = "https://www.sbp.org.pk/ecodata"
 
@@ -15,7 +16,9 @@ def scrape_ecodata(db: Session):
     try:
         # Example: Overnight Repo Rates (Policy Rate approximation proxy)
         # URL from research: "https://www.sbp.org.pk/ecodata/overnightsreporates2.pdf"
-        resp = cloudscraper.create_scraper().get(f"{BASE_URL}/overnightsreporates2.pdf", timeout=10)
+        resp = requests.get(
+            f"{BASE_URL}/overnightsreporates2.pdf", headers=HEADERS, timeout=10
+        )
         
         if resp.status_code == 200:
             with pdfplumber.open(BytesIO(resp.content)) as pdf:

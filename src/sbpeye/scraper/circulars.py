@@ -1,5 +1,4 @@
 import requests
-import cloudscraper
 from bs4 import BeautifulSoup
 import re
 import logging
@@ -79,8 +78,8 @@ def _get_sbp(url: str, **kwargs):
     """Fetch an SBP URL while validating every redirect target."""
     current_url = normalize_sbp_url(url)
     for _ in range(6):
-        # response = requests.get(current_url, allow_redirects=False, **kwargs)
-        response = cloudscraper.create_scraper().get(current_url, **kwargs)
+        # allow_redirects=False so each hop reaches the validation below.
+        response = requests.get(current_url, allow_redirects=False, **kwargs)
         status_code = getattr(response, "status_code", 200)
         if status_code not in {301, 302, 303, 307, 308}:
             return response
@@ -95,8 +94,7 @@ def _get_sbp(url: str, **kwargs):
 def fetch_page(url: str) -> BeautifulSoup:
     """Fetch a URL and return a BeautifulSoup object."""
     print(f"Fetching {url}")
-    # resp = requests.get(url, headers=HEADERS, timeout=50)
-    resp = cloudscraper.create_scraper().get(url, headers=HEADERS, timeout=50)
+    resp = requests.get(url, headers=HEADERS, timeout=50)
     resp.raise_for_status()
     return BeautifulSoup(resp.content, "html.parser")
 

@@ -36,6 +36,11 @@ const toast = useToast()
 /** Same drag-to-resize rail as the Circulars results pane. */
 const libraryPane = useResizablePane('sbp:lawsRailWidth', 300, 220, 560)
 
+/** The API's per-page ceiling. Asking for more is silently clamped server-side. */
+const PAGE_SIZE = 100
+/** A ceiling on `loadCorpus`, so a corpus that grows unexpectedly cannot fan out without bound. */
+const MAX_CORPUS_PAGES = 5
+
 /** The whole corpus, held client-side: 133 documents is small enough to browse, not search. */
 const documents = ref<LawSummary[]>([])
 const listLoading = ref(false)
@@ -826,13 +831,21 @@ async function loadCorpus() {
   listLoading.value = true
   listError.value = ''
   try {
-    const collected: LawSummary[] = []
-    for (let page = 1; page <= 5; page += 1) {
-      const response = await getLaws({ page, per_page: 100 })
-      collected.push(...response.items)
-      if (collected.length >= response.total || response.items.length === 0) break
-    }
-    documents.value = collected
+    // The first page reports `total`, so the rest are known up front and go out together
+    // rather than one after the other. The tree cannot render until the last one lands,
+    // so serializing them put a whole round trip of latency in front of every visit for
+    // no reason — the pages do not depend on each other.
+    const first = await getLaws({ page: 1, per_page: PAGE_SIZE })
+    const pageCount = Math.min(
+      MAX_CORPUS_PAGES,
+      Math.max(1, Math.ceil(first.total / PAGE_SIZE)),
+    )
+    const rest = await Promise.all(
+      Array.from({ length: pageCount - 1 }, (_, index) =>
+        getLaws({ page: index + 2, per_page: PAGE_SIZE }),
+      ),
+    )
+    documents.value = [first, ...rest].flatMap((response) => response.items)
     // A deep link resolves its detail before the tree has any rows to scroll to,
     // so the reveal has to be re-tried once the corpus is actually rendered.
     if (selectedId.value) void revealSelected()

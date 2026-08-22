@@ -166,32 +166,71 @@ def section_wire(base_url: str) -> None:
 # --------------------------------------------------------------------------
 
 def section_laws() -> None:
-    from sqlalchemy.orm import selectinload
-    from sbpeye.database import SessionLocal
-    from sbpeye.models import RegDocument, RegDocumentVersion
-    from sbpeye.api.serializers import _law_summary
+    """P5. Reported in queries and bytes as well as milliseconds.
 
-    print("\n### GET /api/laws?per_page=100  (LawsView fires this twice on mount)")
+    Wall time understates this one: the benchmark machine has the page cache hot and an
+    NVMe under it, so 4.88 MB of pointless reads costs ~18 ms here and a good deal more on
+    a container that has to go to disk for them.
+    """
+    from sqlalchemy import event, inspect as sa_inspect
+    from sbpeye.database import SessionLocal, engine
+    from sbpeye.models import RegDocument
+    from sbpeye.api.serializers import _law_summary, law_summary_load_options
 
-    def page(options=()):
+    print("\n### GET /api/laws  (LawsView.loadCorpus — the whole corpus, 100 per page)")
+
+    def page(number, preloaded):
         db = SessionLocal()
         try:
             query = db.query(RegDocument).filter(RegDocument.delisted_at.is_(None))
-            if options:
-                query = query.options(*options)
+            if preloaded:
+                query = query.options(*law_summary_load_options())
             query = query.order_by(RegDocument.doc_type, RegDocument.title)
-            return [_law_summary(d) for d in query.offset(0).limit(100).all()]
+            documents = query.offset((number - 1) * 100).limit(100).all()
+            payload = [_law_summary(d) for d in documents]
+            # Only what SQLAlchemy actually materialised — reading it any other way would
+            # trigger the very loads being measured.
+            blob = sum(
+                len(version.content_text or "")
+                for document in documents
+                if "versions" not in sa_inspect(document).unloaded
+                for version in document.versions
+                if "content_text" not in sa_inspect(version).unloaded
+            )
+            return payload, blob
         finally:
             db.close()
 
-    report("as written", bench(page))
-    report(
-        "with content_text deferred",
-        bench(lambda: page((
-            selectinload(RegDocument.versions).defer(RegDocumentVersion.content_text),
-            selectinload(RegDocument.children),
-        ))),
-    )
+    def count_statements(fn):
+        state = {"n": 0}
+
+        def bump(*args):
+            state["n"] += 1
+
+        event.listen(engine, "before_cursor_execute", bump)
+        try:
+            fn()
+        finally:
+            event.remove(engine, "before_cursor_execute", bump)
+        return state["n"]
+
+    db = SessionLocal()
+    pages = max(1, -(-db.query(RegDocument).filter(
+        RegDocument.delisted_at.is_(None)).count() // 100))
+    db.close()
+
+    print(f"  {'':<26} {'time':>9} {'SQL stmts':>10} {'law text read':>16}")
+    for label, preloaded in (("as written", False), ("with load options", True)):
+        elapsed = statements = blob = 0
+        for number in range(1, pages + 1):
+            elapsed += bench(lambda n=number, p=preloaded: page(n, p))
+            statements += count_statements(lambda n=number, p=preloaded: page(n, p))
+            blob += page(number, preloaded)[1]
+        print(f"  {label:<26} {elapsed*1000:>8.1f}ms {statements:>10} "
+              f"{blob/1048576:>13.2f} MB")
+
+    identical = all(page(n, False)[0] == page(n, True)[0] for n in range(1, pages + 1))
+    print(f"  payload identical across all {pages} pages: {identical}")
 
 
 # --------------------------------------------------------------------------

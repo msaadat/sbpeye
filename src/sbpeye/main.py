@@ -9,7 +9,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy.orm import Session, aliased, selectinload
 from sqlalchemy import func, extract, and_, or_, text
 from urllib.parse import quote, urljoin, urlparse, urlencode
 from pathlib import Path
@@ -24,7 +24,7 @@ import uuid
 import threading
 
 from .database import PROJECT_ROOT, AppSessionLocal, engine, Base, checkpoint_sqlite, get_app_db, get_db, SessionLocal, has_vector_store_data
-from .models import AIGenerationJob, Attachment, CachedDocument, SyncStatus, circular_sync_only, Circular, CircularEntity, CircularRelationship, EcoDataSeries, EcoDataEntry, RegDocument, RegDocumentVersion, Settings, ChatSession, ChatMessage, ResearchWorkspace, User, WorkspaceCircular, upsert_settings
+from .models import AIGenerationJob, Attachment, CachedDocument, SyncStatus, circular_sync_only, Circular, CircularEntity, CircularRelationship, EcoDataSeries, EcoDataEntry, RegDocument, RegDocumentLink, RegDocumentVersion, Settings, ChatSession, ChatMessage, ResearchWorkspace, User, WorkspaceCircular, upsert_settings
 from .api.admin import router as admin_router
 from .api.debug import router as debug_router
 from .llm_debug import (
@@ -104,6 +104,7 @@ from .api.serializers import (
     _isoformat,
     _law_detail,
     _law_summary,
+    law_summary_load_options,
     _law_version_payload,
     _load_workspace_circulars,
     split_law_title,
@@ -1465,7 +1466,20 @@ async def export_search_csv(
 
 @app.get("/api/circulars/{circular_id}")
 async def get_circular_detail(circular_id: str, db: Session = Depends(get_db)):
-    c = db.query(Circular).filter(Circular.id == circular_id).first()
+    # The `regulations` block runs each linked law through `_law_summary`, so this pays
+    # the same lazy walk the laws listing does — the text of every version of every law
+    # this circular cites, to render titles and version counts. Fewer documents than a
+    # listing page, but the same wasted read; preloaded on the same terms.
+    c = (
+        db.query(Circular)
+        .options(
+            selectinload(Circular.reg_links)
+            .joinedload(RegDocumentLink.document)
+            .options(*law_summary_load_options())
+        )
+        .filter(Circular.id == circular_id)
+        .first()
+    )
     if not c:
         return JSONResponse({"error": "Circular not found"}, status_code=404)
 
@@ -2024,7 +2038,14 @@ def list_laws(
     else:
         query = query.order_by(RegDocument.doc_type, RegDocument.title)
 
-    documents = query.offset(offset).limit(per_page).all()
+    # Preloaded rather than lazily walked: `_law_summary` touches versions, children and
+    # the current version per document, and the versions carry the full extracted text of
+    # each PDF. Left to lazy loading, a 100-document page read 3.54 MB of law text off
+    # disk to build a payload that contains none of it.
+    documents = (
+        query.options(*law_summary_load_options())
+        .offset(offset).limit(per_page).all()
+    )
     return {
         "items": [_law_summary(document) for document in documents],
         "total": total,

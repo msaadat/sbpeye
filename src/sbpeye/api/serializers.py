@@ -9,7 +9,7 @@ from datetime import datetime
 
 import json
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from ..ai import AIConfig, get_provider_api_key, get_provider_definition, normalize_provider
 from ..embeddings import EmbeddingConfig
@@ -166,8 +166,42 @@ def _analysis_row(document: RegDocument):
     return document.current_version or _EmptyAnalysis
 
 
+def law_summary_load_options():
+    """Loader options for a query whose rows are going through `_law_summary`.
+
+    `_law_summary` looks like a pure formatter and is not: reaching `current_version`
+    walks `document.versions`, `_analysis_row` walks `document.children`, and
+    `version_count` walks the versions again. Lazily, that is four round trips per
+    document — and the first of them drags `RegDocumentVersion.content_text` along, which
+    is the whole extracted text of the PDF.
+
+    Nothing in the payload contains that text. Listing 100 documents was therefore reading
+    **3.54 MB** of law text off disk, decoding it into Python strings, and dropping it, to
+    answer questions as small as "how many versions are there". On a warm dev machine that
+    is ~13 ms; on a container with a cold page cache it is disk I/O that buys nothing at
+    all, which is the better reason to avoid it.
+
+    Deferring the column rather than making it `deferred()` on the mapper, because plenty
+    of callers *do* want the text — search previews it, the AI pipeline summarises it, the
+    scraper writes it — and a mapper-level default would turn each of those into its own
+    lazy load, quietly, with no error to notice. Opting out here keeps the cost visible at
+    the query that chose to pay it.
+
+    Use on any query that feeds `_law_summary` and does not need the text; see
+    `docs/PERFORMANCE_PLAN.md` P5.
+    """
+    return (
+        selectinload(RegDocument.versions).defer(RegDocumentVersion.content_text),
+        selectinload(RegDocument.children),
+    )
+
+
 def _law_summary(document: RegDocument, snippet: str | None = None) -> dict:
-    """List-shaped payload. `result_kind` lets a caller badge mixed search results."""
+    """List-shaped payload. `result_kind` lets a caller badge mixed search results.
+
+    Callers that hand this more than a handful of documents should build the query with
+    `law_summary_load_options()`; the docstring there says what it costs when they do not.
+    """
     current = document.current_version
     # "(Updated till July 16, 2026)" is state, not name. Raw `title` stays as SBP wrote
     # it; `display_title`/`version_suffix` are the split, done here because the phrase

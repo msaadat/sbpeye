@@ -5,12 +5,12 @@ is not what this document is about. This is about everything *else* the user wai
 bytes before first paint, the search round trip, the detail pane, and the frames dropped while
 an answer streams.
 
-Fourteen items, measured rather than guessed, ordered by what a user actually feels per unit of
+Fifteen items, measured rather than guessed, ordered by what a user actually feels per unit of
 work. They are deliberately independent: each can land, ship and be verified on its own.
 
-**Status:** P1, P2, P3, P4 and P7 landed — circular search is **132 ms → 22 ms**, and the
-landing route ships 206 KB instead of 804 KB. Next up is P6, the one that starts mattering
-when two testers use the app at once.
+**Status:** P1, P2, P3, P4, P5 and P7 landed — circular search is **132 ms → 22 ms**, the
+landing route ships 206 KB instead of 804 KB, and the laws list went from 273 queries to 7.
+Next up is P6, the one that starts mattering when two testers use the app at once.
 
 ---
 
@@ -23,7 +23,7 @@ when two testers use the app at once.
 | **P3** | Drop the Chroma pre-filter (circular arm) | `search.py:965` | **61.1 ms → 7.9 ms** | S | ☑ landed |
 | **P3b** | Law arm still pays the pre-filter | `search.py:1091` | over-fetch starves — §14 | M | ☐ deferred |
 | **P4** | SQLite WAL + `busy_timeout` | `database.py` | writers stop blocking readers | S | ☑ landed |
-| **P5** | `/api/laws` loads 3.5 MB it never sends | `serializers.py` | 17.6 ms → 3.9 ms | S | ☐ |
+| **P5** | `/api/laws` loads 3.5 MB it never sends | `serializers.py:169` | **273 queries → 7, 4.88 MB → 0** | S | ☑ landed |
 | **P6** | 25 `async def` routes block the event loop | `main.py` | removes a 5 s global stall | S | ☐ |
 | **P7** | `Cache-Control` on hashed assets | `main.py:517` | **14 revalidations → 0** | XS | ☑ landed |
 | **P8** | Landing route is a 4-deep request chain | `CircularsView.vue` | 4 serial RTTs → 2 | M | ☐ |
@@ -32,15 +32,16 @@ when two testers use the app at once.
 | **P11** | Markdown re-parsed on every render | `SummarySection.vue:41` | −84 KB initial, less churn | S | ☐ |
 | **P12** | Google Fonts blocks first render | `index.html` | one cross-origin RTT | XS | ☐ |
 | **P13** | `_scan_documents` previews whole attachments | `search.py:1345` | the last of the 22 ms — §15 | S | ☐ |
+| **P14** | Law search is 5× slower than circular search | `search.py:1261` | **121 ms → ~25 ms** — §16 | S | ☐ |
 
 **Order.** Done so far: P1 + P7 (pure configuration, largest win for the least code), then
 P2 + P3 (the search story, verified once rather than twice).
 
 Remaining, in the order worth taking them: **P6** next — invisible to a single-user benchmark,
-and the one that starts mattering the moment two testers overlap. Then **P5, P10, P11, P12**,
-which are small and independent. **P8 and P9** are real refactors; do them last and alone.
-**P3b and P13** are follow-ups this work uncovered — neither blocks anything, and both trade a
-migration or a behaviour change for their remaining milliseconds.
+and the one that starts mattering the moment two testers overlap. Then **P10, P11, P12**, which
+are small and independent. **P8 and P9** are real refactors; do them last and alone.
+**P3b, P13 and P14** are follow-ups this work uncovered; none blocks anything. P13 and P14 are
+the same defect in two places and are worth taking together.
 
 ---
 
@@ -440,7 +441,58 @@ message), not only during sync. Recorded so it is not re-investigated.
 
 ---
 
-## 6. P5 — `/api/laws` materialises 3.5 MB it never sends
+## 6. P5 — `/api/laws` materialises 3.5 MB it never sends ☑ landed
+
+`law_summary_load_options()` at `serializers.py:169`, applied at the two queries that feed
+`_law_summary` in bulk — the laws listing (`main.py:2046`) and the circular detail pane's
+regulations block (`main.py:1478`).
+
+**Measured in queries and bytes, not just milliseconds**, because wall time understates this
+one: the benchmark machine has a hot page cache and an NVMe under it, so reads that cost
+almost nothing here are real I/O on a container.
+
+```
+GET /api/laws  (LawsView.loadCorpus — the whole corpus, 100 per page)
+                                  time  SQL stmts    law text read
+  as written                     24.2ms        273          4.88 MB
+  with load options               6.3ms          7          0.00 MB
+  payload identical across all 2 pages: True
+
+GET /api/circulars/{id}  (regulations block, worst case: 5 linked laws)
+  as written                      1.7ms         17         75.3 KB
+  preloaded                       1.4ms          4          0.0 KB
+```
+
+**273 queries to 7, and 4.88 MB of law text to nothing.** The query count is the more honest
+headline: it was four relationship walks per document, so the old cost scaled with page size
+while the new one does not.
+
+**The option is per-query, not on the mapper.** Making `content_text` `deferred()` would fix
+every path at once, and that is the wrong trade here: search previews the text, the AI pipeline
+summarises it, the scraper writes it, and a mapper-level default would turn each of those into
+its own lazy load — silently, with no error to notice and a *worse* profile than today on the
+paths that matter most. Opting out at the queries that genuinely do not need it keeps the cost
+where it can be seen.
+
+**Also landed:** `LawsView.loadCorpus` fetched its pages in a sequential loop. The first page
+reports `total`, so the rest are known up front and now go out together — the tree cannot render
+until the last one lands, so serializing them put a whole round trip in front of every visit for
+nothing.
+
+Regression tests in `tests/test_law_list_loading.py` — two, deliberately. One asserts
+`content_text` is never materialised, which is the property and which fails if the loader
+options are dropped. The other asserts the payload is unchanged, which guards a different
+mistake: options *edited* into something that multiplies rows (a `joinedload` against a
+collection duplicates parents) rather than options removed.
+
+A third, asserting the query count does not grow with the page, was written and then cut: it
+overlapped the first, and its "the lazy path issues more queries" assertion pinned the old slow
+behaviour, so it would have failed if `_law_summary` ever legitimately stopped walking
+relationships. `benchmarks/perf_baseline.py --section laws` reports query counts in more detail
+anyway. Full suite: 662 passed.
+
+<details>
+<summary>Original finding</summary>
 
 **Symptom.** `_law_summary` (`api/serializers.py`) touches, per document:
 
@@ -480,6 +532,37 @@ in parallel instead of in sequence.
 
 **Verify.** `benchmarks/perf_baseline.py --section laws`, and confirm the payload is
 byte-identical — this changes only *how* the rows are fetched.
+
+### Which user actions actually pay this
+
+Traced rather than assumed, because `_law_summary` is reached from four places and only one of
+them is worth changing. The endpoint is `GET /api/laws`; the screen is **Laws & Regulations**
+(`/laws`, and `/laws/:id` as a deep link).
+
+| User action | Path | Cost | P5's share |
+|---|---|---|---|
+| **Open `/laws`** — `onMounted` → `loadCorpus` | `GET /api/laws` ×2, sequential | 17.2 + 6.2 = **23.4 ms** | **~18 ms — this is the item** |
+| **Type in the search box** — 250 ms debounce | `GET /api/laws?q=` | 14–121 ms | 0–7 ms — negligible |
+| **Change the doc-type filter** | `GET /api/laws?q=` | same | same |
+| **Click a document in the tree** | `GET /api/laws/{id}` | 0.7 ms | negligible |
+| **Open a circular** — the regulations block | `GET /api/circulars/{id}` | 1.6 ms | negligible |
+
+The corpus is 135 documents, so `loadCorpus` makes exactly two requests — a full page of 100 and
+a second of 35 — one after the other, and the library tree renders only when both land.
+
+**The search path is not a P5 problem, contrary to what this section originally implied.** By
+the time `_law_summary` runs there, the search engine has already loaded those `RegDocument`
+rows into the session, so the lazy loads it would otherwise trigger are already paid. Measured
+split for `q=foreign exchange`: 121.0 ms of search, **−0.4 ms** of serialization.
+
+That leaves the two detail paths (`/api/laws/{id}`, and the circular pane's regulations block)
+touching one document and five respectively — real N+1s, far too small to matter. So P5 is worth
+doing for the `/laws` mount and nothing else, which also caps its value at roughly 18 ms rather
+than the "twice on mount plus every search" the original framing suggested.
+
+**What the search path is really waiting on is P14**, below.
+
+</details>
 
 ---
 
@@ -749,7 +832,33 @@ rather than an equality check, which is why it is its own item.
 
 ---
 
-## 16. Checked and not worth doing
+## 16. P14 — Law search is now 5× slower than circular search
+
+**Found while tracing P5's user paths.** Circular search is 22 ms after P2 + P3. Law search —
+the `/laws` search box — is **111–121 ms**, and the profile is the one P2 already fixed once:
+
+```
+   ncalls  tottime  cumtime  filename:lineno(function)
+        3    0.000    0.905  search.py:1546(search)
+      150    0.000    0.837  search.py:1261(_law_result)
+      198    0.197    0.792  search.py:453(best_window)     <- 87% of the total
+       96    0.003    0.785  search.py:522(make_preview)
+```
+
+`_law_result` calls `make_preview` on the full `content_text` of a law version, which averages
+**44 KB** — so `best_window` is scanning whole documents to choose a 25-word snippet, exactly
+what its docstring says never to do. P2's rewrite already made this 13× cheaper than it was;
+what remains is that it should not be scanning whole documents at all.
+
+This is P13's defect on the law arm, and worse there: for circulars `_scan_documents` is a
+*fallback* for results the vector arm did not cover, while `_law_result` runs this on **every**
+law result. Fixing it should bring law search into the same range as circular search.
+
+Do it with P13 — one decision about how to bound a preview scan, applied in both places.
+
+---
+
+## 17. Checked and not worth doing
 
 Recorded so the same ground is not covered twice.
 

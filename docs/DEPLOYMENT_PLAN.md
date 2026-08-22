@@ -133,10 +133,11 @@ host to rule out "no outbound HTTP at all", body checks so a Cloudflare intersti
 served as `200` is not counted as success, and four client arms so a spread between them
 says the fix is in our code and a flat rate says it is IP reputation.
 
-The arms are a fresh `cloudscraper` per call (what every scraper does today), one reused
-across calls, plain `requests`, and `curl_cffi` impersonating Chrome. That last one is
-the arm to watch, because the fingerprints are not close. Measured against a
-fingerprinting service:
+The arms are named for the library that issues the request: `cloudscraper` (a fresh
+`create_scraper()` per call, what every scraper does today), `cloudscraper-reuse`,
+`requests` as the control, and `curl_cffi` impersonating Chrome. That last one is the arm
+to watch, because the fingerprints are not close. Measured against a fingerprinting
+service:
 
 | client | JA4 | ALPN |
 |---|---|---|
@@ -164,6 +165,11 @@ or, without a shell, `GET /api/admin/sbp-reachability?attempts=5` (admin-only, s
 capped at 20 attempts per cell). Same code behind both. It reports the Cloudflare ray IDs,
 which are what SBP's side needs to look up a specific refusal. Run the same command
 locally for the baseline to compare against.
+
+It probes `/circulars/` only unless given `-t`, and it is serial, so budget roughly three
+seconds per request: the default run is 12 requests. Progress goes to stderr as each one
+lands — a silent run of this is a bug, not patience, because "hung" and "the network is
+being blocked" are precisely the two things it has to tell apart.
 
 What it takes out, all of it at request time:
 

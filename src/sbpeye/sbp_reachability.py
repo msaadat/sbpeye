@@ -16,14 +16,14 @@ Three things make the answer trustworthy rather than anecdotal:
 * **200 is not success.** A Cloudflare interstitial is served as `200 text/html` with a
   challenge body. Counting it as reachable is how a probe reports green while every
   scrape returns nothing usable, so bodies are checked for challenge markers.
-* **Four client arms.** `fresh` is what the app does today — `cloudscraper.create_scraper()`
-  per call, a new TLS session every request. `session` reuses one scraper across attempts,
-  `plain` is bare `requests` with the same headers, and `impersonate` is `curl_cffi`
-  presenting Chrome's real TLS and HTTP/2 fingerprints. If the arms differ, the block is
-  partly a client problem and the fix is in our code; if they all fail alike, it is IP
-  reputation and no client change will help.
+* **Four client arms**, each named for the library that issues the request, so the output
+  never needs a legend. `cloudscraper` is what the app does today — a fresh
+  `create_scraper()` per call. `cloudscraper-reuse` keeps one across attempts, `requests`
+  is the bare control, and `curl_cffi` presents Chrome's real TLS and HTTP/2
+  fingerprints. If the arms differ, the block is partly a client problem and the fix is
+  in our code; if they all fail alike, it is IP reputation and no client change will help.
 
-  The `impersonate` arm is the one worth watching. `cloudscraper` sends a Chrome
+  The `curl_cffi` arm is the one worth watching. `cloudscraper` sends a Chrome
   User-Agent over a Python TLS stack: measured against a fingerprinting service, its JA4
   is `t13d1713h1_...` — an OpenSSL handshake over HTTP/1.1 — while real Chrome 120 is
   `t13d1516h2_...` over HTTP/2. `curl_cffi` reproduces the latter exactly. Cloudflare
@@ -69,6 +69,16 @@ TARGETS: dict[str, str] = {
     "archive": "https://archive.sbp.org.pk/index.html",  # ARCHIVE_BASE_URL fallbacks
 }
 
+# Measured medians from a clean connection, used only to estimate a run's duration. Wrong
+# by a second either way costs nothing; the point is telling someone "four minutes" rather
+# than leaving them to guess whether it has hung.
+TYPICAL_SECONDS: dict[str, float] = {
+    "homepage": 2.3,
+    "circulars": 2.8,
+    "economic-data": 5.3,
+    "archive": 0.9,
+}
+
 # Floors, not expected sizes: set well under what each page actually returns so that
 # ordinary content changes never trip them.
 MIN_BYTES: dict[str, int] = {
@@ -97,7 +107,22 @@ try:  # pragma: no cover - presence depends on the environment being probed
 except ImportError:
     curl_requests = None
 
-ARMS = ("fresh", "session", "plain", "impersonate")
+# Named after the library that actually issues the request, so every line of output says
+# which client produced it without a legend:
+#
+#   cloudscraper        a new `create_scraper()` per request — exactly what every call
+#                       site in `scraper/` does today, and the arm to compare against
+#   cloudscraper-reuse  one scraper reused across requests
+#   requests            plain `requests`, the control: if it matches cloudscraper,
+#                       cloudscraper is contributing nothing
+#   curl_cffi           Chrome's real TLS and HTTP/2 fingerprint
+ARMS = ("cloudscraper", "cloudscraper-reuse", "requests", "curl_cffi")
+
+# Only circulars by default. Probing all four targets is 4x the wall clock to answer the
+# same question — the block is applied per request at the edge, not per page — and a full
+# run took long enough that it read as a hang. The others stay available via `-t` for
+# confirming a finding is site-wide rather than one path.
+DEFAULT_TARGETS = ("circulars",)
 
 # Which Chrome curl_cffi presents. Pinned rather than left to the library default so a
 # result stays comparable across runs after an upgrade moves the default forward.
@@ -177,24 +202,24 @@ def _egress_ip(timeout: int) -> dict:
 
 def _client(arm: str, cache: dict):
     """Return the client for an arm, creating per-call or reusing as the arm intends."""
-    if arm == "fresh":
+    if arm == "cloudscraper":
         # Deliberately not cached: reproducing `cloudscraper.create_scraper().get(...)`
         # at every call site in `scraper/` is the whole point of this arm.
         return cloudscraper.create_scraper()
-    if arm == "session":
-        if "session" not in cache:
-            cache["session"] = cloudscraper.create_scraper()
-        return cache["session"]
-    if arm == "plain":
-        if "plain" not in cache:
-            cache["plain"] = requests.Session()
-        return cache["plain"]
-    if arm == "impersonate":
+    if arm == "cloudscraper-reuse":
+        if arm not in cache:
+            cache[arm] = cloudscraper.create_scraper()
+        return cache[arm]
+    if arm == "requests":
+        if arm not in cache:
+            cache[arm] = requests.Session()
+        return cache[arm]
+    if arm == "curl_cffi":
         if curl_requests is None:
             raise RuntimeError("curl_cffi is not installed in this environment")
-        if "impersonate" not in cache:
-            cache["impersonate"] = curl_requests.Session(impersonate=IMPERSONATE_TARGET)
-        return cache["impersonate"]
+        if arm not in cache:
+            cache[arm] = curl_requests.Session(impersonate=IMPERSONATE_TARGET)
+        return cache[arm]
     raise ValueError(f"Unknown arm: {arm}")
 
 
@@ -202,10 +227,10 @@ def _probe_once(target: str, url: str, arm: str, index: int, timeout: int, cache
     started = time.monotonic()
     try:
         client = _client(arm, cache)
-        # No headers on the impersonate arm: curl_cffi sends Chrome's real header set in
-        # Chrome's real order, and overriding the User-Agent from `HEADERS` would put a
+        # No headers on the curl_cffi arm: it sends Chrome's real header set in Chrome's
+        # real order, and overriding the User-Agent from `HEADERS` would put a
         # hand-written header back into the profile the arm exists to reproduce.
-        kwargs = {"timeout": timeout} if arm == "impersonate" else {"headers": HEADERS, "timeout": timeout}
+        kwargs = {"timeout": timeout} if arm == "curl_cffi" else {"headers": HEADERS, "timeout": timeout}
         resp = client.get(url, **kwargs)
         elapsed = int((time.monotonic() - started) * 1000)
         body = resp.content or b""
@@ -293,19 +318,38 @@ def _verdict(egress: dict, summaries: list[Summary]) -> str:
     return "intermittent"
 
 
+def plan_size(attempts: int, targets: list[str], arms: list[str]) -> int:
+    return attempts * len(targets) * len(arms)
+
+
+def estimate_seconds(attempts: int, targets: list[str], arms: list[str], delay: float) -> int:
+    """Roughly how long a run will take, for a caller that has to decide to wait for it.
+
+    Uses measured per-target medians rather than one average: `economic-data` is six
+    times slower than `archive`, so an average would mislead by minutes on a narrowed
+    run, which is exactly when someone is watching the clock.
+    """
+    return int(sum(TYPICAL_SECONDS.get(t, 3.0) * len(arms) * attempts for t in targets)
+               + plan_size(attempts, targets, arms) * delay)
+
+
 def run_probe(
-    attempts: int = 5,
+    attempts: int = 3,
     targets: list[str] | None = None,
     arms: list[str] | None = None,
     timeout: int = 30,
-    delay: float = 1.0,
+    delay: float = 0.5,
+    on_attempt=None,
 ) -> dict:
     """Probe SBP `attempts` times per target per arm and return the full record.
 
     Serial by design. Firing concurrently would measure how the edge treats a burst,
-    which is not how the scrapers behave and not the question being asked.
+    which is not how the scrapers behave and not the question being asked — but it also
+    makes a full run minutes long, so `on_attempt` is called with each `Attempt` and the
+    running total as it completes. Without it the CLI sits silent for the whole run and
+    looks hung, which is indistinguishable from the network failure being investigated.
     """
-    chosen_targets = targets or list(TARGETS)
+    chosen_targets = targets or list(DEFAULT_TARGETS)
     chosen_arms = arms or list(ARMS)
     unknown = [t for t in chosen_targets if t not in TARGETS]
     if unknown:
@@ -315,24 +359,28 @@ def run_probe(
         raise ValueError(f"Unknown arm(s): {', '.join(unknown_arms)}")
 
     skipped_arms = []
-    if "impersonate" in chosen_arms and curl_requests is None:
+    if "curl_cffi" in chosen_arms and curl_requests is None:
         # Dropped rather than run: without the library every attempt would record the
         # same ImportError, and a column of errors reads like a network finding.
-        chosen_arms = [a for a in chosen_arms if a != "impersonate"]
-        skipped_arms.append("impersonate (curl_cffi not installed)")
+        chosen_arms = [a for a in chosen_arms if a != "curl_cffi"]
+        skipped_arms.append("curl_cffi (not installed in this environment)")
 
     started_at = datetime.now(timezone.utc)
     egress = _egress_ip(timeout)
 
     cache: dict = {}
     records: list[Attempt] = []
+    total = plan_size(attempts, chosen_targets, chosen_arms)
     for index in range(1, attempts + 1):
         for target in chosen_targets:
             for arm in chosen_arms:
-                records.append(
-                    _probe_once(target, TARGETS[target], arm, index, timeout, cache)
-                )
-                if delay:
+                record = _probe_once(target, TARGETS[target], arm, index, timeout, cache)
+                records.append(record)
+                if on_attempt is not None:
+                    on_attempt(record, len(records), total)
+                # No sleep after the final request: it is a gap between requests, and
+                # trailing it just makes the run look slower than it was.
+                if delay and len(records) < total:
                     time.sleep(delay)
 
     summaries = _summarize(records)
@@ -346,7 +394,7 @@ def run_probe(
         "targets": {name: TARGETS[name] for name in chosen_targets},
         "arms": chosen_arms,
         "skipped_arms": skipped_arms,
-        "impersonate_target": IMPERSONATE_TARGET if "impersonate" in chosen_arms else None,
+        "impersonate_target": IMPERSONATE_TARGET if "curl_cffi" in chosen_arms else None,
         "verdict": _verdict(egress, summaries),
         "summary": [asdict(s) | {"ok_rate": round(s.ok_rate, 3)} for s in summaries],
         "attempts": [asdict(r) for r in records],
@@ -368,13 +416,13 @@ def format_report(result: dict) -> str:
         lines.append(f"skipped     {skipped}")
     lines.append("")
     lines.append(
-        f"{'target':<15} {'arm':<12} {'ok':>7} {'403':>5} {'chal':>5} {'short':>6} {'err':>5} {'p50':>8}"
+        f"{'target':<15} {'arm':<19} {'ok':>7} {'403':>5} {'chal':>5} {'short':>6} {'err':>5} {'p50':>8}"
     )
-    lines.append("-" * 70)
+    lines.append("-" * 77)
     for row in sorted(result["summary"], key=lambda r: (r["target"], r["arm"])):
         p50 = f"{row['median_ms']}ms" if row["median_ms"] is not None else "-"
         lines.append(
-            f"{row['target']:<15} {row['arm']:<12} "
+            f"{row['target']:<15} {row['arm']:<19} "
             f"{row['ok']}/{row['attempts']:<5} {row['forbidden']:>5} "
             f"{row['challenged']:>5} {row['short']:>6} {row['errors']:>5} {p50:>8}"
         )
@@ -386,22 +434,56 @@ def format_report(result: dict) -> str:
     return "\n".join(lines)
 
 
+def _progress_line(record: Attempt, done: int, total: int) -> str:
+    if record.error:
+        outcome = record.error.split(":")[0]
+    elif record.challenge:
+        outcome = f"CHALLENGE {record.status}"
+    elif record.ok:
+        outcome = f"ok {record.status}"
+    else:
+        outcome = f"FAIL {record.status}"
+    elapsed = f"{record.elapsed_ms}ms" if record.elapsed_ms is not None else "-"
+    return f"[{done:>3}/{total}] {record.target:<14} {record.arm:<19} {outcome:<14} {elapsed:>8}"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m sbpeye.sbp_reachability",
         description="Measure this host's success rate reaching sbp.org.pk.",
     )
-    parser.add_argument("-n", "--attempts", type=int, default=5,
-                        help="attempts per target per arm (default: 5)")
+    parser.add_argument("-n", "--attempts", type=int, default=3,
+                        help="attempts per target per arm (default: 3)")
     parser.add_argument("-t", "--target", action="append", dest="targets",
-                        choices=sorted(TARGETS), help="restrict to a target (repeatable)")
+                        choices=sorted(TARGETS), help="add a target (repeatable; default: circulars only)")
     parser.add_argument("-a", "--arm", action="append", dest="arms",
                         choices=list(ARMS), help="restrict to a client arm (repeatable)")
     parser.add_argument("--timeout", type=int, default=30, help="per-request timeout (default: 30)")
-    parser.add_argument("--delay", type=float, default=1.0,
-                        help="seconds between requests (default: 1.0)")
+    parser.add_argument("--delay", type=float, default=0.5,
+                        help="seconds between requests (default: 0.5)")
     parser.add_argument("--json", action="store_true", help="emit the full record as JSON")
+    parser.add_argument("-q", "--quiet", action="store_true",
+                        help="suppress the per-request progress log on stderr")
     args = parser.parse_args(argv)
+
+    targets = args.targets or list(DEFAULT_TARGETS)
+    arms = args.arms or [a for a in ARMS if a != "curl_cffi" or curl_requests is not None]
+
+    # Progress goes to stderr so `--json > file` still yields clean JSON, and so a run
+    # over `railway ssh` shows something within a couple of seconds. A full run is 48
+    # serial requests; announcing the size up front is what lets someone narrow it with
+    # -t/-a instead of waiting out a scope they did not want.
+    def report_progress(record, done, total):
+        print(_progress_line(record, done, total), file=sys.stderr, flush=True)
+
+    if not args.quiet:
+        seconds = estimate_seconds(args.attempts, targets, arms, args.delay)
+        print(
+            f"probing {plan_size(args.attempts, targets, arms)} requests "
+            f"({len(targets)} targets x {len(arms)} arms x {args.attempts}) "
+            f"— roughly {seconds // 60}m{seconds % 60:02d}s, serial by design",
+            file=sys.stderr, flush=True,
+        )
 
     result = run_probe(
         attempts=args.attempts,
@@ -409,7 +491,11 @@ def main(argv: list[str] | None = None) -> int:
         arms=args.arms,
         timeout=args.timeout,
         delay=args.delay,
+        on_attempt=None if args.quiet else report_progress,
     )
+
+    if not args.quiet:
+        print("", file=sys.stderr, flush=True)
 
     if args.json:
         print(json.dumps(result, indent=2))

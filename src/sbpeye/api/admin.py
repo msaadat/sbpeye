@@ -725,9 +725,9 @@ def environment(db: Session = Depends(get_db)) -> dict:
 @router.get("/sbp-reachability")
 def sbp_reachability(
     attempts: int = Query(3, ge=1, le=20, description="Attempts per target per client arm"),
-    target: list[str] | None = Query(None, description="Restrict to named targets"),
+    target: list[str] | None = Query(None, description="Targets to probe (default: circulars only)"),
     arm: list[str] | None = Query(None, description="Restrict to named client arms"),
-    delay: float = Query(1.0, ge=0.0, le=10.0, description="Seconds between requests"),
+    delay: float = Query(0.5, ge=0.0, le=10.0, description="Seconds between requests"),
 ) -> dict:
     """Measure, from this container, how often SBP answers.
 
@@ -740,8 +740,11 @@ def sbp_reachability(
     the laptop is not blocked.
 
     Still read-only in the sense the module header means: it writes nothing to the
-    corpus, the vector store or the ledger. It does cost wall-clock, so it is bounded
-    (20 attempts per cell) and serialized.
+    corpus, the vector store or the ledger. It does cost wall-clock — the probe is serial
+    and each request takes seconds — so it is bounded (20 attempts per cell), serialized,
+    and defaults to the circulars listing alone. A default call is 12 requests, around 40
+    seconds; widening `target` or `attempts` multiplies that, and there is no streaming
+    here as there is on the CLI, so a caller that asks for the maximum waits in silence.
     """
     if not _REACHABILITY_LOCK.acquire(blocking=False):
         return JSONResponse(

@@ -11,15 +11,25 @@ put to the system is always the set that was published.
 
 Only SBPEye can be driven this way. Other systems under test are prompted by hand and their
 answers saved into the same JSON shape: item, question, answer, elapsed_s.
+
+`/api/chat` is behind the authentication boundary, so a run needs a session cookie: pass
+`--cookie` or set `SBPEYE_SESSION_COOKIE`. Chat bills the *requesting user's* provider
+credentials, so whichever account the cookie belongs to is the account that pays for the
+round — and its configured chat model is the model under test. Record both alongside the
+scores; a benchmark number means nothing without the model that produced it.
 """
 
 import argparse
 import json
+import os
 import re
 import time
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+SESSION_COOKIE = "sbpeye_session"
 
 HERE = Path(__file__).parent
 # "**P01.** text..." running until a blank line, or to end of file for the last item.
@@ -35,11 +45,12 @@ def load_questions(path: Path) -> dict[str, str]:
     return questions
 
 
-def ask(url: str, item: str, question: str, out: Path, timeout: int) -> str:
+def ask(url: str, item: str, question: str, out: Path, timeout: int, cookie: str) -> str:
     body = json.dumps({"message": question, "circular_ids": []}).encode()
-    request = urllib.request.Request(
-        url, data=body, headers={"Content-Type": "application/json"}
-    )
+    headers = {"Content-Type": "application/json"}
+    if cookie:
+        headers["Cookie"] = f"{SESSION_COOKIE}={cookie}"
+    request = urllib.request.Request(url, data=body, headers=headers)
     started = time.monotonic()
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -49,6 +60,21 @@ def ask(url: str, item: str, question: str, out: Path, timeout: int) -> str:
             "question": question,
             "answer": payload.get("response", ""),
             "session_id": payload.get("session_id"),
+            "elapsed_s": round(time.monotonic() - started, 1),
+        }
+    except urllib.error.HTTPError as exc:
+        # 401 is a broken run, not a benchmark result: every remaining item would fail the
+        # same way and the round would look like fifteen refusals from the system.
+        if exc.code in (401, 403):
+            raise SystemExit(
+                f"{item}: {exc.code} from {url}. /api/chat is behind authentication — "
+                "pass --cookie or set SBPEYE_SESSION_COOKIE."
+            ) from exc
+        record = {
+            "item": item,
+            "question": question,
+            "answer": "",
+            "error": f"HTTPError {exc.code}: {exc.reason}",
             "elapsed_s": round(time.monotonic() - started, 1),
         }
     except Exception as exc:
@@ -73,6 +99,11 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--only", default="", help="comma-separated items, e.g. P03,P07")
+    parser.add_argument(
+        "--cookie",
+        default=os.environ.get("SBPEYE_SESSION_COOKIE", ""),
+        help=f"value of the {SESSION_COOKIE} cookie; defaults to $SBPEYE_SESSION_COOKIE",
+    )
     args = parser.parse_args()
 
     questions = load_questions(Path(args.questions))
@@ -88,7 +119,8 @@ def main() -> None:
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         for line in pool.map(
-            lambda kv: ask(args.url, kv[0], kv[1], out, args.timeout), questions.items()
+            lambda kv: ask(args.url, kv[0], kv[1], out, args.timeout, args.cookie),
+            questions.items(),
         ):
             print(line, flush=True)
 

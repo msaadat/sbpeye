@@ -626,9 +626,9 @@ def test_chat_stream_records_one_complete_trace(client, monkeypatch):
                 )
                 yield {"phase": "thinking"}
                 yield "fake "
-                yield {"phase": "tools", "tools": ["Searching circulars"]}
+                yield {"phase": "tools", "tools": ["Searching circulars and laws"]}
                 llm_debug.emit_event(
-                    "tool_result", {"name": "search_circulars"}, stage="chat.tools",
+                    "tool_result", {"name": "search_corpus"}, stage="chat.tools",
                 )
                 yield "stream reply"
                 llm_debug.emit_event(

@@ -92,12 +92,13 @@ TAG_TAXONOMY = [
 # tool function names declared in ``TOOLS`` below.
 TOOL_LABELS = {
     "search_selected_documents": "Searching selected documents",
-    "search_circulars": "Searching circulars",
+    "search_corpus": "Searching circulars and laws",
     "get_latest_circulars": "Fetching latest circulars",
     "get_circular_details": "Reading circular details",
+    "get_law_details": "Reading the law text",
     "query_regulatory_values": "Looking up regulatory values",
     "get_circulars_by_tag": "Browsing circulars by tag",
-    "search_regulatory_inventory": "Taking inventory across the whole corpus",
+    "search_regulatory_inventory": "Taking inventory across every document",
 }
 
 
@@ -148,12 +149,15 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "search_circulars",
+            "name": "search_corpus",
             "description": (
-                "Search SBP circulars by keyword, topic, department, or tag. Use this when the "
-                "user asks for circulars on a specific subject, regulation, or topic.\n"
-                "Returns TWO independently ranked lists, deliberately not merged, plus "
-                "`reference_matches` for any exact circular reference in the query:\n"
+                "Search everything SBPEye holds — circulars AND the laws, Acts, regulations "
+                "and guidelines corpus — by keyword, topic, department, or tag. This is the "
+                "default search: use it for any question about a subject, rule, or topic, "
+                "whether the answer turns out to sit in a circular or in an Act.\n"
+                "Returns TWO independently ranked lists of CIRCULARS, deliberately not "
+                "merged, plus `reference_matches` for any exact circular reference in the "
+                "query, plus `law_results` for the laws corpus:\n"
                 "- `lexical_results`: keyword/BM25 ranking. Favours circulars whose title and "
                 "text repeat the query's words.\n"
                 "- `semantic_results`: meaning-based ranking over passages, including the text "
@@ -178,7 +182,15 @@ TOOLS = [
                 "figures live in the annexure, and revised limits usually arrive this way. "
                 "Do not conclude from an older circular that states a figure outright over a "
                 "newer one whose figure is in an annexure you have not read — call "
-                "get_circular_details on the newer one first."
+                "get_circular_details on the newer one first.\n"
+                "`law_results` is the statute and regulation corpus, ranked separately "
+                "because a rank there is a rank among laws and cannot be compared with a "
+                "rank among circulars. Each entry carries a `[[l:...]]` citation and short "
+                "`passages`. A statute is far too long to return whole, so these passages "
+                "are a pointer, not the provision: when the answer depends on what an Act "
+                "actually says — its composition, its timelines, its thresholds — call "
+                "get_law_details on it and quote from that. A circular that merely mentions "
+                "an Act is not a source for what the Act requires."
             ),
             "parameters": {
                 "type": "object",
@@ -223,6 +235,40 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_law_details",
+            "description": (
+                "Read inside one law, Act, regulation or guideline — the equivalent of "
+                "get_circular_details for the statute corpus. Use it whenever an answer "
+                "depends on what an Act or a set of Regulations actually says: statutory "
+                "timelines, the composition of a body, definitions, thresholds set in "
+                "primary legislation. get_circular_details CANNOT retrieve an Act — it "
+                "searches circulars only, and asking it for one returns an unrelated "
+                "circular that happens to mention the Act by name.\n"
+                "Give `law_title` and a `query` describing what you need from it; the "
+                "matched passages come back with the passages either side of them, so a "
+                "provision split across a page boundary arrives whole. Give `section` "
+                "instead when you already know the provision number — semantic search "
+                "cannot find 'section 9D' by meaning.\n"
+                "The result names the document it actually resolved to in "
+                "`resolved_title`. Check it against what you asked for: a mismatch means "
+                "the corpus does not hold the instrument you wanted, and you should say "
+                "so rather than answer from whatever came back."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "law_title": {"type": "string", "description": "The law's title, e.g. 'State Bank of Pakistan Act, 1956', 'Payment Systems and Electronic Fund Transfers Act, 2007', 'Prudential Regulations for SME Financing'"},
+                    "query": {"type": "string", "description": "What you need from inside it, e.g. 'composition and quorum of the Monetary Policy Committee'"},
+                    "section": {"type": "string", "description": "Optional provision number to fetch directly, e.g. '9D', '36', 'R-6'. Use when you know it; semantic search cannot find a section by its number."},
+                    "limit": {"type": "integer", "description": "Number of matched passages before neighbour expansion (1-10)", "default": 5}
+                },
+                "required": ["law_title"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "query_regulatory_values",
             "description": "Query the structured database of regulatory VALUES extracted from circulars — ratios (CAR, LCR, NSFR, Leverage Ratio), monetary thresholds (minimum paid-up capital, MCR, exposure limits), percentage limits, numeric limits, and deadlines. Use this for any quantitative question, e.g. 'what is the current minimum capital requirement for MFBs?', 'which circulars set a threshold above 10%?', 'what is the required CAR?'. Returns each value with its metric, normalized number, unit, comparator (min/max/exactly), subject it applies to, effective date, and a citation to the source circular.",
             "parameters": {
@@ -261,14 +307,17 @@ TOOLS = [
         "function": {
             "name": "search_regulatory_inventory",
             "description": (
-                "Sweep the ENTIRE corpus of circulars and regulations for every document that "
+                "Sweep EVERY circular and regulation for every document that "
                 "mentions a subject, and return them as an inventory. Use this only for "
                 "exhaustive 'list all / find every / which documents' questions, e.g. 'list all "
                 "circulars that talk about AML' or 'which regulations mention contact centres'. "
                 "It expands the subject into a full vocabulary (acronyms, spellings, plurals) "
                 "and searches with no result cutoff, so it finds documents that mention the "
                 "subject in passing, which ordinary search misses. It is much slower than "
-                "search_circulars — prefer that tool for ordinary questions about a topic. "
+                "search_corpus — prefer that tool for ordinary questions about a topic. "
+                "Each row is a pointer, never a reading: the passage is one short excerpt, so "
+                "to learn what a document says, call get_circular_details or get_law_details "
+                "on it. "
                 "IMPORTANT: results are UNREVIEWED candidates. Every returned document contains "
                 "one of the search terms, but nothing has judged whether it genuinely discusses "
                 "the subject, so some will be false matches (a term appearing in an address or "
@@ -877,6 +926,14 @@ _DEFAULT_CONTEXT_WINDOW = 8_192
 # Fraction of the context window reserved for prompt input; the remainder covers
 # the system prompt and the JSON response.
 _CONTEXT_INPUT_FRACTION = 0.6
+# Floor under the synthesis step's evidence budget, matching `resolve_context_budget`'s
+# own 1,000-token floor. Keeps a provider that reports an implausibly small window from
+# reducing a finished turn's evidence to nothing.
+_SYNTHESIS_MIN_EVIDENCE_CHARS = 4_000
+# Fixed framing around the synthesis evidence, charged to the budget so the ceiling holds.
+_SYNTHESIS_FRAMING = (
+    "Selected circular context:\n\n\n\nDatabase lookup results already gathered:\n\n"
+)
 # Structured-output capability tiers, strongest first.
 _STRUCTURED_MODES = ("json_schema", "json_object", "text")
 # Retries for a provider that answers 200 with no usable choice. Measured on
@@ -897,6 +954,10 @@ SEARCH_INLINE_BODY_MAX_CHARS = 4_000
 # Ceiling on the total body text inlined across one search response, so a limit=50
 # call cannot turn a result list into a 100-document dump.
 SEARCH_INLINE_BODY_BUDGET_CHARS = 40_000
+# Ceiling on the law passages handed over across one search response. Smaller than the
+# circular budget on purpose: a law hit is a pointer to open with get_law_details, not a
+# reading of the instrument, and the two corpora share one context window.
+LAW_SEARCH_PASSAGE_BUDGET_CHARS = 8_000
 # Ceiling on the matched-chunk text handed over whole across one search response.
 # Chunks average ~1.5k chars, so this covers the head of both arms — which is where
 # a wrong passage does its damage, because that is what the model reads first.
@@ -1500,49 +1561,168 @@ class AIClient:
             "Please retry the question, or narrow it to the selected circulars."
         )
 
+    def _synthesis_evidence_budget(self) -> int:
+        """Characters of tool results the final synthesis step may carry.
+
+        This used to be ``max(4000, max_context_tokens * 4)``, which was wrong at both
+        ends. `max_context_tokens` is not a context window: `_truncate_context` clips a
+        single document's *characters* with it, and `laws_ai` already notes the unit
+        mismatch as pre-existing. Its 4,000 default belongs to that meaning; read as a
+        token window it allowed 16,000 characters of evidence for a whole turn, which is
+        what the 2026-08-23 round ran with — a ten-lookup turn got one lookup. And where
+        a real window *had* been detected the same expression handed the entire window to
+        tool results, leaving nothing for the system prompt, the conversation or the
+        answer.
+
+        `resolve_context_budget` is the existing answer to both: it takes the provider's
+        reported window where there is one, falls back to a per-provider default, and
+        reserves `_CONTEXT_INPUT_FRACTION` of it for input. Reusing it makes the budget
+        scale with the model instead of with a placeholder, and keeps a genuinely small
+        local model (LM Studio's 8,192) safe without a special case.
+
+        Roughly, in characters: LM Studio 19k, OpenRouter 78k, OpenAI 307k, Gemini 2.4M —
+        against 16k for every one of them before. It is a ceiling, not a target; a turn
+        that gathered less sends less.
+        """
+        return max(_SYNTHESIS_MIN_EVIDENCE_CHARS, self.resolve_context_budget() * 4)
+
+    @staticmethod
+    def _fair_shares(lengths: list[int], budget: int) -> list[int]:
+        """Split `budget` across items wanting `lengths`, max-min fair.
+
+        Every item gets an equal share; an item wanting less than its share takes only
+        what it needs and its surplus is redistributed among the ones still short. The
+        result does not depend on the order the items are given in, which is the property
+        that matters here — no tool result can be starved by where it happens to sit.
+        """
+        shares = [0] * len(lengths)
+        pending = [index for index, length in enumerate(lengths) if length > 0]
+        remaining = max(0, budget)
+        while pending and remaining > 0:
+            share = remaining // len(pending)
+            if share == 0:
+                break
+            for index in list(pending):
+                grant = min(share, lengths[index] - shares[index])
+                shares[index] += grant
+                remaining -= grant
+                if shares[index] >= lengths[index]:
+                    pending.remove(index)
+        return shares
+
+    @staticmethod
+    def _tool_result_sections(full_messages: list[dict[str, Any]]) -> list[tuple[str, str]]:
+        """Every tool result of the turn as ``(label, content)``, in call order.
+
+        The label names the tool and the arguments it was called with. Without it the
+        synthesis prompt is a run of unattributed JSON blobs, and a model asked to weigh
+        a broad first search against a narrow fifth one cannot tell which is which.
+
+        The tool message on the wire carries only `tool_call_id`, so the name is
+        recovered from the assistant turn that requested it.
+        """
+        names: dict[str, str] = {}
+        for item in full_messages:
+            for call in item.get("tool_calls") or []:
+                function = call.get("function") or {}
+                arguments = function.get("arguments")
+                if not isinstance(arguments, str):
+                    arguments = json.dumps(arguments, ensure_ascii=False) if arguments else ""
+                names[call.get("id")] = (
+                    f"{function.get('name') or 'tool'}({arguments[:160]})"
+                )
+
+        sections: list[tuple[str, str]] = []
+        for item in full_messages:
+            if item.get("role") != "tool":
+                continue
+            content = str(item.get("content") or "")
+            if content:
+                sections.append((names.get(item.get("tool_call_id"), "tool"), content))
+        return sections
+
     def _tool_result_synthesis_messages(
         self,
         messages: list[dict[str, str]],
         full_messages: list[dict[str, Any]],
         circulars_context: str | None,
     ) -> list[dict[str, str]]:
-        tool_sections: list[str] = []
-        remaining_chars = max(4000, self.config.max_context_tokens * 4)
-        for item in full_messages:
-            if item.get("role") != "tool":
-                continue
-            content = str(item.get("content") or "")
-            if not content:
-                continue
-            if len(content) > remaining_chars:
-                content = content[:remaining_chars]
-            tool_sections.append(content)
-            remaining_chars -= len(content)
-            if remaining_chars <= 0:
-                break
+        """Rebuild the turn for a final, tool-free answer.
+
+        The budget is shared, not served first-come. It used to be spent in call order
+        with no per-result bound, so the first tool result could take all of it and the
+        loop then `break`; measured on chat session `9f5724b0` (benchmark P15, run 2),
+        ten tool calls produced exactly one section of 16,000 characters, clipped
+        mid-JSON, and the other nine never reached the model. The fifth of those nine had
+        returned the State Bank of Pakistan Act — the one document that could answer the
+        question — and the answer went out saying the Act was "not among the provided
+        sources". Run 1 of the same question differed only in which tool the model
+        happened to call first.
+
+        So every result now gets a fair share of the window, what is clipped is marked as
+        clipped, and the system prompt is told when the evidence in front of it is
+        partial. An answer built on a truncated record is not automatically wrong; one
+        that cannot tell it is reading a truncated record has no way to say so.
+        """
+        sections = self._tool_result_sections(full_messages)
+        no_context = "No selected circular context was provided."
+        # Everything except the tool results themselves is charged to the budget rather
+        # than added on top of it, so the ceiling remains the ceiling. Per section, 96
+        # covers the "Result of …:" line, the blank line after it, and the longest marker
+        # any clip can produce; a section that is not clipped leaves its allowance
+        # unspent. `circulars_context` is not charged here — it arrives already bounded
+        # by the caller's own budget in `build_chat_context`, and charging it twice would
+        # shrink the tool results to pay for something that has already been paid for.
+        budget = self._synthesis_evidence_budget()
+        overhead = len(_SYNTHESIS_FRAMING) + len(no_context)
+        overhead += sum(len(label) + 96 for label, _ in sections)
+        shares = self._fair_shares(
+            [len(content) for _, content in sections], max(0, budget - overhead)
+        )
+
+        rendered: list[str] = []
+        clipped = 0
+        for (label, content), share in zip(sections, shares):
+            if share < len(content):
+                clipped += 1
+                omitted = len(content) - share
+                body = (
+                    f"{content[:share]}\n… [clipped: {omitted} characters of this "
+                    "result are not shown]"
+                )
+            else:
+                body = content
+            rendered.append(f"Result of {label}:\n{body}")
 
         synthesis_context = [
             "Selected circular context:",
             circulars_context or "No selected circular context was provided.",
         ]
-        if tool_sections:
+        if rendered:
             synthesis_context.extend([
                 "Database lookup results already gathered:",
-                "\n\n".join(tool_sections),
+                "\n\n".join(rendered),
             ])
 
+        instructions = (
+            "You are an expert assistant for SBP circulars and regulations. "
+            "No tools are available in this step. Answer using only the "
+            "provided selected context and database lookup results. Cite "
+            "sources only with the short handles shown beside them — "
+            "[[c:...]], [[a:...]], [[l:...]] — copied character for "
+            "character. Never write a document ID or invent a handle."
+        )
+        if clipped:
+            instructions += (
+                f" {clipped} of the {len(sections)} lookup results below were too long "
+                "to include whole and are marked where they were clipped. Answer from "
+                "what is there, and if the answer depends on a part that was clipped, "
+                "say which lookup it was and that you could not see all of it. Do not "
+                "guess at clipped content."
+            )
+
         return [
-            {
-                "role": "system",
-                "content": (
-                    "You are an expert assistant for SBP circulars and regulations. "
-                    "No tools are available in this step. Answer using only the "
-                    "provided selected context and database lookup results. Cite "
-                    "sources only with the short handles shown beside them — "
-                    "[[c:...]], [[a:...]], [[l:...]] — copied character for "
-                    "character. Never write a document ID or invent a handle."
-                ),
-            },
+            {"role": "system", "content": instructions},
             *messages,
             {"role": "user", "content": "\n\n".join(synthesis_context)},
         ]
@@ -3174,6 +3354,58 @@ SOURCE BLOCKS:
                 payload[key] = result[key]
         return payload
 
+    @staticmethod
+    def _law_search_payloads(results: list[dict]) -> list[dict]:
+        """Serialize the law arm of a search response, under one shared budget.
+
+        Deliberately thinner than `_search_result_payload`. A circular's body is inlined
+        whole because a two-page letter usually *is* the answer; a law's never is, so
+        what a law result owes the reader is enough passage to tell whether this is the
+        instrument worth opening, and a citation to open it with. Anything more spends
+        the window on a document the model has not yet decided it needs.
+        """
+        payloads: list[dict] = []
+        remaining = LAW_SEARCH_PASSAGE_BUDGET_CHARS
+        for result in results:
+            document = result["law"]
+            version = result.get("version")
+            payload = {
+                "title": document.title,
+                "law_type": document.doc_type,
+                "part_label": document.part_label or None,
+                "source_url": (version.file_url if version else None) or document.source_url,
+                "citation": f"[[law:{document.id}|{document.title}]]",
+            }
+            if version is not None and version.content_text:
+                # What is NOT in this payload, stated as a number, on the same argument
+                # `attachment_text_chars` makes for a circular's annexures: a result that
+                # looks complete and is 2% of the instrument is how an Act gets answered
+                # from a snippet.
+                payload["full_text_chars"] = len(version.content_text)
+            passages = [item for item in (result.get("passages") or []) if item.get("text")]
+            kept: list[dict] = []
+            for item in passages:
+                text = item["text"].strip()
+                if len(text) > remaining:
+                    break
+                kept.append({
+                    "passage": text,
+                    "locator": item.get("source_ref"),
+                    "page": item.get("source_page"),
+                })
+                remaining -= len(text)
+            if kept:
+                payload["passages"] = kept
+            elif result.get("snippet"):
+                payload["matching_passage_excerpt"] = re.sub(
+                    r"</?mark>", "", result["snippet"]
+                )
+            for key in ("lexical_rank", "semantic_rank"):
+                if key in result:
+                    payload[key] = result[key]
+            payloads.append(payload)
+        return payloads
+
     def _execute_tool(
         self,
         name: str,
@@ -3202,7 +3434,7 @@ SOURCE BLOCKS:
                 )
                 return json.dumps({"results": results, "count": len(results)})
 
-            if name == "search_circulars":
+            if name == "search_corpus":
                 from .chat_retrieval import FRESHNESS_QUERY_PATTERN
                 from .search import search_engine
                 query = arguments.get("query", "")
@@ -3239,18 +3471,25 @@ SOURCE BLOCKS:
                         "department_filter_relaxed": relaxed_department,
                     })
 
+                # `department` and `tag` are circular-only concepts, so a filtered call
+                # drops the law arm rather than returning laws that never faced the
+                # filter beside circulars that did.
+                filtered = bool(department or tag)
                 arms = search_engine.dual_arm_search(
                     query, db, limit=limit,
                     department=department if department else None,
                     tag=tag if tag else None,
+                    include_laws=not filtered,
                 )
                 relaxed_department = False
                 if department and not any(arms.values()):
                     arms = search_engine.dual_arm_search(
-                        query, db, limit=limit, tag=tag if tag else None
+                        query, db, limit=limit, tag=tag if tag else None,
+                        include_laws=not bool(tag),
                     )
                     relaxed_department = bool(any(arms.values()))
 
+                law_results = arms.pop("law_results", [])
                 body_texts = self._inline_body_texts(*arms.values())
                 passage_sets = self._passage_sets(*arms.values(), body_texts=body_texts)
                 payload = {
@@ -3260,16 +3499,25 @@ SOURCE BLOCKS:
                     ]
                     for key, results in arms.items()
                 }
+                law_payload = self._law_search_payloads(law_results)
                 unique = {
                     item["citation"]
                     for results in payload.values() for item in results
                 }
-                return json.dumps({
+                result = {
                     "ranking": "dual_arm",
                     **payload,
-                    "count": len(unique),
+                    "law_results": law_payload,
+                    "count": len(unique) + len(law_payload),
                     "department_filter_relaxed": relaxed_department,
-                })
+                }
+                if filtered:
+                    result["laws_excluded_by_filter"] = (
+                        "The laws and regulations corpus was not searched: department "
+                        "and tag filters apply to circulars only. Repeat the search "
+                        "without them to include Acts and regulations."
+                    )
+                return json.dumps(result)
 
             elif name == "get_latest_circulars":
                 from .models import Circular
@@ -3367,6 +3615,9 @@ SOURCE BLOCKS:
                         for item in c.attachments
                     ],
                 })
+
+            elif name == "get_law_details":
+                return self._law_details_tool(arguments, db)
 
             elif name == "get_circulars_by_tag":
                 from .models import Circular
@@ -3503,6 +3754,103 @@ SOURCE BLOCKS:
         except Exception as e:
             return json.dumps({"error": str(e)})
 
+    @staticmethod
+    def _resolve_law(db: Session, title: str):
+        """Find the law a title names, or nothing.
+
+        Exact, then prefix, then substring, then the law-only search arm. The cascade
+        stops at the search arm's *first* result the way `get_circular_details` does,
+        with one difference that matters: this reports what it resolved rather than
+        presenting it as what was asked for. Handing back a near-match silently is how
+        `get_circular_details("State Bank of Pakistan Act, 1956")` answered with a 1999
+        cash-reserve circular whose title merely mentions the Act.
+        """
+        from .models import RegDocument
+        from .search import search_engine
+
+        cleaned = title.strip()
+        if not cleaned:
+            return None
+        live = db.query(RegDocument).filter(RegDocument.delisted_at.is_(None))
+        for condition in (
+            RegDocument.title.ilike(cleaned),
+            RegDocument.title.ilike(f"{cleaned}%"),
+            RegDocument.title.ilike(f"%{cleaned}%"),
+        ):
+            match = live.filter(condition).first()
+            if match is not None:
+                return match
+        results, _ = search_engine.search(cleaned, db, limit=1, source="laws")
+        return results[0]["law"] if results else None
+
+    def _law_details_tool(self, arguments: dict, db: Session) -> str:
+        """Read inside one law — the statute analogue of `get_circular_details`."""
+        from .chat_retrieval import ScopedLawRetriever
+
+        requested = str(arguments.get("law_title", "")).strip()
+        if not requested:
+            return json.dumps({"error": "No law title provided"})
+
+        document = self._resolve_law(db, requested)
+        if document is None:
+            return json.dumps({
+                "error": f"No law, Act or regulation found matching: {requested}",
+                "note": (
+                    "The corpus does not hold this instrument. Say so rather than "
+                    "answering from a circular that mentions it."
+                ),
+            })
+
+        version = document.current_version
+        if version is None or not (version.content_text or "").strip():
+            return json.dumps({
+                "error": f"No readable text in force for: {document.title}",
+                "resolved_title": document.title,
+                "citation": f"[[law:{document.id}|{document.title}]]",
+            })
+
+        budget = max(1, self.config.max_context_tokens // 4)
+        retriever = ScopedLawRetriever(db, document)
+        section = str(arguments.get("section", "")).strip()
+        query = str(arguments.get("query", "")).strip()
+        limit = max(1, min(int(arguments.get("limit", 5)), 10))
+
+        passages: list[dict] = []
+        if section:
+            passages = retriever.section(section, token_budget=budget)
+        if not passages and query:
+            passages = retriever.search(query, limit=limit, token_budget=budget)
+        if not passages and not query and not section:
+            passages = retriever.search(document.title, limit=limit, token_budget=budget)
+
+        payload = {
+            "requested": requested,
+            "resolved_title": document.title,
+            "law_type": document.doc_type,
+            "part_label": document.part_label or None,
+            "parent_title": document.parent.title if document.parent else None,
+            "source_url": version.file_url or document.source_url,
+            "effective_from": (
+                version.effective_from.strftime("%Y-%m-%d")
+                if version.effective_from else None
+            ),
+            "full_text_chars": len(version.content_text or ""),
+            "citation": f"[[law:{document.id}|{document.title}]]",
+            "passages": passages,
+            "passage_count": len(passages),
+        }
+        if section and not passages:
+            payload["note"] = (
+                f"No provision numbered {section} was located in this document. The "
+                "passages below, if any, come from the query instead."
+            )
+        if not passages:
+            payload["note"] = (
+                "Nothing in this document matched. Do not infer its contents — say what "
+                "you could not find."
+            )
+        return json.dumps(payload)
+
     def _inventory_tool(self, arguments: dict, db: Session) -> str:
         """Adapter only — the search semantics live in InventorySearchService.
 
@@ -3587,8 +3935,6 @@ SOURCE BLOCKS:
                 item["reference"] = result.reference
                 item["date"] = result.date
                 item["department"] = result.department
-                # Only circulars and attachments have a citation token the UI resolves,
-                # so a law gets none rather than one that renders as dead text.
                 if row is not None:
                     item["citation"] = f"[[circular:{row.id}|{row.display_name}]]"
                 # The passage text opens with the chunk's "{filename}. Page N. " prefix,
@@ -3602,6 +3948,10 @@ SOURCE BLOCKS:
             else:
                 item["law_type"] = result.law_type
                 item["parent_title"] = result.parent_title
+                # The laws reader resolves `[[law:<id>]]` and has since the corpus
+                # shipped; withholding it left the model naming an Act it had no way to
+                # cite, which is the gap it filled by inventing attachment handles.
+                item["citation"] = f"[[law:{result.document_id}|{result.title}]]"
 
             cost = len(json.dumps(item, ensure_ascii=False))
             if results and spent + cost > budget:
@@ -3659,7 +4009,9 @@ unavailable merely because it was not included in the initial context.
 Pre-selected circulars:
 {circulars_context}"""
         return """You are an expert assistant for SBP circulars and regulations.
-Use your tools to search and retrieve relevant circulars from the database before answering.
+The database holds two corpora: SBP circulars and circular letters, and the laws corpus —
+Acts of Parliament, Prudential Regulations, and guidelines. search_corpus searches both.
+Use your tools to search and retrieve relevant documents before answering.
 
 IMPORTANT RULES:
 1. Cite a source only with the exact short handle printed beside it in a tool result:
@@ -3669,7 +4021,12 @@ character for character.
 [[c:BPRD-CL-01-2021]]" rather than repeating the reference immediately beside it.
 2a. Never write a document ID, never invent or adjust a handle, and never use a handle you
 were not given. A source you have no handle for is named in prose and cited with nothing.
-3. If you need more details on a circular found in a search, use the get_circular_details tool with the circular reference or title."""
+3. If you need more details on a circular found in a search, use the get_circular_details tool with the circular reference or title.
+4. When the answer depends on what an Act or set of Regulations says, read the instrument
+itself with get_law_details. get_circular_details searches circulars only and cannot fetch
+an Act; a circular that cites an Act is not a source for what the Act requires.
+5. If the instrument you need is not in the corpus, say so plainly. Never substitute a
+circular on an adjacent topic for a statute you could not retrieve."""
 
     def _chat_full_messages(
         self,

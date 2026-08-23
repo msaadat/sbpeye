@@ -1251,6 +1251,52 @@ class SearchEngine:
             scores[document_id] = score
         return scores, documents, evidence
 
+    def _law_arm(
+        self,
+        query: str,
+        db: Session,
+        query_tokens: list[str],
+        expanded_tokens: list[str],
+        limit: int,
+    ) -> list[dict]:
+        """The law corpus as one unfused, unbonused ranked list — for chat.
+
+        `_law_scores` is the search-UI fusion and adds a title-overlap bonus. That bonus
+        is the very thing `dual_arm_search` exists to keep out of a chat tool, so this
+        fuses the two law arms with plain RRF and stops there. Each result carries the
+        rank each retriever gave it, so a caller can still see where they agreed.
+        """
+        fts_ranks = self._law_fts_ranks(db, expanded_tokens)
+        vector_ranks, evidence = self._law_vector_ranks(query)
+        candidate_ids = set(fts_ranks) | set(vector_ranks)
+        if not candidate_ids:
+            return []
+
+        documents = {
+            document.id: document
+            for document in db.query(RegDocument)
+            .filter(RegDocument.id.in_(candidate_ids))
+            .filter(RegDocument.delisted_at.is_(None))
+            .all()
+        }
+        scores = {
+            document_id: (
+                (1.0 / (self.RRF_K + fts_ranks[document_id]) if document_id in fts_ranks else 0.0)
+                + (1.0 / (self.RRF_K + vector_ranks[document_id]) if document_id in vector_ranks else 0.0)
+            )
+            for document_id in documents
+        }
+        snippet_tokens = set(query_tokens) | set(expanded_tokens)
+        ordered = sorted(scores, key=scores.__getitem__, reverse=True)[:limit]
+
+        results = []
+        for document_id in ordered:
+            result = self._law_result(documents[document_id], snippet_tokens, evidence)
+            result["lexical_rank"] = fts_ranks.get(document_id)
+            result["semantic_rank"] = vector_ranks.get(document_id)
+            results.append(result)
+        return results
+
     def _evidence_filename(
         self, circular: Circular, evidence: MatchEvidence
     ) -> str | None:
@@ -1364,9 +1410,24 @@ class SearchEngine:
         field. The matched chunk narrows that to the passage retrieval actually scored.
         """
         version = _searchable_law_version(document)
-        chosen = choose_evidence(
-            evidence_by_id.get(document.id) or [], snippet_tokens
-        )
+        evidence_list = evidence_by_id.get(document.id) or []
+        # Same rule and the same reasoning as `_circular_result`: the preview is a
+        # window for a human scanning results, `passages` are whole chunks for a reader
+        # that will quote them. A statute needs the second more than a circular does —
+        # its "document" is 96k characters, so a window is the only thing a caller
+        # could otherwise quote, and a window across a provision boundary quotes half
+        # a rule.
+        passages = [
+            {
+                "text": item.text,
+                "source_page": item.page,
+                "source_ref": item.source_ref,
+                "chunk_index": item.chunk_index,
+            }
+            for item in evidence_list
+            if item.text
+        ]
+        chosen = choose_evidence(evidence_list, snippet_tokens)
         if chosen is not None:
             evidence, snippet = chosen
             return {
@@ -1376,6 +1437,7 @@ class SearchEngine:
                 "snippet": snippet,
                 "source_ref": evidence.source_ref,
                 "source_page": evidence.page,
+                "passages": passages,
             }
         return {
             "result_kind": "law",
@@ -1384,6 +1446,8 @@ class SearchEngine:
             "snippet": make_preview(
                 (version.content_text if version else "") or "", snippet_tokens
             ),
+            # Nothing located a passage, so there is none to hand over whole.
+            "passages": [],
         }
 
     # ------------------------------------------------------------------
@@ -1552,6 +1616,7 @@ class SearchEngine:
         tag: str | None = None,
         start_year: int | None = None,
         end_year: int | None = None,
+        include_laws: bool = True,
     ) -> dict[str, list[dict]]:
         """Return the lexical and semantic arms separately, unfused — for chat.
 
@@ -1568,9 +1633,29 @@ class SearchEngine:
         carries both `lexical_rank` and `semantic_rank`, so agreement between the arms
         stays visible. Reference-pattern hits come back as their own list rather than as
         a score bonus, for the same reason.
+
+        `law_results` is the law corpus, always searched alongside the circulars rather
+        than behind a corpus argument. Which corpus holds an answer is exactly what the
+        asker does not know — the 2026-08-23 round has two questions answerable only
+        from an Act, and the model routed both to circulars and answered from the wrong
+        instrument. A choice it cannot make correctly should not be a choice.
+
+        Laws come back as **one** RRF-fused list where circulars come back as two. The
+        split above exists because the title bonus drowned the arms' disagreement; no
+        bonus is applied here, so there is nothing to preserve them from, and 135
+        indexed documents is a field one list can carry. Circular ranks and law ranks
+        are never interleaved: each is a rank within its own candidate pool, so "rank 3"
+        in one means nothing against "rank 3" in the other, and merging them would
+        invent an ordering the retrievers never expressed.
+
+        `include_laws=False` is for a caller that has applied a circular-only filter
+        (`department`, `tag`, the year bounds). Those have no law equivalent, so laws
+        would come back unfiltered beside filtered circulars and read as though they had
+        passed the same test.
         """
         empty: dict[str, list[dict]] = {
-            "reference_matches": [], "lexical_results": [], "semantic_results": []
+            "reference_matches": [], "lexical_results": [], "semantic_results": [],
+            "law_results": [],
         }
         query_tokens = tokenize(query)
         if not query.strip() or not query_tokens:
@@ -1578,6 +1663,16 @@ class SearchEngine:
 
         expanded_tokens = expand_query_tokens(query_tokens)
         snippet_tokens = set(query_tokens) | set(expanded_tokens)
+
+        # Computed before the circular arms so that the two short-circuits below cannot
+        # discard it. A question answerable only from an Act typically matches no
+        # circular at all, which is precisely the case that used to return nothing.
+        law_results = (
+            self._law_arm(query, db, query_tokens, expanded_tokens, limit)
+            if include_laws
+            else []
+        )
+        empty = {**empty, "law_results": law_results}
 
         ref_results = self._search_by_reference(query, db, limit)
         fts_ranks = self._fts_ranks(db, expanded_tokens)
@@ -1630,6 +1725,7 @@ class SearchEngine:
             ],
             "lexical_results": arm(fts_ranks),
             "semantic_results": arm(vector_ranks),
+            "law_results": law_results,
         }
 
     # ------------------------------------------------------------------

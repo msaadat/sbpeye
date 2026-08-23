@@ -1,4 +1,4 @@
-"""Tests for the payload `search_circulars` hands back to the model.
+"""Tests for the payload `search_corpus` hands back to the model.
 
 The motivating failure: a chat asked for the per-individual limits on foreign
 currency transactions. FE Circular No. 07 of 2022 states the answer outright — an

@@ -249,7 +249,7 @@ def test_tool_results_reach_the_model_as_handles(monkeypatch):
         full_messages,
         "",
         [{"id": "call-1", "type": "function",
-          "function": {"name": "search_circulars", "arguments": "{}"}}],
+          "function": {"name": "search_corpus", "arguments": "{}"}}],
         None,
         None,
         handles,

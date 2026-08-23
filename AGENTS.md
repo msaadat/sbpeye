@@ -94,6 +94,33 @@ Task methods:
 - `chat()` — Conversational Q&A with circular context
 - `test_connection()` — Validates API connectivity
 
+### Chat tools (`TOOLS` in `ai.py`)
+
+The model reaches the corpus only through these. Names are load-bearing: the model routes
+on them before it reads a description, which is why the discovery tool is not called
+`search_circulars` — under that name it never looked for an Act.
+
+| Tool | Reaches | Notes |
+|---|---|---|
+| `search_corpus` | circulars **and** laws | Default search. Returns `lexical_results` / `semantic_results` (circulars, unfused, both ranks visible), `reference_matches`, and `law_results` (laws, RRF-fused, ranked separately — a rank among laws is not comparable with a rank among circulars). Department/tag filters are circular-only and drop the law arm. |
+| `get_circular_details` | one circular + attachments | Cannot fetch a law. |
+| `get_law_details` | inside one law | `query` or `section`; matched chunks come back with `LAW_NEIGHBOUR_CHUNKS` either side, because a statute's sub-sections split across chunk boundaries. Reports `resolved_title` rather than passing a near-match off as the requested document. |
+| `search_selected_documents` | pinned circulars | Scoped; errors when nothing is pinned. |
+| `search_regulatory_inventory` | every document | Exhaustive "list all" sweeps only. Rows are pointers with one short excerpt — drill in with the two `get_*_details` tools. |
+| `get_latest_circulars`, `get_circulars_by_tag`, `query_regulatory_values` | circulars | Recency, tag browse, structured values. |
+
+Retrieval into the laws corpus is exercised by `tests/test_law_chat_reach.py`, which
+documents the 2026-08-23 benchmark failure each property fixes.
+
+**Final synthesis.** A turn that exhausts `max_iterations` (5) falls through to a
+tool-free synthesis call that rebuilds the conversation from the tool results gathered so
+far (`_tool_result_synthesis_messages`, shared by the blocking and streaming paths). The
+evidence budget comes from `resolve_context_budget()`, i.e. the model's own window — not
+from `max_context_tokens`, which is a per-document character clip. Within it, results get
+a max-min fair share so no single lookup can starve the rest, each section names the tool
+that produced it, and anything clipped is marked as clipped in both the evidence and the
+system prompt. Pinned by `tests/test_chat_synthesis_budget.py`.
+
 ## CLI Commands
 
 ```bash

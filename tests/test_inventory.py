@@ -725,8 +725,15 @@ def test_chat_inventory_tool_never_calls_the_judge(indexed, monkeypatch):
     assert all("span" not in props for props in asked), "extraction was called"
 
 
-def test_chat_inventory_tool_cites_circulars_but_not_laws(indexed, monkeypatch):
-    """Only circular and attachment tokens are resolvable by the chat UI."""
+def test_chat_inventory_tool_cites_both_corpora(indexed, monkeypatch):
+    """Every result carries a citation token the chat UI can resolve.
+
+    This previously asserted the opposite for laws, on the belief that a `[[law:...]]`
+    token rendered as dead text. It does not: the chat view has resolved law tokens to
+    the laws reader since that corpus shipped. Withholding the token did not protect the
+    reader from a dead link, it left the model naming an Act with no way to cite it —
+    and what it did instead was invent an attachment handle.
+    """
     db, collection = indexed
     _install_inventory_backends(monkeypatch, collection)
 
@@ -734,12 +741,12 @@ def test_chat_inventory_tool_cites_circulars_but_not_laws(indexed, monkeypatch):
         {"query": "anti-money laundering", "sources": "all", "limit": 30}, db
     ))
 
-    cited = [r for r in payload["results"] if "citation" in r]
-    assert cited, "circular results must carry a resolvable citation token"
-    assert all(r["citation"].startswith("[[circular:") for r in cited)
-    for result in payload["results"]:
-        if "law_type" in result:
-            assert "citation" not in result, "a law token would render as dead text"
+    circulars = [r for r in payload["results"] if "law_type" not in r]
+    laws = [r for r in payload["results"] if "law_type" in r]
+    assert circulars, "circular results must carry a resolvable citation token"
+    assert all(r["citation"].startswith("[[circular:") for r in circulars)
+    assert laws, "the fixture indexes laws; this test is vacuous without them"
+    assert all(r["citation"].startswith("[[law:") for r in laws)
 
 
 def _index_attachment(db, collection, att_id, circular_id, filename, text):

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useToast } from 'primevue/usetoast'
 import Button from 'primevue/button'
@@ -9,7 +9,6 @@ import RegulatoryValueList from '@/components/RegulatoryValueList.vue'
 import RelationshipGroups, {
   type RelationGroup,
 } from '@/components/RelationshipGroups.vue'
-import SummarySection from '@/components/SummarySection.vue'
 import { useResizablePane } from '@/lib/useResizablePane'
 import { useAiGeneration } from '@/lib/useAiGeneration'
 import { ADMIN_ONLY_EMPTY_HINT, adminOnlyHint, adminOnlyLabel } from '@/lib/adminOnly'
@@ -28,6 +27,10 @@ import {
   type LawSummary,
   type LawTypeCount,
 } from '@/lib/api'
+
+// Collapsed on arrival and the only thing on this route that needs a markdown parser,
+// so it stays out of the route's own chunk until someone opens it.
+const SummarySection = defineAsyncComponent(() => import('@/components/SummarySection.vue'))
 
 const route = useRoute()
 const router = useRouter()

@@ -8,10 +8,11 @@ an answer streams.
 Fifteen items, measured rather than guessed, ordered by what a user actually feels per unit of
 work. They are deliberately independent: each can land, ship and be verified on its own.
 
-**Status:** everything except P8–P12 and the deferred P3b. Circular search **132 → 19 ms**, law
-search **98 → 28 ms**, the landing route ships 206 KB instead of 804 KB, the laws list went from
-273 queries to 7, and the server no longer serializes itself under concurrent load. What is left
-is frontend work (P8–P12).
+**Status:** everything except P10, P12 and the deferred P3b. Circular search **132 → 19 ms**, law
+search **98 → 28 ms**, the landing route ships 184 KB instead of 804 KB over two round trips
+instead of four, the laws list went from 273 queries to 7, a streamed answer drops **4 frames
+instead of 130**, and the server no longer serializes itself under concurrent load. What is left
+is P10 and P12, both small.
 
 ---
 
@@ -27,20 +28,20 @@ is frontend work (P8–P12).
 | **P5** | `/api/laws` loads 3.5 MB it never sends | `serializers.py:169` | **273 queries → 7, 4.88 MB → 0** | S | ☑ landed |
 | **P6** | 32 blocking routes ran on the event loop | `main.py:502` | **1.50 s → 0.30 s under load** | S | ☑ landed |
 | **P7** | `Cache-Control` on hashed assets | `main.py:517` | **14 revalidations → 0** | XS | ☑ landed |
-| **P8** | Landing route is a 4-deep request chain | `CircularsView.vue` | 4 serial RTTs → 2 | M | ☐ |
-| **P9** | Chat re-renders the thread on every token | `ChatView.vue:943` | stream stutter | M | ☐ |
+| **P8** | Landing route is a 4-deep request chain | `CircularsView.vue` | **4 serial RTTs → 2** | M | ☑ landed |
+| **P9** | Chat re-renders the thread on every token | `ChatView.vue:943` | **130 → 4 dropped frames** | M | ☑ landed |
 | **P10** | `/api/circulars/{id}` N+1 + blob reads | `main.py:1426` | 102 queries → 2 | S | ☐ |
-| **P11** | Markdown re-parsed on every render | `SummarySection.vue:41` | −84 KB initial, less churn | S | ☐ |
+| **P11** | Markdown re-parsed on every render | `SummarySection.vue:41` | **804 → 737 KB, 14 → 13 requests** | S | ☑ landed |
 | **P12** | Google Fonts blocks first render | `index.html` | one cross-origin RTT | XS | ☐ |
 | **P13** | `_scan_documents` previews whole attachments | `search.py:552` | **24.2 ms → 19.4 ms** | S | ☑ landed |
 | **P14** | Law search is 5× slower than circular search | `search.py:552` | **97.7 ms → 28.0 ms** | S | ☑ landed |
 
 **Order.** Done so far: P1 + P7 (pure configuration, largest win for the least code), P2 + P3
-(the search story), P5, then P13 + P14 (one defect in two places, so one fix).
+(the search story), P5, then P13 + P14 (one defect in two places, so one fix), then the frontend
+set — P11, then P8 and P9, the two real refactors.
 
-Remaining: **P10, P11, P12**, which are small and independent, then **P8 and P9**, which are
-real refactors and want doing alone. **P3b** is deferred rather than pending — it needs a
-re-index of a 330 MB store and nothing is blocked on it.
+Remaining: **P10** and **P12**, both small and independent. **P3b** is deferred rather than
+pending — it needs a re-index of a 330 MB store and nothing is blocked on it.
 
 ---
 
@@ -727,7 +728,7 @@ from disk cache with no request, and only `index.html` and the API calls on the 
 
 ---
 
-## 9. P8 — The landing route is a 4-deep request chain
+## 9. P8 — The landing route is a 4-deep request chain ☑ landed
 
 **Symptom.** `/circulars` is the redirect target of `/`, so this is the app's front door. Its
 mount fires nine API calls, four of which are strictly serialized:
@@ -754,19 +755,58 @@ Three separable defects:
 3. `loadCirculars` (`:284`) `await`s `saveActiveWorkspaceState()` inside its `try`, so
    `loading` stays true through a PATCH nobody is waiting on. Fire and forget it.
 
-**Change.** Fix 3 first — it is two characters and takes a round trip off *every* search, not
-just the first. Then 2. Then 1, which is the one that needs care: the workspace's saved
-`search_state` feeds the search, so parallelising means either accepting one search with default
-filters that a restore may supersede, or having the server return workspace + first page
-together.
+**What landed.** All three, plus the detail pane.
 
-**Verify.** Network panel on a cold load of `/circulars`: count the requests on the critical path
-before the list paints. Related, same pattern, smaller: `CircularDetailPane.loadCircular`
-(`:296`) serializes `getCircularDetail` then `getCircularSource` — `Promise.all` them.
+3. `void saveActiveWorkspaceState()`. It has its own `try`/`catch` and reports its own failure
+   through a toast, so nothing was ever reading its result — `await` only held `loading` true.
+
+2. `activateWorkspace` now takes the workspace out of `workspaces.value`, which the list call
+   just filled. The list payload carries `search_state`, `last_circular_id` and the pin ids —
+   everything activation reads. The one field it withholds is `pinned_circulars`, the summaries
+   behind the pinned rail (`_workspace_payload(..., include_circulars=False)`, `serializers.py`),
+   and that rail sits beside the results rather than gating them. So it is fetched *after*
+   activation and only when `pinned_count` exceeds the summaries already held — which is never
+   for a workspace with no pins, and once rather than per tab click for one with them. The
+   fetch-by-id path is kept for a workspace that is not in the list.
+
+1. `onMounted` decides from the URL alone whether the workspace list is about to overrule the
+   route's filters, which is the only case where the search depends on it:
+
+   ```js
+   const workspacesLoaded = loadWorkspaces()
+   if (!routeHasSearchState() && !selectedCircularId.value) await workspacesLoaded
+   void loadCirculars()
+   ```
+
+   That is the same predicate `loadWorkspaces` already computes as `shouldRestoreWorkspaceState`,
+   evaluated before anything is fetched. A shared link, a reload, or a deep link to a circular
+   therefore starts its search in the same tick as the workspace list.
+
+Same pattern in the detail pane: `CircularDetailPane.loadCircular` awaited `getCircularDetail`
+before `getCircularSource` was even issued. `Promise.allSettled` on both, each keeping its own
+error branch.
+
+**Verified**, network panel, cold load, signed in against a scratch corpus:
+
+```
+cold load of /circulars              GET /api/workspaces
+                                     GET /api/circulars/search        ← 2 deep
+                                     GET /api/workspaces/default      ← pins, off the path
+                                     GET /api/circulars/{id}          ┐ detail pane,
+                                     GET /api/circulars/{id}/source   ┘ parallel
+                                     PATCH /api/workspaces/default    ← fire and forget
+
+deep link with filters in the URL    GET /api/workspaces          ┐ same tick,
+                                     GET /api/circulars/search    ┘ 1 deep
+```
+
+Switching between two workspace tabs repeatedly issues no further `GET /api/workspaces/{id}`:
+the first hydration upserts the full payload and `needsPinnedCirculars` goes false. On a 200 ms
+link the landing chain is 400 ms rather than 800 ms, and a deep-linked search is 200 ms.
 
 ---
 
-## 10. P9 — Chat re-renders the whole thread on every token
+## 10. P9 — Chat re-renders the whole thread on every token ☑ landed
 
 **Symptom.** `ChatView.vue:943`, in `onToken`:
 
@@ -785,13 +825,46 @@ hundred KB of strings per token. `scrollToBottom()` also runs per token, each ca
 The markdown cache at `:363` already fixed the *parsing* half of this — completed messages are
 parsed once. The churn it cannot fix is the array replacement upstream of it.
 
-**Change.** Hold the streaming message's text in its own `ref` and mutate it in place, so the
-other messages keep object identity and Vue leaves them alone. Coalesce token appends to one
-`requestAnimationFrame` rather than one per token, and scroll from the same frame.
+**What landed.** Three changes, in descending order of what they were worth.
 
-**Verify.** Performance panel, record a long streamed answer in a thread of 30+ messages, compare
-scripting time and dropped frames. The subjective test — does a long answer stream smoothly on a
-laptop — is the one that matters.
+*Tokens are buffered and applied once per animation frame.* `onToken` now appends to a
+`streamBuffer` and schedules a single `requestAnimationFrame`; the flush mutates the streaming
+message **in place**, so the other bubbles keep object identity and the array is not rebuilt.
+`endStreaming()` in the turn's `finally` cancels the pending frame and applies the tail, so
+nothing is dropped on Stop, on error, or at the end of a normal turn; `onBeforeUnmount` cancels
+it too. The tool-round reset (`status.phase === 'tools'`) clears the buffer along with the
+drafted content, so narration already streamed is discarded rather than re-appended a frame
+later.
+
+*The markdown cache stopped hashing the thread.* Its key was `` `${citationVersion.value}\0${content}` ``
+— a template literal, so **every lookup allocated a fresh copy of the message's entire text and
+re-hashed it**, which is the cost the cache exists to avoid. The key is now the content string
+itself, cleared when `citationVersion` changes, so an untouched message hits on a pointer
+compare.
+
+*Scrolling moved into the same flush.* `scrollToBottom()` ran per token and each call awaited
+`nextTick` plus two `requestAnimationFrame`s before reading `scrollHeight`. A streaming turn uses
+`keepPinnedToBottom()` instead: one `nextTick`, no extra frames, and it still respects a reader
+who has scrolled up. The two-frame version stays for the places that need it — loading a session,
+sending, the jump-to-latest button — where the wait is for layout to settle, not for a token.
+
+**Verified** with a scripted turn against a stubbed SSE stream (headless Chromium, 62-message
+thread, 421 tokens ~1 ms apart — a fast model on a fast link). Two runs each, before and after:
+
+| | before | after |
+|---|---|---|
+| dropped frames (>32 ms) | 126, 132 | 6, 4 |
+| main thread unavailable | 7.65 s, 7.75 s | 3.12 s, 3.17 s |
+| turn wall time | 9.50 s, 9.57 s | 4.97 s, 5.04 s |
+| DOM nodes added/removed | 5194 | 1832, 1864 |
+
+The rendered answer is byte-identical across both builds, as is the behaviour of Stop mid-stream
+and of a tool round clearing its narration — both re-run against the pre-change build to confirm
+the difference is performance and nothing else.
+
+A hidden tab never fires `requestAnimationFrame`, so a background turn now buffers its whole
+answer and applies it in one go when `endStreaming()` runs. That is the intended trade: nobody
+is watching, and the reconciling `loadSession` replaces the content from the server regardless.
 
 **Note.** P6 compounds here: SSE chunks are handed out by Starlette from the threadpool, but each
 one still has to cross the event loop to reach the socket. A blocking `async` route stalls the
@@ -826,7 +899,7 @@ candidate set, pulling ~1.5 MB of attachment text per search. Measured at 1.4 ms
 
 ---
 
-## 12. P11 — Markdown re-parsed on every render
+## 12. P11 — Markdown re-parsed on every render ☑ landed
 
 **Symptom.** `SummarySection.vue:41` calls the parser *from the template*:
 
@@ -839,21 +912,29 @@ changes. And `v-show` renders the element and hides it with CSS, so `marked.pars
 run even though the section is collapsed by default and invisible. Same shape at
 `EcoDataView.vue:628`.
 
-**Change.** `computed(() => render(props.summary))`, and `v-if="expanded"` so a collapsed
-section costs nothing.
+**What landed.** `computed` behind `v-if="expanded"` in both places, so a collapsed section
+parses nothing and an open one parses when its input changes rather than when its parent
+re-renders. `EcoDataView` was already `v-else-if`, so it only needed the computed — but its
+summary sits in a dialog inside a view with a search box, and every keystroke re-parsed it.
 
-**Second, larger win in the same file.** `SummarySection` is imported eagerly by
-`CircularDetailPane`, which puts it and its dependencies in the landing route's payload:
+**Second, larger win.** `SummarySection` was imported eagerly by `CircularDetailPane`, which put
+it *and* `marked` + `DOMPurify` in the landing route's payload for a block that starts collapsed.
+`defineAsyncComponent` — as this codebase already does for `CircularGraph`, `ConsolidatedView`
+and `PdfPreviewDialog` — moves it out. `LawsView` imported it eagerly too and is the only thing
+on that route wanting a parser, so it got the same treatment.
+
+**Verified**, `--section assets`, before and after:
 
 ```
-SummarySection.vue_...js    15879     purify.es-...js    67949
+                          before                 after
+TOTAL                     823509  gz 211378      755086  gz 188622
+                          14 requests            13 requests
+                          raw 804 KB / gz 206    raw 737 KB / gz 184
 ```
 
-**84 KB of the 804 KB** for a block that starts collapsed. `defineAsyncComponent` — which this
-codebase already uses correctly for `CircularGraph` (164 KB), `ConsolidatedView` and
-`PdfPreviewDialog` — moves it out of the critical path.
-
-**Verify.** Re-run `--section assets` and confirm the total drops by ~84 KB raw / ~28 KB gzipped.
+`purify.es-*.js` (67949 / gz 22603), which holds both `marked` and `DOMPurify`, leaves the
+critical path entirely and is fetched when a detail pane opens. The remaining shared chunk is
+`RegulatoryValueList` — the same file as before, minus SummarySection's script.
 
 ---
 

@@ -204,16 +204,40 @@ async function saveActiveWorkspaceState(overrides: {
   }
 }
 
+/** True when the list payload knows of pins it did not send summaries for. */
+function needsPinnedCirculars(workspace: ResearchWorkspace): boolean {
+  return workspace.pinned_count > 0 && workspace.pinned_circulars.length !== workspace.pinned_count
+}
+
+/** Fill in the pinned rail behind the results, without a toast if it fails. */
+async function loadPinnedCirculars(workspaceId: string) {
+  try {
+    upsertWorkspace(await getResearchWorkspace(workspaceId))
+  } catch {
+    // The list just told us this workspace exists, so a failure here is transient and
+    // costs the pinned rail its rows until the next activation. Not worth interrupting
+    // someone reading search results over.
+  }
+}
+
 async function activateWorkspace(workspaceId: string, restoreState = true) {
   if (!workspaceId) {
     workspaceId = defaultWorkspace.value?.id || ''
     if (!workspaceId) return
   }
 
+  // `/api/workspaces` already sends every field activation reads — search_state,
+  // last_circular_id, the pin ids — so re-fetching a workspace the list just delivered
+  // put a whole round trip in front of the search that follows it. The one thing the
+  // list withholds is the pinned circulars' summaries; that rail sits beside the
+  // results rather than gating them, so it is filled in afterwards, and only when
+  // there is something to fill.
+  const listed = workspaces.value.find((item) => item.id === workspaceId)
+
   workspacesLoading.value = true
   try {
-    const workspace = await getResearchWorkspace(workspaceId)
-    upsertWorkspace(workspace)
+    const workspace = listed || await getResearchWorkspace(workspaceId)
+    if (!listed) upsertWorkspace(workspace)
     activeWorkspaceId.value = workspace.id
     localStorage.setItem('sbpeye-active-workspace', workspace.id)
     if (restoreState) {
@@ -225,6 +249,7 @@ async function activateWorkspace(workspaceId: string, restoreState = true) {
     } else {
       await syncRoute()
     }
+    if (listed && needsPinnedCirculars(listed)) void loadPinnedCirculars(workspace.id)
   } catch (error) {
     activeWorkspaceId.value = defaultWorkspace.value?.id || ''
     localStorage.removeItem('sbpeye-active-workspace')
@@ -281,7 +306,9 @@ async function loadCirculars(resetPage = false, scrollToTop = false) {
     perPage.value = response.per_page
     if (scrollToTop) await scrollResultsToTop()
     await syncRoute()
-    await saveActiveWorkspaceState()
+    // A PATCH recording where the user got to. Nobody is waiting on it, and awaiting it
+    // held the results spinner open for an extra round trip on every single search.
+    void saveActiveWorkspaceState()
   } catch (error) {
     if (controller !== searchController) return
     rows.value = []
@@ -469,7 +496,13 @@ watch(activeWorkspaceId, (nextWorkspaceId, previousWorkspaceId) => {
 onMounted(async () => {
   readRouteFilters()
   void loadOptions()
-  await loadWorkspaces()
+  // The workspace list feeds the search only when it is going to restore a saved state
+  // over the route's, and whether it will is decided from the URL alone — before
+  // anything is fetched. When the route already carries the search (a shared link, a
+  // reload, a deep link to a circular) the two are independent and the list has no
+  // business delaying the results.
+  const workspacesLoaded = loadWorkspaces()
+  if (!routeHasSearchState() && !selectedCircularId.value) await workspacesLoaded
   void loadCirculars()
 })
 

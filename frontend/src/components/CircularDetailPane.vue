@@ -31,8 +31,11 @@ import RelationshipGroups, {
   type RelationGroup,
 } from '@/components/RelationshipGroups.vue'
 import RegulatoryValueList from '@/components/RegulatoryValueList.vue'
-import SummarySection from '@/components/SummarySection.vue'
 
+// Collapsed on arrival, and it drags marked + DOMPurify (84 KB) in behind it, so an
+// eager import would put a parser for text nobody has asked to see yet on the landing
+// route's critical path.
+const SummarySection = defineAsyncComponent(() => import('@/components/SummarySection.vue'))
 const PdfPreviewDialog = defineAsyncComponent(() => import('@/components/PdfPreviewDialog.vue'))
 const CircularGraph = defineAsyncComponent(() => import('@/components/CircularGraph.vue'))
 const ConsolidatedView = defineAsyncComponent(() => import('@/components/ConsolidatedView.vue'))
@@ -292,25 +295,32 @@ async function loadCircular() {
   circular.value = null
   source.value = null
 
-  try {
-    circular.value = await getCircularDetail(props.id)
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : 'Unable to load circular detail.'
-    loading.value = false
-    sourceLoading.value = false
-    return
-  } finally {
-    loading.value = false
-  }
+  // Two independent reads of the same circular. Awaiting the detail first meant the
+  // source request did not leave the browser until the detail response came back, so
+  // the pane cost two round trips where it needs one.
+  const [detail, sourceContent] = await Promise.allSettled([
+    getCircularDetail(props.id),
+    getCircularSource(props.id),
+  ])
+  loading.value = false
+  sourceLoading.value = false
 
-  try {
-    source.value = await getCircularSource(props.id)
-    if (source.value.error) sourceError.value = source.value.error
-  } catch (error) {
-    sourceError.value = error instanceof Error ? error.message : 'Unable to load circular source.'
-  } finally {
-    sourceLoading.value = false
+  if (detail.status === 'rejected') {
+    errorMessage.value = detail.reason instanceof Error
+      ? detail.reason.message
+      : 'Unable to load circular detail.'
+    return
   }
+  circular.value = detail.value
+
+  if (sourceContent.status === 'rejected') {
+    sourceError.value = sourceContent.reason instanceof Error
+      ? sourceContent.reason.message
+      : 'Unable to load circular source.'
+    return
+  }
+  source.value = sourceContent.value
+  if (source.value.error) sourceError.value = source.value.error
 }
 
 async function refreshFromSbp() {

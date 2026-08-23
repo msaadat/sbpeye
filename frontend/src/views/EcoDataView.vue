@@ -210,11 +210,11 @@ async function openSummary(entry: EcoDataEntry) {
   }
 }
 
-function renderMarkdown(content: string): string {
-  return DOMPurify.sanitize(marked.parse(content) as string, {
-    USE_PROFILES: { html: true },
-  })
-}
+// Called from the template this re-parsed the whole summary on every re-render of the
+// view — typing in the search box was enough — rather than when the summary changed.
+const renderedSummary = computed(() => (summaryText.value
+  ? DOMPurify.sanitize(marked.parse(summaryText.value) as string, { USE_PROFILES: { html: true } })
+  : ''))
 
 onMounted(() => {
   void fetchEntries()
@@ -625,7 +625,7 @@ onMounted(() => {
         <div
           v-else-if="summaryText"
           class="markdown-body summary-body mt-2 border border-surface rounded p-4 bg-surface-card"
-          v-html="renderMarkdown(summaryText)"
+          v-html="renderedSummary"
         />
 
         <Message v-else severity="info" :closable="false">

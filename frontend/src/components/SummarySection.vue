@@ -5,7 +5,7 @@
  * Collapsed by default: a rail is scanned for relationships and values, and an expanded
  * five-sentence paragraph pushes those below the fold on first open.
  */
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 
@@ -13,11 +13,12 @@ const props = defineProps<{ summary: string; label?: string }>()
 
 const expanded = ref(false)
 
-function render(content: string): string {
-  return DOMPurify.sanitize(marked.parse(content) as string, {
-    USE_PROFILES: { html: true },
-  })
-}
+// Called from the template this re-parsed on every re-render of the parent rail rather
+// than when the summary changed, and `v-show` meant it ran for a block that is collapsed
+// — so invisible — on arrival. A computed behind `v-if` parses once, on first open.
+const rendered = computed(() => DOMPurify.sanitize(marked.parse(props.summary) as string, {
+  USE_PROFILES: { html: true },
+}))
 </script>
 
 <template>
@@ -36,9 +37,9 @@ function render(content: string): string {
       </button>
     </h2>
     <div
-      v-show="expanded"
+      v-if="expanded"
       class="detail-copy markdown-body summary-markdown"
-      v-html="render(props.summary)"
+      v-html="rendered"
     />
   </section>
 </template>

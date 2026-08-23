@@ -85,6 +85,13 @@ let elapsedTimer: number | undefined
 
 let searchTimer: number | undefined
 let streamController: AbortController | null = null
+// A fast model emits tokens faster than the screen refreshes. Appending each one
+// straight into `messages` meant a render — and a markdown parse per bubble, and a
+// deep watch over the whole thread — per token. Tokens are buffered here and applied
+// once per animation frame instead.
+let streamingMessageId: string | null = null
+let streamBuffer = ''
+let streamFrame = 0
 const circularCitationLoads = new Set<string>()
 const uuidPattern = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi
 // The id segment accepts anything that is not a delimiter: attachments are cited
@@ -356,16 +363,26 @@ function replaceBareCircularIds(root: DocumentFragment) {
   }
 }
 
-// Every streamed token replaces the messages array, which re-evaluates this for
-// every message in the thread. Parsing a 12k-character answer through marked +
-// DOMPurify + a tree walk on each token is the difference between a smooth
-// stream and a stuttering one, so completed messages are rendered once.
+// The template calls this per message per render, and a streaming turn renders once a
+// frame, so parsing a 12k-character answer through marked + DOMPurify and a tree walk
+// each time is the difference between a smooth stream and a stuttering one. Completed
+// messages are rendered once.
 const markdownCache = new Map<string, string>()
 const citationVersion = ref(0)
+let cachedCitationVersion = 0
 
 function renderMarkdown(content: string): string {
-  const key = `${citationVersion.value} ${content}`
-  const cached = markdownCache.get(key)
+  // Keyed on the content string itself rather than on a version-prefixed copy of it:
+  // that template allocated, and so re-hashed, the message's entire text on every
+  // lookup — several hundred KB per frame across a long thread, for a cache whose job
+  // is to avoid work. An untouched message keeps the same string reference, so this
+  // lookup is a pointer compare. `citationVersion` is still read, both to invalidate
+  // the cache and to keep the render subscribed to it.
+  if (cachedCitationVersion !== citationVersion.value) {
+    cachedCitationVersion = citationVersion.value
+    markdownCache.clear()
+  }
+  const cached = markdownCache.get(content)
   if (cached !== undefined) {
     return cached
   }
@@ -397,7 +414,7 @@ function renderMarkdown(content: string): string {
   if (markdownCache.size > 400) {
     markdownCache.clear()
   }
-  markdownCache.set(key, html)
+  markdownCache.set(content, html)
   return html
 }
 
@@ -484,6 +501,44 @@ async function scrollToBottom(force = false) {
     messagesEl.value.scrollTop = messagesEl.value.scrollHeight
     pinnedToBottom.value = true
   }
+}
+
+/** Keep a reader who is already at the bottom there, without the two-frame wait. */
+function keepPinnedToBottom() {
+  if (!pinnedToBottom.value) return
+  void nextTick(() => {
+    const el = messagesEl.value
+    if (el && pinnedToBottom.value) el.scrollTop = el.scrollHeight
+  })
+}
+
+function flushStreamTokens() {
+  streamFrame = 0
+  if (!streamBuffer) return
+  const buffered = streamBuffer
+  streamBuffer = ''
+  // Mutated in place rather than rebuilt: replacing the array allocated a fresh object
+  // for every message in the thread on every token, and the bubbles that did not change
+  // have no business being touched.
+  const message = messages.value.find((item) => item.id === streamingMessageId)
+  if (!message) return
+  message.content += buffered
+  keepPinnedToBottom()
+}
+
+function queueStreamTokens(content: string) {
+  streamBuffer += content
+  if (!streamFrame) streamFrame = window.requestAnimationFrame(flushStreamTokens)
+}
+
+/** Apply whatever is buffered now, so the turn does not end mid-frame. */
+function endStreaming() {
+  if (streamFrame) {
+    window.cancelAnimationFrame(streamFrame)
+    streamFrame = 0
+  }
+  flushStreamTokens()
+  streamingMessageId = null
 }
 
 function focusComposer() {
@@ -896,6 +951,8 @@ async function generateMessage(
   await scrollToBottom(true)
 
   const assistantId = `assistant-${Date.now()}`
+  streamingMessageId = assistantId
+  streamBuffer = ''
   try {
     messages.value = [
       ...messages.value,
@@ -932,9 +989,10 @@ async function generateMessage(
             // fetch the specific circular" run-ons).
             turnSteps.value = [...turnSteps.value, { tools: status.tools, note: status.note || '' }]
             activityLabel.value = status.tools.join(' · ')
-            messages.value = messages.value.map((message) =>
-              message.id === assistantId ? { ...message, content: '' } : message,
-            )
+            // The narration that has already been streamed is discarded with it.
+            streamBuffer = ''
+            const drafted = messages.value.find((message) => message.id === assistantId)
+            if (drafted) drafted.content = ''
           } else if (status.phase === 'thinking') {
             activityLabel.value = turnSteps.value.length ? 'Reading results' : 'Thinking'
           }
@@ -942,10 +1000,7 @@ async function generateMessage(
         },
         onToken: (content) => {
           activityLabel.value = 'Writing answer'
-          messages.value = messages.value.map((message) =>
-            message.id === assistantId ? { ...message, content: message.content + content } : message,
-          )
-          void scrollToBottom()
+          queueStreamTokens(content)
         },
         onError: (message) => {
           errorMessage.value = message
@@ -965,6 +1020,7 @@ async function generateMessage(
       errorMessage.value = error instanceof Error ? error.message : 'Unable to send message.'
     }
   } finally {
+    endStreaming()
     streamController = null
     sending.value = false
     activityLabel.value = ''
@@ -1143,6 +1199,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   stopElapsedTimer()
   window.clearTimeout(searchTimer)
+  if (streamFrame) window.cancelAnimationFrame(streamFrame)
   streamController?.abort()
 })
 </script>

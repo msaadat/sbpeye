@@ -431,6 +431,53 @@ GENERIC_CHAT_ERROR = (
     "Sorry, something went wrong while generating a response. Please try again."
 )
 
+# The rules every chat path shares, held once because they used to be held three times.
+#
+# `_chat_system_prompt`'s two branches and `_tool_result_synthesis_messages` each carried
+# their own copy in their own wording, and they had already drifted: the synthesis copy
+# compressed all three citation rules into a single sentence and dropped the clause that
+# says what to do with a source you have no handle for. That path is reached only when the
+# tool loop hits its iteration ceiling — when retrieval is struggling — so the weakest copy
+# of the contract governed the answers that could least afford it.
+_CITATION_RULES = """CITATIONS
+- Cite a source only with the exact short handle printed beside it in the context or in a
+tool result: [[c:...]] for a circular, [[a:...]] for an attachment, [[l:...]] for a law.
+Copy the handle character for character.
+- A handle renders as a link showing the document's own name, so write "as required by
+[[c:BPRD-CL-01-2021]]" rather than repeating the reference immediately beside it.
+- Never write a document ID, never invent or adjust a handle, and never use a handle you
+were not given. A source you have no handle for is named in prose and cited with nothing."""
+
+# What the answer itself owes the reader. Every line is a defect from the 2026-08-23
+# benchmark round — see docs/ANSWER_QUALITY_DEFECTS.md, where they are D9 (preamble),
+# D7 (denial ordering), D13 (length), D10 (closing offers) and D8 (retrieval vocabulary).
+# None of them were contract violations before this constant existed: there was no output
+# contract, only citation and tool-routing rules, so the model filled the gap with its own
+# chat-assistant defaults.
+#
+# Two lines are worded against the obvious phrasing, on purpose:
+#
+# * The denial rule is about *ordering*, not honesty. P09 corrected a false premise after
+#   summarising it, under a heading naming a circular that does not exist. The correction
+#   was already right; it was simply below the point where a reader stops.
+# * The offer rule does not say "do not offer". P12 offered to fetch Regulation R-6 when
+#   R-6 was a required part of the answer, so suppressing the offer on its own would trade
+#   a visible gap for an invisible one. Fetch it, or declare it missing.
+_ANSWER_CONTRACT = """ANSWERING
+- Open with the answer. No preamble about what you are about to do, what you have found, or
+how you traced it.
+- If the user names an instrument that does not exist, say so in your first sentence —
+before any summary, and before any heading. If a real document is probably meant, name it
+after the denial, never before. Never put a reference you have not verified in a heading.
+- Match the answer to the question asked. A definitional question gets a definition; do not
+annex adjacent topics the user did not ask about.
+- Do not close by offering to look something up. If you can name a provision worth fetching,
+fetch it and include it. If you cannot fetch it, say what is missing and why — an unfetched
+provision is a gap to declare, not a service to offer.
+- Say plainly when you could not find something; that disclosure must survive. Change only
+the vocabulary: write "the provisions available to me do not include X", not "the retrieved
+passage does not provide", "the lookup results", or "my database"."""
+
 
 class MissingUserAIConfig(RuntimeError):
     """This user has not supplied provider credentials of their own."""
@@ -930,9 +977,13 @@ _CONTEXT_INPUT_FRACTION = 0.6
 # own 1,000-token floor. Keeps a provider that reports an implausibly small window from
 # reducing a finished turn's evidence to nothing.
 _SYNTHESIS_MIN_EVIDENCE_CHARS = 4_000
+# The header the gathered tool results sit under in the synthesis turn. Named because
+# `_SYNTHESIS_FRAMING` charges its length to the budget, and a literal in two places is how
+# the ceiling quietly stops being the ceiling.
+_SYNTHESIS_EVIDENCE_HEADER = "Source material already gathered:"
 # Fixed framing around the synthesis evidence, charged to the budget so the ceiling holds.
 _SYNTHESIS_FRAMING = (
-    "Selected circular context:\n\n\n\nDatabase lookup results already gathered:\n\n"
+    f"Selected circular context:\n\n\n\n{_SYNTHESIS_EVIDENCE_HEADER}\n\n"
 )
 # Structured-output capability tiers, strongest first.
 _STRUCTURED_MODES = ("json_schema", "json_object", "text")
@@ -1700,25 +1751,23 @@ class AIClient:
         ]
         if rendered:
             synthesis_context.extend([
-                "Database lookup results already gathered:",
+                _SYNTHESIS_EVIDENCE_HEADER,
                 "\n\n".join(rendered),
             ])
 
         instructions = (
             "You are an expert assistant for SBP circulars and regulations. "
-            "No tools are available in this step. Answer using only the "
-            "provided selected context and database lookup results. Cite "
-            "sources only with the short handles shown beside them — "
-            "[[c:...]], [[a:...]], [[l:...]] — copied character for "
-            "character. Never write a document ID or invent a handle."
+            "No tools are available in this step. Answer using only the selected "
+            "context and source material below.\n\n"
+            f"{_CITATION_RULES}\n\n{_ANSWER_CONTRACT}"
         )
         if clipped:
             instructions += (
-                f" {clipped} of the {len(sections)} lookup results below were too long "
-                "to include whole and are marked where they were clipped. Answer from "
-                "what is there, and if the answer depends on a part that was clipped, "
-                "say which lookup it was and that you could not see all of it. Do not "
-                "guess at clipped content."
+                f"\n\n{clipped} of the {len(sections)} extracts below were too long to "
+                "include whole and are marked where they were clipped. Answer from what "
+                "is there, and if the answer depends on a part that was clipped, say "
+                "which source it was and that you could not see all of it. Do not guess "
+                "at clipped content."
             )
 
         return [
@@ -3987,46 +4036,48 @@ SOURCE BLOCKS:
         return json.dumps(payload)
 
     def _chat_system_prompt(self, circulars_context: str | None = None) -> str:
+        """The system prompt for a chat turn, with or without pre-selected circulars.
+
+        Both branches compose `_CITATION_RULES` and `_ANSWER_CONTRACT` so the only text
+        that differs between them is the framing and the tool routing, which is the only
+        thing that genuinely does differ. Editing a shared rule in one branch and not the
+        other is how the three copies drifted before.
+        """
         if circulars_context:
             return f"""You are an expert assistant for analyzing State Bank of Pakistan (SBP) circulars and regulations.
 You have been provided with pre-selected circulars as context below. Answer primarily from these,
 but you also have tools to search the database if the user asks about circulars not covered here.
 
-IMPORTANT RULES:
-1. Cite a source only with the exact short handle printed beside it in the context or in a
-tool result: [[c:...]] for a circular, [[a:...]] for an attachment, [[l:...]] for a law.
-Copy the handle character for character.
-2. A handle renders as a link showing the document's own name, so write "as required by
-[[c:BPRD-CL-01-2021]]" rather than repeating the reference immediately beside it.
-2a. Never write a document ID, never invent or adjust a handle, and never use a handle you
-were not given. A source you have no handle for is named in prose and cited with nothing.
-3. Be precise and highlight regulatory differences when comparing circulars.
-4. Use search_selected_documents when the included passages do not contain enough detail. It can
-search the complete selected circulars and their attachments. Do not claim attachment content is
-unavailable merely because it was not included in the initial context.
-5. Use global circular search tools only when the user explicitly requests broader research.
+{_CITATION_RULES}
+
+TOOLS
+- Be precise and highlight regulatory differences when comparing circulars.
+- Use search_selected_documents when the included passages do not contain enough detail. It
+can search the complete selected circulars and their attachments. Do not claim attachment
+content is unavailable merely because it was not included in the initial context.
+- Use global circular search tools only when the user explicitly requests broader research.
+
+{_ANSWER_CONTRACT}
 
 Pre-selected circulars:
 {circulars_context}"""
-        return """You are an expert assistant for SBP circulars and regulations.
+        return f"""You are an expert assistant for SBP circulars and regulations.
 The database holds two corpora: SBP circulars and circular letters, and the laws corpus —
 Acts of Parliament, Prudential Regulations, and guidelines. search_corpus searches both.
 Use your tools to search and retrieve relevant documents before answering.
 
-IMPORTANT RULES:
-1. Cite a source only with the exact short handle printed beside it in a tool result:
-[[c:...]] for a circular, [[a:...]] for an attachment, [[l:...]] for a law. Copy the handle
-character for character.
-2. A handle renders as a link showing the document's own name, so write "as required by
-[[c:BPRD-CL-01-2021]]" rather than repeating the reference immediately beside it.
-2a. Never write a document ID, never invent or adjust a handle, and never use a handle you
-were not given. A source you have no handle for is named in prose and cited with nothing.
-3. If you need more details on a circular found in a search, use the get_circular_details tool with the circular reference or title.
-4. When the answer depends on what an Act or set of Regulations says, read the instrument
+{_CITATION_RULES}
+
+TOOLS
+- If you need more details on a circular found in a search, use the get_circular_details
+tool with the circular reference or title.
+- When the answer depends on what an Act or set of Regulations says, read the instrument
 itself with get_law_details. get_circular_details searches circulars only and cannot fetch
 an Act; a circular that cites an Act is not a source for what the Act requires.
-5. If the instrument you need is not in the corpus, say so plainly. Never substitute a
-circular on an adjacent topic for a statute you could not retrieve."""
+- If the instrument you need is not in the corpus, say so plainly. Never substitute a
+circular on an adjacent topic for a statute you could not retrieve.
+
+{_ANSWER_CONTRACT}"""
 
     def _chat_full_messages(
         self,

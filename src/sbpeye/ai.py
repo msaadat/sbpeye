@@ -340,6 +340,40 @@ TOOLS = [
     }
 ]
 
+# Tools whose server-side implementation can only fail without pre-selected circulars.
+# `search_selected_documents` returns {"error": "No circulars are selected for this chat"}
+# and nothing else when the selection is empty — see `_execute_tool`.
+_SELECTION_ONLY_TOOLS = frozenset({"search_selected_documents"})
+
+
+def tools_for_turn(selected_circular_ids: list[str] | None) -> list[dict]:
+    """The tool schema for one chat turn, minus what this turn cannot serve.
+
+    `_chat_system_prompt` already refuses to name `search_selected_documents` outside the
+    selected branch, and `test_no_prompt_advertises_a_tool_its_path_cannot_call` pins that:
+    "each prompt offers only what that path can actually do". The schema was never held to
+    the same rule. It was the module constant on both loop paths, so a turn with no
+    selection described the tool to the model ("The server enforces the selected-document
+    scope" — which reads as a capability), and the guard in `_execute_tool` then answered
+    every call with an error.
+
+    Measured on chat session `48655b06` (benchmark P14): the model called it at iteration 3
+    of 5, got `{"error": "No circulars are selected for this chat"}`, and spent a fifth of
+    the turn's tool budget on a call that could not have succeeded. It was still fetching
+    useful provisions when the ceiling cut it off two iterations later. Withdrawing the
+    schema is worth more than raising that ceiling: it returns a turn at no token cost,
+    where another iteration re-sends the whole accumulated record to buy one.
+
+    The guard in `_execute_tool` stays. A model can name a tool it was never given, and the
+    scope check is what makes the selected-document scope a fact rather than a request.
+    """
+    if selected_circular_ids:
+        return TOOLS
+    return [
+        tool for tool in TOOLS
+        if (tool.get("function") or {}).get("name") not in _SELECTION_ONLY_TOOLS
+    ]
+
 
 @dataclass(frozen=True)
 class ProviderDefinition:
@@ -4203,7 +4237,7 @@ circular on an adjacent topic for a statute you could not retrieve.
                 model=self.config.effective_chat_model,
                 messages=full_messages,
                 temperature=0.3,
-                tools=TOOLS,
+                tools=tools_for_turn(selected_circular_ids),
                 tool_choice="auto",
             )
 
@@ -4315,7 +4349,7 @@ circular on an adjacent topic for a statute you could not retrieve.
                 model=self.config.effective_chat_model,
                 messages=full_messages,
                 temperature=0.3,
-                tools=TOOLS,
+                tools=tools_for_turn(selected_circular_ids),
                 tool_choice="auto",
                 stream=True,
             )

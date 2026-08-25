@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
 from sqlalchemy import text
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
-from .models import Circular, RegDocument, RegDocumentVersion
+from .models import Circular, CircularRelationship, RegDocument, RegDocumentVersion
 from .database import collection, embedding_backend
 
 logger = logging.getLogger(__name__)
@@ -952,6 +952,99 @@ def backfill_laws_fts(db: Session, force: bool = False) -> int:
     return written
 
 
+# A circular one of these edges points at is no longer the operative text. 273 of the
+# corpus's 3,655 circulars (7.5%) are in this state, and until now nothing in retrieval
+# read the column: 13.2% of every result set handed to chat was withdrawn text, 11.9% of
+# it in the top three positions. See `docs/CHAT_CONTEXT_PLAN.md` C11.
+WITHDRAWN_STATUSES = frozenset({"superseded", "cancelled"})
+# The edges that leave a circular *amended* — still the rule, with something later
+# modifying part of it. `_recompute_statuses` derives the status from exactly these, and
+# `adds_to` and `clarifies` outnumber `amends` almost two to one, which is why an amended
+# circular must never be dropped or demoted: most of them had nothing changed at all.
+AMENDING_RELATIONSHIPS = frozenset({"amends", "adds_to", "clarifies"})
+REPLACING_RELATIONSHIPS = frozenset({"supersedes", "cancels"})
+# Amenders named on a result row, most recent first. Fan-out is a median of 1 and a p90
+# of 3, but `BSD Circular No.18 of 2001` has 266 — uncapped, annotating that one row
+# would cost ~16,000 characters, which is a fifth of a whole search response spent on a
+# list nobody reads past the top of.
+MAX_NAMED_AMENDERS = 3
+
+
+def _relationship_annotation(circular: Circular) -> dict | None:
+    """Name the circulars that changed this one, or ``None`` when nothing did.
+
+    A status flag says *that* something happened; it never says what, and the model has
+    to notice it among thirty results while answering a question. Measured over the
+    traced turns, 64.8% of amended circulars reached the model with no amender anywhere
+    in the result set — so it read a figure that is still on the page of a circular still
+    in force, with the document that changed it absent.
+
+    The amender is named, not fetched. An annotation is ~140 characters against ~2,000
+    for a covering letter, and fetching is an escalation the loop already supports and
+    which C1a made cheap. What makes naming *sufficient* is not that the model will
+    always follow it but that the omission becomes checkable afterwards: an answer citing
+    an amended circular without mentioning the amendment is one join away from a flag.
+    """
+    edges = [edge for edge in (circular.amended_by or []) if edge.source is not None]
+    replacing = [edge for edge in edges if edge.type in REPLACING_RELATIONSHIPS]
+    amending = [edge for edge in edges if edge.type in AMENDING_RELATIONSHIPS]
+    # Replacement wins when both exist: a circular that was amended and later superseded
+    # is not "amended", and reporting the amendment would bury the fact that it is gone.
+    chosen, key, note = (
+        (replacing, "replaced_by",
+         "This circular is no longer in force. Read the replacement before quoting it.")
+        if replacing else
+        (amending, "amended_by",
+         "Read the amending circular before quoting a figure from this one.")
+    )
+    if not chosen:
+        return None
+
+    chosen.sort(
+        key=lambda edge: (edge.source.date or datetime.min, edge.source.id),
+        reverse=True,
+    )
+    annotation = {
+        key: [
+            {
+                "citation": f"[[circular:{edge.source.id}|{edge.source.display_name}]]",
+                "date": edge.source.date.strftime("%Y-%m-%d") if edge.source.date else None,
+                "type": edge.type,
+            }
+            for edge in chosen[:MAX_NAMED_AMENDERS]
+        ],
+        "note": note,
+    }
+    if len(chosen) > MAX_NAMED_AMENDERS:
+        annotation["older_changes_not_shown"] = len(chosen) - MAX_NAMED_AMENDERS
+    return annotation
+
+
+def _withdrawn_pointer(circular: Circular) -> dict:
+    """A withdrawn hit reduced to what makes it findable, and nothing else.
+
+    No body, no passages, no excerpt. The entry exists so the document stays one
+    `get_circular_details` call away — measured, a hard filter would take the #1 ranked
+    hit out of 12.6% of arms, and a document the corpus holds being answered as "not in
+    the corpus" is a worse failure than the one this clause exists to fix.
+
+    `title` earns its ~60 characters: it is the whole of what tells the model whether a
+    withdrawn hit is worth opening. The instruction that goes with the list does not
+    repeat per row — it is one key on the response, for the reason C1a exists.
+    """
+    replacement = (_relationship_annotation(circular) or {}).get("replaced_by") or []
+    pointer = {
+        "citation": f"[[circular:{circular.id}|{circular.display_name}]]",
+        "reference": circular.reference,
+        "title": circular.title,
+        "date": circular.date.strftime("%Y-%m-%d") if circular.date else None,
+        "status": circular.status or "active",
+    }
+    if replacement:
+        pointer["superseded_by"] = replacement[0]
+    return pointer
+
+
 def _result_sort_date(item) -> float:
     """Sort key for date-ordering a mixed result list.
 
@@ -1617,6 +1710,7 @@ class SearchEngine:
         start_year: int | None = None,
         end_year: int | None = None,
         include_laws: bool = True,
+        include_withdrawn: bool = False,
     ) -> dict[str, list[dict]]:
         """Return the lexical and semantic arms separately, unfused — for chat.
 
@@ -1655,7 +1749,7 @@ class SearchEngine:
         """
         empty: dict[str, list[dict]] = {
             "reference_matches": [], "lexical_results": [], "semantic_results": [],
-            "law_results": [],
+            "law_results": [], "withdrawn_matches": [],
         }
         query_tokens = tokenize(query)
         if not query.strip() or not query_tokens:
@@ -1697,29 +1791,76 @@ class SearchEngine:
         id_to_circular = {
             c.id: c
             for c in db.query(Circular)
-            .options(joinedload(Circular.attachments))
+            .options(
+                joinedload(Circular.attachments),
+                # Eager, because the annotation below touches it on every row and a
+                # lazy load here is one query per result.
+                selectinload(Circular.amended_by).joinedload(CircularRelationship.source),
+            )
             .filter(Circular.id.in_(candidate_ids))
             .all()
         }
 
+        # Withdrawn hits are demoted out of the ranked arms, never deleted: they land in
+        # `withdrawn_matches` as pointers. Deleting them would make the best-matching
+        # document silently invisible — measured, a hard filter removes the #1 ranked hit
+        # in 12.6% of arms — and "that is not in the corpus" about a document the corpus
+        # holds is a worse failure than the one C11 exists to fix.
+        withdrawn = (
+            set()
+            if include_withdrawn
+            else {
+                circular_id
+                for circular_id, circular in id_to_circular.items()
+                if (circular.status or "active") in WITHDRAWN_STATUSES
+            }
+        )
+        demoted: dict[str, None] = {}
+
         def build(circular_id: str) -> dict:
             # Both lists share `vector_evidence`, so a circular appearing in each gets
             # the same passage quoted rather than two different ones.
-            result = self._circular_result(
-                id_to_circular[circular_id], snippet_tokens, vector_evidence,
-            )
+            circular = id_to_circular[circular_id]
+            result = self._circular_result(circular, snippet_tokens, vector_evidence)
             result["lexical_rank"] = fts_ranks.get(circular_id)
             result["semantic_rank"] = vector_ranks.get(circular_id)
+            annotation = _relationship_annotation(circular)
+            if annotation:
+                result.update(annotation)
             return result
 
         def arm(ranks: dict[str, int]) -> list[dict]:
+            """The arm's top `limit`, with withdrawn hits set aside rather than replaced.
+
+            The slice comes *before* the split on purpose. Filtering first and slicing
+            after would pull the next-ranked circular up into the vacated slot, and since
+            that replacement carries a body and passages of its own the response would be
+            the same size — the demotion would cost a hit and save nothing. Measured on
+            the live corpus: filter-then-slice moves the payload -2.5%, partition moves it
+            an order of magnitude further, because a 2,814-character entry becomes a
+            pointer instead of becoming a different 2,814-character entry.
+            """
             ordered = sorted(
                 (cid for cid in ranks if cid in id_to_circular),
                 key=ranks.__getitem__,
             )
-            return [build(cid) for cid in ordered[:limit]]
+            kept = []
+            for circular_id in ordered[:limit]:
+                if circular_id in withdrawn:
+                    demoted.setdefault(circular_id)
+                else:
+                    kept.append(circular_id)
+            return [build(circular_id) for circular_id in kept]
 
-        return {
+        # `reference_matches` is built from `_search_by_reference` and never consults
+        # `withdrawn`: a circular the asker named by reference is returned whatever its
+        # status, with the withdrawal stated by the annotation rather than withheld.
+        # It is also the *only* path by which a directly-named circular reaches the model
+        # — measured on `BC & CPD Circular No. 08 of 2021`, neither ranked arm returns it
+        # at all — so applying the status clause uniformly across all three lists would
+        # answer "what did circular X say?" with five irrelevant active circulars and no
+        # mention of X.
+        arms = {
             "reference_matches": [
                 build(c.id) for c in ref_results if c.id in id_to_circular
             ],
@@ -1727,6 +1868,13 @@ class SearchEngine:
             "semantic_results": arm(vector_ranks),
             "law_results": law_results,
         }
+        named = {result["circular"].id for result in arms["reference_matches"]}
+        arms["withdrawn_matches"] = [
+            _withdrawn_pointer(id_to_circular[circular_id])
+            for circular_id in demoted
+            if circular_id not in named
+        ]
+        return arms
 
     # ------------------------------------------------------------------
     # Main search (fused — search UI, browse, laws)

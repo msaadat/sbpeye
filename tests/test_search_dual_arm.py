@@ -265,5 +265,5 @@ def test_empty_query_returns_empty_arms(db, no_vectors, query):
 
     assert search_engine.dual_arm_search(query, db) == {
         "reference_matches": [], "lexical_results": [], "semantic_results": [],
-        "law_results": [],
+        "law_results": [], "withdrawn_matches": [],
     }

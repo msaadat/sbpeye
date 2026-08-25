@@ -22,8 +22,10 @@ text that has been withdrawn.
 
 **C1a has landed** — a turn now hands the model each document's text once, worth 19.8% of
 search output, and it absorbed C4. Nine items remain (C2 blocked on evidence, C4 retired).
-**C11 is next**, and is the only item that changes the answer rather than the request. C1 is
-the largest and the one the rest build on.
+**C11 has landed too** — withdrawn circulars are demoted to pointers rather than competing
+for the evidence budget, and every changed circular now names what changed it: a measured
+−18.1% on top, and the first item here that improves the *answer* rather than the request.
+**C1 is next**, the largest context win and the one the rest build on.
 
 ---
 
@@ -34,7 +36,7 @@ the largest and the one the rest build on.
 | **C0** | Turn share: every contributor sized against `window / 6` | `ai.py:1349` `resolve_turn_share` | turn fits by arithmetic | — | ☑ landed |
 | **C0b** | Search payload ceilings scale with the share | `ai.py:1367` `_search_payload_budgets` | 72k ch → 13k ch on a 32k model | — | ☑ landed |
 | **C0c** | Chat sized by the model, window probed once | `ai.py:4691` `get_ai_client_for_user` | replaces the 4,000 default | — | ☑ landed |
-| **C1a** | Suppress the second copy of a document — lossless core of C1, absorbs C4 | `ai.py:3565` `_dedupe_repeat_row` | **19.8% of search output, lossless** | XS | ☑ landed |
+| **C1a** | Suppress the second copy of a document — lossless core of C1, absorbs C4 | `ai.py:3569` `_dedupe_repeat_row` | **19.8% of search output, lossless** | XS | ☑ landed |
 | **C1** | Per-turn document ledger — stub a document already sent | `ai.py:4278` `_apply_tool_calls` | **21.4% of tool output is a repeat** | M | ☐ |
 | **C2** | ~~Tier `full_circular_text` by rank~~ — **measured 1:1 against recall, do not ship as written** | `ai.py:3405` `_inline_body_texts` | see §5.2 | S | ⚠ blocked |
 | **C3** | Supersession pass before `_fair_shares` | `ai.py:1856` | the one request never cached | S | ☐ |
@@ -45,15 +47,14 @@ the largest and the one the rest build on.
 | **C8** | Express the synthesis budget as a share, and measure before sending | `ai.py:1776`, `ai.py:1573` | **the guarantee** | M | ☐ |
 | **C9** | Pre-warm the first search, skip iteration 1 | `main.py:3351` | −1 request, ~4.5 s | M | ☐ |
 | **C10** | Answer cache: question + selection + corpus version | new | −1 whole turn on a hit | M | ☐ |
-| **C11** | Status-aware ranking + amender **annotation** | `search.py:1025` `_apply_circular_filters` | **net −8.8% of search output, and 64.8% orphaned amendments named** | S | ☐ |
+| **C11** | Withdrawn demoted, amender **annotated** | `search.py:1702` `dual_arm_search` | **measured net −18.1%; nothing becomes unreachable** | S | ☑ landed |
 
-**Order.** **C1a is landed** — the smallest diff here, the only item that is *lossless* by
-construction, and it returns 19.8% of search output on its own. **C11 next**, the only item
-that improves the answer rather than the request; it also cleans the ranking that C2 turns out
-to depend on. Then C1, the largest context win, whose ledger C3, C5 and C6 all reuse — C1a is
-its write path at reduced scope, so nothing is thrown away. C5 and C6 are small once
-C1 exists. C7 and C8 close the two holes C0 left. C9 and C10 are latency work and can land any
-time.
+**Order.** **C1a and C11 are landed.** C1a was the smallest diff here and the only item that
+is *lossless* by construction (19.8% of search output); C11 followed because it improves the
+answer rather than the request, and it cleaned the ranking that C2 turns out to depend on.
+**C1 is next** — the largest remaining context win, and C3, C5 and C6 all reuse its ledger,
+which C1a already wrote the write path for. C5 and C6 are small once C1 exists. C7 and C8
+close the two holes C0 left. C9 and C10 are latency work and can land any time.
 
 **C2 is blocked on evidence**, not on effort. Measured, tiering the letter budget by rank costs
 recall roughly 1:1 — see §5.2. Re-measure after C11 and decide then.
@@ -254,7 +255,7 @@ The same argument, taken one step further. Some of what fills a share is not mer
 it is text that has been withdrawn.
 
 `status` appears **nowhere in `search.py`**. Not in ranking, not in filtering, not in scoring:
-`_apply_circular_filters` (`search.py:1025`) filters on year, department and tag, and that is
+`_apply_circular_filters` (`search.py:1093`) filters on year, department and tag, and that is
 the complete list. Measured across 1,399 search result entries handed to the model:
 
 | Status | All positions | Top-3 only | Given a full letter |
@@ -430,7 +431,7 @@ lands on the largest single request in the sample: the 285,007-token request was
 C4 originally proposed collapsing `lexical_results` and `semantic_results` into one list, each
 row carrying both ranks. That was wrong on the design, and barely better on the numbers.
 
-**On the design.** `dual_arm_search` (`search.py:1609`) exists *because* fusing was wrong for
+**On the design.** `dual_arm_search` (`search.py:1677`) exists *because* fusing was wrong for
 chat. Its docstring: the title and recency bonuses are "an order of magnitude larger than the
 entire RRF range", so "a circular that names the topic only in its body or an annexure
 therefore cannot outrank one that names it in the title, however much better the retrieval
@@ -575,20 +576,100 @@ item.
 
 ### 5.11 — C11. Status-aware ranking and amender annotation
 
-*`search.py:1025` `_apply_circular_filters`, and the two arms of `dual_arm_search`
-(`search.py:1609`). **Net −8.8% of search output**, plus the correctness win in §3.3. Effort S.*
+*`search.py:1702` `dual_arm_search`; `_relationship_annotation` (`search.py:973`) and
+`_withdrawn_pointer` (`search.py:1023`); `WITHDRAWN_QUERY_PATTERN` (`chat_retrieval.py:55`);
+`_withdrawn_section` (`ai.py:1108`). **Measured net −18.1% of search output**, plus the
+correctness win in §3.3. Effort S. **☑ Landed**, pinned by `tests/test_search_currency.py`
+(29 tests).*
 
 Two clauses, and they are not the same clause.
 
-**Exclude what has been withdrawn.** `superseded` and `cancelled` circulars come out of the
-result set unless the question is explicitly historical or about supersession itself. That is a
-`WHERE` on a column that already exists and is already maintained, and it returns 517,902 ch
-across the traced turns — **10.2% of all search output**, 11.7% of it in full covering letters,
-the most expensive payload item there is.
+**Demote what has been withdrawn — do not hide it.** `superseded` and `cancelled` circulars
+stop competing for the evidence budget, but they must remain *findable*. A regulatory tool that
+cannot answer "what did the old rule say?" has traded one failure for another, and answering
+"that is not in the corpus" about a document the corpus holds is the worse of the two.
 
-**Name the amender on the row.** Every `amended` result carries its amending circulars as
-citations. The document is not fetched — the annotation is ~140 ch against ~2,000 for a letter,
-and it adds 71,140 ch across the traced turns (+1.4%), for a **net of −8.8%**:
+Three rules, and the first is the one that matters most:
+
+1. **Never filter a document the user named.** `reference_matches` (from
+   `_search_by_reference`, `search.py:1526`) and `get_circular_details` bypass the status filter
+   entirely. They are separate paths from the two ranked arms, so this is a matter of *where*
+   the clause goes, not an exception to it. If someone asks about BPRD Circular 12 of 2015, they
+   get BPRD Circular 12 of 2015 — with its withdrawal stated, never withheld.
+2. **Ranked hits are demoted to a pointer list, not deleted.** Withdrawn matches leave the two
+   arms and land in `withdrawn_matches`: citation, title, date, status, and what replaced it —
+   no body, no passages, no excerpt.
+
+   ```json
+   {"citation": "[[c:BSD-C-08-2006]]", "title": "…", "date": "2006-04-11",
+    "status": "superseded", "superseded_by": "[[c:BPRD-C-07-2019]]",
+    "note": "matched this query but is no longer in force; open it if the question is historical"}
+   ```
+
+   Measured: the 184 withdrawn entries in the traced turns cost **517,902 ch as full entries
+   (2,814 ch each)**; as pointers they cost a twentieth of that, leaving every withdrawn hit
+   one `get_circular_details` call away.
+
+   **The slice must come before the split.** Filtering the arm and *then* taking the top
+   `limit` pulls the next-ranked circular up into the vacated slot, and because that
+   replacement carries a body and passages of its own the response ends up the same size —
+   a hit lost for nothing. Measured on the live corpus, filter-then-slice moved the payload
+   only **−2.5%**; partitioning the top `limit` moved it **−20.5%**. This is the single
+   detail on which the whole clause turns, and it is pinned by
+   `test_the_arm_does_not_refill_the_vacated_slot`.
+3. **An explicitly historical question turns the demotion off.** A query naming a past year, or
+   using "previously / earlier / used to / superseded / replaced / withdrawn", keeps withdrawn
+   circulars in the arms. `FRESHNESS_QUERY_PATTERN` (`chat_retrieval.py:37`) is the existing
+   precedent for a query-pattern switch of exactly this kind.
+
+   One piece of care in the year clause: every SBP reference *ends* in a year — "BPRD Circular
+   No. 07 of 2019" — so matching years indiscriminately would switch the demotion off for
+   almost every question that names a circular. The pattern excludes the reference form, where
+   the year is part of a name rather than a period being asked about.
+
+**Why demotion rather than exclusion.** Measured over 143 result arms in the traced turns:
+filtering empties **0%** of them and leaves **0%** with fewer than three results — so the
+"nothing left to answer from" fear is unfounded. But it removes the **#1 ranked hit in 12.6%**
+of arms. In those, a hard filter would make the best-matching document silently invisible; a
+pointer row makes it visible at 5% of the cost, and the model can open it when the question
+turns out to be about the old rule.
+
+**The worked case, and the test this item must pass.** *"BC & CPD Circular No. 08 of 2021"* is
+`superseded` — withdrawn by `BPRD Circular No. 04 of 2025` on 2025-10-17. Run today, the three
+lists come back:
+
+```
+reference_matches   BC & CPD Circular No. 08 of 2021   (superseded)   ← the only one that has it
+lexical_results     BC & CPD Circular Letter No. 01 of 2022, BC&CPD Circular No. 03 of 2015,
+                    BC & CPD Circular Letter No. 02 of 2018, …        (all active, all irrelevant)
+semantic_results    BPRD Circular No. 04 of 2025, EPD Circular Letter No. 09 of 2025, …
+```
+
+**Neither ranked arm returns it at all.** `reference_matches` is the *only* path by which a
+directly-named circular reaches the model, which makes rule 1 load-bearing rather than a
+courtesy: a filter applied uniformly across all three lists would answer this question with
+five irrelevant active circulars and no mention of the one that was asked about.
+
+What the user should get instead is the document, with its withdrawal stated:
+
+```json
+{"citation": "[[c:BC-CPD-C-08-2021]]", "reference": "BC & CPD Circular No. 08 of 2021",
+ "date": "2021-08-16", "status": "superseded",
+ "superseded_by": {"citation": "[[c:BPRD-C-04-2025]]", "date": "2025-10-17"},
+ "note": "withdrawn; quote it only as the position at the time"}
+```
+
+Note the semantic arm *did* surface `BPRD Circular No. 04 of 2025` — the circular that replaced
+it — at rank 1, with nothing to say it was related. The `supersedes` edge is in the database.
+Rule 2's `superseded_by` field is what turns that coincidence into a statement.
+
+Pin all three behaviours: a named withdrawn circular is returned; a withdrawn circular that only
+*matched* appears in `withdrawn_matches` and not in an arm; and `get_circular_details` on a
+withdrawn circular returns it with the withdrawal named.
+
+**Name the amender on the row.** Every changed result carries the circulars that changed it as
+citations — `amended_by` for one still in force, `replaced_by` for one that is not, with
+replacement winning when both edges exist. The document is not fetched:
 
 ```json
 {"citation": "[[c:BPRD-C-07-2019]]", "status": "amended",
@@ -597,8 +678,25 @@ and it adds 71,140 ch across the traced turns (+1.4%), for a **net of −8.8%**:
 ```
 
 **Cap the fan-out.** Median fan-out is 1 and p90 is 3, but `BSD Circular No.18 of 2001` has
-**266 amenders**. Uncapped, annotating that one row costs ~16,000 ch. Name the 3 most recent
-and add `"and 263 earlier amendments"`.
+**266 amenders**. Uncapped, annotating that one row costs ~16,000 ch. `MAX_NAMED_AMENDERS`
+names the 3 most recent and `older_changes_not_shown` counts the rest.
+
+**What it actually cost, measured.** Ten representative queries against the live corpus,
+dual-arm, `limit=10`, counted after handle rewriting — which is what reaches the model:
+
+| | Chars | Share |
+|---|---|---|
+| baseline (withdrawn in the arms, no annotation) | 685,689 | — |
+| demotion: 36 full entries become pointers | −140,708 | **−20.5%** |
+| amender annotation on 70 rows, 237 ch each | +16,558 | +2.4% |
+| **net** | **561,539** | **−18.1%** |
+
+Two deviations from the sketch above, both worth recording. The pointers cost **~300 ch, not
+~140**: `title` is kept because it is the whole of what tells the model whether a withdrawn hit
+is worth opening, and `reference` because `get_circular_details` takes a reference string rather
+than a handle — dropping it would leave the model unable to act on the pointer it was given.
+And the instruction that goes with the list is emitted **once per response**
+(`withdrawn_matches_note`) rather than once per pointer, for the reason C1a exists.
 
 Two things this must *not* do:
 
@@ -629,7 +727,7 @@ confirm the payload reduction separately.
 
 ### 5.12 — C1a. Suppress the second copy of a document (the lossless core of C1)
 
-*`ai.py:3565` `_dedupe_repeat_row`, spent by `_search_result_payload` and
+*`ai.py:3569` `_dedupe_repeat_row`, spent by `_search_result_payload` and
 `_law_search_payloads`; ledger on `AIClient`, reset in both chat loops.
 **19.8% of search output**, lossless. Effort XS. **☑ Landed**, pinned by
 `tests/test_turn_text_ledger.py` (15 tests).*

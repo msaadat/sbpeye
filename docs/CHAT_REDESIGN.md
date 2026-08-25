@@ -64,7 +64,7 @@ Everything in §7 marked *target* is derived from the card sizing in §5, not me
 ## 2. The finding that reframes the problem
 
 **`status` appears nowhere in `search.py`.** Not in ranking, not in filtering, not in scoring.
-`_apply_circular_filters` (`search.py:1025`) filters on year, department and tag — and that is
+`_apply_circular_filters` (`search.py:1093`) filters on year, department and tag — and that is
 the complete list.
 
 Of 3,655 circulars, 273 are `superseded` or `cancelled` and 757 more are `amended`. Retrieval
@@ -78,7 +78,7 @@ This document assumes it rather than restating it.
 
 What matters *here* is the shape of the finding, because it generalises. The asymmetry is stark
 inside one file: the **law arm is version-aware** — `_law_arm` filters
-`RegDocument.delisted_at.is_(None)` (`search.py:1279`) and reads `current_version`, and
+`RegDocument.delisted_at.is_(None)` (`search.py:1347`) and reads `current_version`, and
 `RegDocumentVersion.is_current` is maintained per sync. The corpus that has a currency concept
 uses it. The corpus that also has one ignores it.
 
@@ -137,7 +137,7 @@ Two provider calls for the common case, against four to six today.
 ### Stage 0 — Frame
 
 Resolve the selection (workspace or pinned circulars), the session history, the corpus
-version. Then run `SearchEngine._search_by_reference` (`search.py:1458`) over the question: if
+version. Then run `SearchEngine._search_by_reference` (`search.py:1526`) over the question: if
 it names an instrument, that document resolves **deterministically** and never enters a
 similarity search. A question about "BPRD Circular No. 07 of 2019" is a lookup, not a
 retrieval problem.

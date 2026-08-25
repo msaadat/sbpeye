@@ -38,6 +38,28 @@ FRESHNESS_QUERY_PATTERN = re.compile(
     r"\b(?:latest|current|currently|newest|most\s+recent|recently\s+revised)\b",
     re.IGNORECASE,
 )
+# A question that is *about* the old rule, rather than one that a withdrawn circular would
+# answer wrongly. Withdrawn hits are demoted to pointers in the ranked arms by default
+# (`docs/CHAT_CONTEXT_PLAN.md` C11 rule 2); these words are the asker saying they want the
+# documents themselves. `FRESHNESS_QUERY_PATTERN` above is the precedent for the switch.
+#
+# A false positive costs a few full entries rather than a wrong answer — demotion, unlike
+# a hard filter, fails safe — so this is broader than it would need to be if withdrawn
+# circulars were being dropped.
+#
+# The year clause carries the one piece of care. A bare year is a historical marker ("what
+# were the 2013 limits"), but every SBP circular reference ends in one — "BPRD Circular No.
+# 07 of 2019" — so matching years indiscriminately would switch the demotion off for almost
+# every question that names a circular. The lookbehind excludes the reference form, where
+# the year is part of a name rather than a period being asked about.
+WITHDRAWN_QUERY_PATTERN = re.compile(
+    r"\b(?:superseded|supersession|supersede[sd]?|cancelled|canceled|withdrawn|withdrew|"
+    r"repealed|rescinded|abrogated|replaced|previously|earlier|formerly|"
+    r"used\s+to|at\s+the\s+time|no\s+longer\s+in\s+force|historical(?:ly)?|"
+    r"(?:previous|earlier|old|former)\s+(?:version|rule|position|limit|requirement)s?)\b"
+    r"|(?<!of )\b(?:19\d{2}|20[01]\d|202[0-4])\b",
+    re.IGNORECASE,
+)
 
 
 def estimate_tokens(text: str) -> int:

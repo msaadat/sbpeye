@@ -189,6 +189,21 @@ TOOLS = [
                 "Do not conclude from an older circular that states a figure outright over a "
                 "newer one whose figure is in an annexure you have not read — call "
                 "get_circular_details on the newer one first.\n"
+                "CURRENCY. The ranked lists hold circulars that are still in force. One "
+                "that matched but has been superseded or cancelled is moved to "
+                "`withdrawn_matches` — citation, title, date and `superseded_by`, with no "
+                "text — so you can still see it matched and open it if the question turns "
+                "out to be about the old rule. It is demoted, never hidden: a circular you "
+                "name outright always comes back in full under `reference_matches`, with "
+                "its `replaced_by` naming what took its place.\n"
+                "A result carrying `amended_by` is STILL THE RULE — something later "
+                "changed part of it, and the entry names those circulars with their "
+                "dates. Read the amender before quoting any figure, threshold or "
+                "deadline from an amended circular: the base text still shows the old "
+                "number, and nothing in it says so. `older_changes_not_shown` counts "
+                "amendments beyond the three most recent. Never treat `amended` as a "
+                "reason to discard a circular — most amendments add to a circular or "
+                "clarify it rather than change what it requires.\n"
                 "`law_results` is the statute and regulation corpus, ranked separately "
                 "because a rank there is a rank among laws and cannot be compared with a "
                 "rank among circulars. Each entry carries a `[[l:...]]` citation and short "
@@ -1078,6 +1093,26 @@ _REPEAT_LAW_ROW_KEYS = (
 # text the pointer already names, so a repeat row drops it like everything else but
 # saying "you were given an excerpt" adds nothing to "you were given the letter".
 _DOCUMENT_TEXT_KEYS = ("full_circular_text", "matching_passages", "passages")
+
+# Said once per response, not once per pointer. There can be a dozen withdrawn matches and
+# the instruction is the same for all of them; repeating it is the pattern `_dedupe_repeat_row`
+# exists to remove. Measured, the pointers themselves are ~190 characters against 2,814 for
+# the full entries they replace.
+_WITHDRAWN_MATCHES_NOTE = (
+    "These matched the query but are no longer in force, so they are listed without their "
+    "text. Do not answer from them. Open one with get_circular_details only if the question "
+    "is about what a rule used to say; otherwise use `superseded_by` to find what replaced it."
+)
+
+
+def _withdrawn_section(pointers: list[dict]) -> dict:
+    """The `withdrawn_matches` block, or nothing at all when there is none."""
+    if not pointers:
+        return {}
+    return {
+        "withdrawn_matches": pointers,
+        "withdrawn_matches_note": _WITHDRAWN_MATCHES_NOTE,
+    }
 # Ceiling on the matched-chunk text handed over whole across one search response.
 # Chunks average ~1.5k chars, so this covers the head of both arms — which is where
 # a wrong passage does its damage, because that is what the model reads first.
@@ -3671,6 +3706,13 @@ SOURCE BLOCKS:
         for key in ("lexical_rank", "semantic_rank"):
             if key in result:
                 payload[key] = result[key]
+        # Carried straight through from `_relationship_annotation`: what changed this
+        # circular, and the instruction to read it. Measured, 64.8% of amended circulars
+        # reached the model with no amender anywhere in the result set — this is the
+        # field that closes it. See `docs/CHAT_CONTEXT_PLAN.md` C11.
+        for key in ("amended_by", "replaced_by", "older_changes_not_shown", "note"):
+            if key in result:
+                payload[key] = result[key]
         return AIClient._dedupe_repeat_row(
             payload, circular.id, _REPEAT_ROW_KEYS, sent
         )
@@ -3770,12 +3812,25 @@ SOURCE BLOCKS:
                 return json.dumps({"results": results, "count": len(results)})
 
             if name == "search_corpus":
-                from .chat_retrieval import FRESHNESS_QUERY_PATTERN
-                from .search import search_engine
+                from .chat_retrieval import (
+                    FRESHNESS_QUERY_PATTERN,
+                    WITHDRAWN_QUERY_PATTERN,
+                )
+                from .search import (
+                    WITHDRAWN_STATUSES,
+                    _relationship_annotation,
+                    _withdrawn_pointer,
+                    search_engine,
+                )
                 query = arguments.get("query", "")
                 department = arguments.get("department", "")
                 tag = arguments.get("tag", "")
                 limit = int(arguments.get("limit", 10))
+                # Superseded and cancelled circulars are 13.2% of every result set and
+                # are not the rule any more, so they leave the ranked lists unless the
+                # question is *about* withdrawal. A circular named outright still
+                # arrives via `reference_matches` — see `dual_arm_search`.
+                include_withdrawn = bool(WITHDRAWN_QUERY_PATTERN.search(str(query)))
 
                 # "Latest / most recent" questions want date order over relevance, and
                 # the fused engine already sorts by date for them. Only ordinary
@@ -3794,6 +3849,26 @@ SOURCE BLOCKS:
                             tag=tag if tag else None, sort_by="date",
                         )
                         relaxed_department = bool(results)
+                    # The date-sorted branch answers "what is the latest…", which is the
+                    # last place a withdrawn circular belongs. `search()` is shared with
+                    # the browse UI — where a human *should* be able to find a cancelled
+                    # circular — so the rule is applied here rather than in the engine.
+                    # Demoted, not dropped, exactly as in the ranked arms.
+                    withdrawn_matches = []
+                    if not include_withdrawn:
+                        kept = []
+                        for item in results:
+                            if (item["circular"].status or "active") in WITHDRAWN_STATUSES:
+                                withdrawn_matches.append(
+                                    _withdrawn_pointer(item["circular"])
+                                )
+                            else:
+                                kept.append(item)
+                        results = kept
+                    for item in results:
+                        annotation = _relationship_annotation(item["circular"])
+                        if annotation:
+                            item.update(annotation)
                     inline_budget, passage_budget, _ = self._search_payload_budgets()
                     sent = self._sent_text_keys
                     body_texts = self._inline_body_texts(
@@ -3804,6 +3879,7 @@ SOURCE BLOCKS:
                     )
                     return json.dumps({
                         "ranking": "date",
+                        **_withdrawn_section(withdrawn_matches),
                         "results": [
                             self._search_result_payload(r, body_texts, passage_sets, sent)
                             for r in results
@@ -3821,16 +3897,19 @@ SOURCE BLOCKS:
                     department=department if department else None,
                     tag=tag if tag else None,
                     include_laws=not filtered,
+                    include_withdrawn=include_withdrawn,
                 )
                 relaxed_department = False
                 if department and not any(arms.values()):
                     arms = search_engine.dual_arm_search(
                         query, db, limit=limit, tag=tag if tag else None,
                         include_laws=not bool(tag),
+                        include_withdrawn=include_withdrawn,
                     )
                     relaxed_department = bool(any(arms.values()))
 
                 law_results = arms.pop("law_results", [])
+                withdrawn_matches = arms.pop("withdrawn_matches", [])
                 inline_budget, passage_budget, law_budget = self._search_payload_budgets()
                 sent = self._sent_text_keys
                 body_texts = self._inline_body_texts(
@@ -3860,6 +3939,7 @@ SOURCE BLOCKS:
                 result = {
                     "ranking": "dual_arm",
                     **payload,
+                    **_withdrawn_section(withdrawn_matches),
                     "law_results": law_payload,
                     "count": len(unique) + len(law_payload),
                     "department_filter_relaxed": relaxed_department,
@@ -3943,6 +4023,7 @@ SOURCE BLOCKS:
                 if not c:
                     return json.dumps({"error": f"Circular not found: {ref}"})
                 from .chat_retrieval import build_chat_context
+                from .search import _relationship_annotation
 
                 document_context, _ = build_chat_context(
                     db,
@@ -3950,7 +4031,14 @@ SOURCE BLOCKS:
                     user_query or ref,
                     self.config.max_context_tokens,
                 )
+                # C11 rule 1: this path never filters on status — a circular the asker
+                # named is returned whatever became of it — so the withdrawal has to be
+                # *stated* here instead. Handing over a superseded circular's full text
+                # with nothing but a `status` field to mark it is how a withdrawn rule
+                # gets quoted as current.
+                changed = _relationship_annotation(c) or {}
                 return json.dumps({
+                    **changed,
                     "title": c.title,
                     "reference": c.reference,
                     "department": c.department,

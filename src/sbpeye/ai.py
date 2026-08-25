@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -1047,6 +1048,64 @@ LAW_SEARCH_PASSAGE_BUDGET_CHARS = 8_000
 # Chunks average ~1.5k chars, so this covers the head of both arms — which is where
 # a wrong passage does its damage, because that is what the model reads first.
 SEARCH_PASSAGE_BUDGET_CHARS = 24_000
+# Everything one search response may hand back, across both corpora. Named because the
+# turn budget below is expressed as a share of it: these three numbers are what a search
+# was tuned to be worth reading when the window has room for all of it.
+_SEARCH_RESPONSE_BUDGET_CHARS = (
+    SEARCH_INLINE_BODY_BUDGET_CHARS
+    + SEARCH_PASSAGE_BUDGET_CHARS
+    + LAW_SEARCH_PASSAGE_BUDGET_CHARS
+)
+
+# Tool rounds one chat turn may take before it falls back to synthesis.
+_MAX_TOOL_ITERATIONS = 5
+# What the turn's input budget is divided between: one selected-circular context plus a
+# tool result per round, all of which `_chat_impl` keeps for the rest of the turn.
+_TURN_CONTRIBUTORS = _MAX_TOOL_ITERATIONS + 1
+# A share is capped at what a whole search response was already tuned to be worth, so a
+# million-token window does not turn one lookup into a corpus dump.
+_TURN_SHARE_MAX_TOKENS = _SEARCH_RESPONSE_BUDGET_CHARS // 4
+# The floor exists only for a provider that reports something implausible; it is set low
+# enough that it never breaks the ceiling it is guarding. A floor of 1,500 was tried
+# first and is what not to do: on an 8,192-token window it produced six shares of 1,500
+# against an input budget of 4,915 — the floor alone guaranteeing the overflow this
+# whole division exists to prevent, and on the smallest models, which are the ones that
+# actually reject oversized requests. At 500 the floor binds only below a ~5,000-token
+# window, where a five-round tool loop does not fit under any split.
+_TURN_SHARE_MIN_TOKENS = 500
+
+# Provider-reported context windows, cached process-wide. A chat request builds its own
+# `AIClient`, so `AIClient._context_budget` never survives a turn and every budget the
+# turn derives would otherwise pay a `models.list()` round trip first. Failures are
+# cached too, and briefly: an unreachable provider should not be re-probed by every
+# request, nor have its fallback window pinned in place for a quarter of an hour.
+_WINDOW_CACHE_TTL_SECONDS = 900.0
+_WINDOW_CACHE_FAILURE_TTL_SECONDS = 60.0
+_WINDOW_CACHE_MISS = object()
+_window_cache: dict[tuple[str, str, str, str], tuple[float, int | None]] = {}
+_window_cache_lock = threading.Lock()
+
+
+def _cached_context_window(key: tuple[str, str, str, str]) -> Any:
+    """The cached window, ``None`` for a cached failure, ``_WINDOW_CACHE_MISS`` if unknown."""
+    with _window_cache_lock:
+        entry = _window_cache.get(key)
+        if entry is None:
+            return _WINDOW_CACHE_MISS
+        expires_at, window = entry
+        if expires_at < time.monotonic():
+            del _window_cache[key]
+            return _WINDOW_CACHE_MISS
+        return window
+
+
+def _store_context_window(key: tuple[str, str, str, str], window: int | None) -> None:
+    ttl = (
+        _WINDOW_CACHE_TTL_SECONDS if window is not None
+        else _WINDOW_CACHE_FAILURE_TTL_SECONDS
+    )
+    with _window_cache_lock:
+        _window_cache[key] = (time.monotonic() + ttl, window)
 
 
 class ProviderResponseError(RuntimeError):
@@ -1224,13 +1283,32 @@ class AIClient:
             return model.model_dump()
         return {}
 
+    def _window_cache_key(self) -> tuple[str, str, str, str]:
+        return (
+            self.config.provider,
+            self.config.base_url,
+            self.config.model,
+            self.config.effective_chat_model,
+        )
+
     def detect_context_window(self) -> int | None:
-        """Return the smallest provider-reported window used by this config."""
+        """Return the smallest provider-reported window used by this config.
+
+        Cached per (provider, base URL, model, chat model) — see `_window_cache`. The
+        models the key names are the only inputs to the answer, so an admin who changes
+        the model in Settings misses the cache and gets a fresh probe, which is what
+        that route reports on.
+        """
         if self.config.provider in {"openai", "google"}:
             return None
+        cache_key = self._window_cache_key()
+        cached = _cached_context_window(cache_key)
+        if cached is not _WINDOW_CACHE_MISS:
+            return cached
         try:
             response = self._client.with_options(timeout=5.0, max_retries=0).models.list()
         except Exception:
+            _store_context_window(cache_key, None)
             return None
 
         windows: dict[str, int] = {}
@@ -1246,8 +1324,11 @@ class AIClient:
         model_ids = {self.config.model, self.config.effective_chat_model}
         detected = [windows.get(model_id) for model_id in model_ids]
         if any(value is None for value in detected):
+            _store_context_window(cache_key, None)
             return None
-        return min(value for value in detected if value is not None)
+        window = min(value for value in detected if value is not None)
+        _store_context_window(cache_key, window)
+        return window
 
     @staticmethod
     def _estimate_tokens(text: str) -> int:
@@ -1264,6 +1345,52 @@ class AIClient:
         budget = int(window * _CONTEXT_INPUT_FRACTION)
         self._context_budget = max(budget, 1_000)
         return self._context_budget
+
+    def resolve_turn_share(self) -> int:
+        """Input tokens one contributor to a chat turn may spend.
+
+        A turn is assembled from the selected-circular context plus up to
+        `_MAX_TOOL_ITERATIONS` tool results, and the loop keeps every one of them for the
+        rest of the turn. Sizing a single contributor against the whole window therefore
+        fits on the first round and overflows by the third, which is the shape of every
+        oversized request in the trace log: iteration 1 around 3k tokens, iteration 5
+        around 114k, against per-tool ceilings that never moved between them. Dividing
+        the input budget by the number of contributors makes "the turn fits" arithmetic
+        rather than hope — six shares is the whole of it, by construction.
+
+        Clamped at both ends, for the reasons `_TURN_SHARE_MAX_TOKENS` and
+        `_TURN_SHARE_MIN_TOKENS` record.
+        """
+        share = self.resolve_context_budget() // _TURN_CONTRIBUTORS
+        return max(_TURN_SHARE_MIN_TOKENS, min(_TURN_SHARE_MAX_TOKENS, share))
+
+    def _search_payload_budgets(self) -> tuple[int, int, int]:
+        """One search response's character ceilings: (inline bodies, passages, laws).
+
+        `search_corpus` is the largest single contributor to an oversized chat request:
+        a measured ~75,000 characters (~19k tokens) per call, from constants that did
+        not know what model they were talking to. That is 2.3x the entire window of an
+        8k local model and more than half of a 32k one — five times over in a turn that
+        searches five times.
+
+        Below a share the three ceilings scale together, so the arms keep their tuned
+        40:24:8 proportions instead of one of them absorbing the whole reduction. At or
+        above a share they are handed back untouched: the reasoning behind each number
+        does not stop applying because the window got bigger.
+        """
+        ceilings = (
+            SEARCH_INLINE_BODY_BUDGET_CHARS,
+            SEARCH_PASSAGE_BUDGET_CHARS,
+            LAW_SEARCH_PASSAGE_BUDGET_CHARS,
+        )
+        allowance = self.resolve_turn_share() * 4
+        if allowance >= _SEARCH_RESPONSE_BUDGET_CHARS:
+            return ceilings
+        scaled = [
+            max(1, ceiling * allowance // _SEARCH_RESPONSE_BUDGET_CHARS)
+            for ceiling in ceilings
+        ]
+        return scaled[0], scaled[1], scaled[2]
 
     def list_models(self) -> list[dict[str, str]]:
         """Return provider model IDs in a normalized shape for the settings UI."""
@@ -3275,7 +3402,9 @@ SOURCE BLOCKS:
         return [str(item) for item in selected if str(item) in allowed]
 
     @staticmethod
-    def _inline_body_texts(*result_groups: list[dict]) -> dict[str, str]:
+    def _inline_body_texts(
+        *result_groups: list[dict], budget: int = SEARCH_INLINE_BODY_BUDGET_CHARS
+    ) -> dict[str, str]:
         """Pick which hits are short enough to hand over whole, within one budget.
 
         `matching_passage` is a 25-word window chosen by term density, which on a
@@ -3291,7 +3420,7 @@ SOURCE BLOCKS:
         in both arms is charged once and inlined in both.
         """
         texts: dict[str, str] = {}
-        remaining = SEARCH_INLINE_BODY_BUDGET_CHARS
+        remaining = budget
         for row in zip_longest(*result_groups):
             for result in row:
                 if result is None:
@@ -3310,7 +3439,9 @@ SOURCE BLOCKS:
 
     @staticmethod
     def _passage_sets(
-        *result_groups: list[dict], body_texts: dict[str, str]
+        *result_groups: list[dict],
+        body_texts: dict[str, str],
+        budget: int = SEARCH_PASSAGE_BUDGET_CHARS,
     ) -> dict[str, list[dict]]:
         """Pick which hits hand over their matched chunks whole, within one budget.
 
@@ -3337,7 +3468,7 @@ SOURCE BLOCKS:
                 appearances[circular_id] = appearances.get(circular_id, 0) + 1
 
         chosen: dict[str, list[dict]] = {}
-        remaining = SEARCH_PASSAGE_BUDGET_CHARS
+        remaining = budget
         for row in zip_longest(*result_groups):
             for result in row:
                 if result is None:
@@ -3438,7 +3569,9 @@ SOURCE BLOCKS:
         return payload
 
     @staticmethod
-    def _law_search_payloads(results: list[dict]) -> list[dict]:
+    def _law_search_payloads(
+        results: list[dict], *, budget: int = LAW_SEARCH_PASSAGE_BUDGET_CHARS
+    ) -> list[dict]:
         """Serialize the law arm of a search response, under one shared budget.
 
         Deliberately thinner than `_search_result_payload`. A circular's body is inlined
@@ -3448,7 +3581,7 @@ SOURCE BLOCKS:
         the window on a document the model has not yet decided it needs.
         """
         payloads: list[dict] = []
-        remaining = LAW_SEARCH_PASSAGE_BUDGET_CHARS
+        remaining = budget
         for result in results:
             document = result["law"]
             version = result.get("version")
@@ -3542,8 +3675,11 @@ SOURCE BLOCKS:
                             tag=tag if tag else None, sort_by="date",
                         )
                         relaxed_department = bool(results)
-                    body_texts = self._inline_body_texts(results)
-                    passage_sets = self._passage_sets(results, body_texts=body_texts)
+                    inline_budget, passage_budget, _ = self._search_payload_budgets()
+                    body_texts = self._inline_body_texts(results, budget=inline_budget)
+                    passage_sets = self._passage_sets(
+                        results, body_texts=body_texts, budget=passage_budget
+                    )
                     return json.dumps({
                         "ranking": "date",
                         "results": [
@@ -3573,8 +3709,11 @@ SOURCE BLOCKS:
                     relaxed_department = bool(any(arms.values()))
 
                 law_results = arms.pop("law_results", [])
-                body_texts = self._inline_body_texts(*arms.values())
-                passage_sets = self._passage_sets(*arms.values(), body_texts=body_texts)
+                inline_budget, passage_budget, law_budget = self._search_payload_budgets()
+                body_texts = self._inline_body_texts(*arms.values(), budget=inline_budget)
+                passage_sets = self._passage_sets(
+                    *arms.values(), body_texts=body_texts, budget=passage_budget
+                )
                 payload = {
                     key: [
                         self._search_result_payload(r, body_texts, passage_sets)
@@ -3582,7 +3721,7 @@ SOURCE BLOCKS:
                     ]
                     for key, results in arms.items()
                 }
-                law_payload = self._law_search_payloads(law_results)
+                law_payload = self._law_search_payloads(law_results, budget=law_budget)
                 unique = {
                     item["citation"]
                     for results in payload.values() for item in results
@@ -4230,8 +4369,7 @@ circular on an adjacent topic for a statute you could not retrieve.
             messages, circulars_context, selected_circular_ids, handles
         )
 
-        max_iterations = 5
-        for iteration in range(max_iterations):
+        for iteration in range(_MAX_TOOL_ITERATIONS):
             response = self._create_traced_completion(
                 stage=f"chat.iteration.{iteration + 1}",
                 model=self.config.effective_chat_model,
@@ -4341,8 +4479,7 @@ circular on an adjacent topic for a statute you could not retrieve.
             messages, circulars_context, selected_circular_ids, handles
         )
 
-        max_iterations = 5
-        for iteration in range(max_iterations):
+        for iteration in range(_MAX_TOOL_ITERATIONS):
             yield {"phase": "thinking"}
             stream = self._create_traced_completion(
                 stage=f"chat.iteration.{iteration + 1}",
@@ -4566,4 +4703,18 @@ def get_ai_client_for_user(user) -> AIClient:
             "Add your own AI provider API key in Settings before using chat. "
             "Each account uses its own credentials on this deployment."
         )
-    return AIClient(config)
+    client = AIClient(config)
+    # `AIConfig.for_user` cannot fill this in: it has no client to ask the provider
+    # with, so it left the dataclass default of 4,000 — which is not this model's
+    # window, or any model's. Nothing in chat reads the field's other meaning (the
+    # character clip in `_truncate_context` belongs to the corpus generation paths,
+    # which build their config with `get_ai_client`), so what belongs in it here is
+    # the turn share for the model actually in use. `build_chat_context` spends it
+    # across two retrieval arms at `// 4` each, hence two halves of one share.
+    #
+    # Both ends of this were measured on the same deployment. Left at 4,000, a
+    # 1,310,720-token model grounded a turn on 1,000 tokens per arm; set to the raw
+    # window — which is what the settings row still holds — one turn's context reached
+    # 927,622 characters and the request 285,007 prompt tokens.
+    config.max_context_tokens = client.resolve_turn_share() * 2
+    return client

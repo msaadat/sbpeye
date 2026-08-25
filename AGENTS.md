@@ -112,11 +112,27 @@ on them before it reads a description, which is why the discovery tool is not ca
 Retrieval into the laws corpus is exercised by `tests/test_law_chat_reach.py`, which
 documents the 2026-08-23 benchmark failure each property fixes.
 
-**Final synthesis.** A turn that exhausts `max_iterations` (5) falls through to a
+**Turn budget.** A chat turn is assembled from the selected-circular context plus one
+tool result per round, and the loop keeps every one of them, so the request grows
+monotonically — measured at iteration 1 ≈ 3k prompt tokens against iteration 5 ≈ 114k,
+with a worst case of 285,007 on a single call. `resolve_turn_share()` therefore divides
+`resolve_context_budget()` by `_TURN_CONTRIBUTORS` (`_MAX_TOOL_ITERATIONS` + 1), so every
+contributor at its ceiling still fits the window. `_search_payload_budgets()` scales
+`SEARCH_INLINE_BODY_BUDGET_CHARS` / `SEARCH_PASSAGE_BUDGET_CHARS` /
+`LAW_SEARCH_PASSAGE_BUDGET_CHARS` down together against a share — those constants are the
+ceiling for a model with room for all of it, not a floor for one without. Chat's
+`max_context_tokens` is set from the share in `get_ai_client_for_user`, because
+`AIConfig.for_user` has no client to probe the provider with and left the dataclass
+default of 4,000 — a number belonging to no model. Windows are probed once per
+(provider, base URL, model) per `_WINDOW_CACHE_TTL_SECONDS`, since a chat request builds
+its own `AIClient`. Pinned by `tests/test_chat_turn_budget.py`.
+
+**Final synthesis.** A turn that exhausts `_MAX_TOOL_ITERATIONS` (5) falls through to a
 tool-free synthesis call that rebuilds the conversation from the tool results gathered so
 far (`_tool_result_synthesis_messages`, shared by the blocking and streaming paths). The
 evidence budget comes from `resolve_context_budget()`, i.e. the model's own window — not
-from `max_context_tokens`, which is a per-document character clip. Within it, results get
+from `max_context_tokens`, whose other meaning is a per-document character clip (still
+what the corpus generation paths under `get_ai_client` use it for). Within it, results get
 a max-min fair share so no single lookup can starve the rest, each section names the tool
 that produced it, and anything clipped is marked as clipped in both the evidence and the
 system prompt. Pinned by `tests/test_chat_synthesis_budget.py`.

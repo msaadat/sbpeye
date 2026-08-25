@@ -13,7 +13,7 @@ from ..database import PROJECT_ROOT, collection, embedding_backend
 from ..env import CIRCULAR_FILES_DIR, HTML_CACHE_DIR
 from ..checklist import PAGE_MARKER_RE, prepare_index_chunks, prepare_reference_chunks
 from ..search import index_circular_fts
-from .clean_html import extract_sbp_text
+from .clean_html import extract_automation_path, extract_sbp_text
 from ..link_routing import normalize_reference, normalize_sbp_url
 import uuid
 from urllib.parse import unquote, urljoin, urlparse
@@ -38,28 +38,6 @@ ATTACHMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx"}
 # Flat asset store the redesigned site consolidated most circular attachments into.
 ASSET_BASE_URL = f"{BASE_URL}/assets/documents/circulars/"
 _CHROMA_WRITE_LOCK = threading.Lock()
-
-
-def _extract_automation_path(soup: BeautifulSoup) -> str | None:
-    """Return the legacy department/year path from the hidden automationPathHolder span.
-
-    Archived-era circular pages carry `<span id="automationPathHolder">/psd/2016/
-    index.htm</span>` — a leftover of the pre-redesign URL structure. SBP's own
-    front-end (`circular-inner.js`) uses it to reconstruct download links for the
-    bare relative hrefs those pages emit (e.g. `href="C3-Annexure-A.pdf"`); we mirror
-    that logic since it's the only source of the original per-department/year path.
-    """
-    holder = soup.find(id="automationPathHolder")
-    if holder is None:
-        return None
-    text = holder.get_text().strip()
-    if not text:
-        return None
-    text = re.sub(r"^https?://(?:www\.)?sbp\.org\.pk", "", text, flags=re.IGNORECASE)
-    text = text.split("?")[0].split("#")[0]
-    text = text.replace("\\", "/")
-    text = re.sub(r"/[^/]*$", "/", text)
-    return text.strip("/") or None
 
 
 def circular_identity(reference: str | None, url: str) -> str:
@@ -135,14 +113,14 @@ def detect_attachments(soup: BeautifulSoup, base_url: str) -> list[dict]:
     `href="C3-Annexure-A.pdf"`, no directory component). Resolving that against the
     circular's own pretty URL produces a dead link, so it's instead resolved against
     the flat asset store, preferring the legacy department/year path from
-    `automationPathHolder` when present (see `_extract_automation_path`) with the flat
+    `automationPathHolder` when present (see `extract_automation_path`) with the flat
     path kept as a `fallback_url` — SBP inconsistently kept files at one location or
     the other after their redesign.
     """
     found: list[dict] = []
     seen_urls: set[str] = set()
     seen_filenames: set[str] = set()
-    automation_path = _extract_automation_path(soup)
+    automation_path = extract_automation_path(soup)
 
     for anchor in soup.find_all("a", href=True):
         href = anchor.get("href", "").strip()

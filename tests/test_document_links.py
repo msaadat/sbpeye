@@ -13,6 +13,7 @@ from sbpeye.link_routing import (
     rewrite_document_links,
 )
 from sbpeye.models import Attachment, Circular
+from sbpeye.scraper.clean_html import clean_sbp_html
 
 
 def make_session():
@@ -84,6 +85,104 @@ def test_source_links_become_internal_document_pills():
     assert "document-pill" in links[2].get("class", [])
     assert links[3]["href"] == "https://example.com/external"
     assert "document-pill" not in links[3].get("class", [])
+
+
+def test_bare_annexure_href_resolves_to_the_asset_store_and_pills():
+    """An archived-era enclosure written as a bare filename must not stay a dead
+    sbp.org.pk link. `clean_sbp_html` rebuilds it against the asset store using
+    automationPathHolder (as SBP's own page does), and it then pills to the stored
+    attachment. Regression for BSD Circular No. 3 of 2012 ("Encl. ICAAP Reporting
+    Template"), which rendered as a plain link to /circulars/C3-Annex.pdf."""
+    db = make_session()
+    current = make_circular(
+        "bsd3", "https://www.sbp.org.pk/circulars/bsd-circular-no-3-of-2012"
+    )
+    db.add_all(
+        [
+            current,
+            Attachment(
+                id="annex",
+                circular_id=current.id,
+                filename="C3-Annex.pdf",
+                original_url="https://www.sbp.org.pk/assets/documents/circulars/bsrvd/2012/C3-Annex.pdf",
+                file_type="pdf",
+                extraction_status="extracted",
+            ),
+        ]
+    )
+    db.commit()
+
+    cleaned = clean_sbp_html(
+        b"""
+        <body>
+          <span id="automationPathHolder" style="display:none;">/bsrvd/2012/index.htm</span>
+          <a href="C3-Annex.pdf">Encl. ICAAP Reporting Template</a>
+          <a href="index.htm">Back</a>
+        </body>
+        """,
+        base_url=current.url,
+    )
+    links = BeautifulSoup(cleaned, "html.parser").find_all("a")
+    assert (
+        links[0]["href"]
+        == "https://www.sbp.org.pk/assets/documents/circulars/bsrvd/2012/C3-Annex.pdf"
+    )
+    # Non-document relative links keep resolving against the page, not the asset store.
+    assert links[1]["href"] == "https://www.sbp.org.pk/circulars/index.htm"
+
+    result = rewrite_document_links(cleaned, current, db)
+    annexure = BeautifulSoup(result, "html.parser").find_all("a")[0]
+    assert annexure["href"] == "/documents/open?id=annex"
+    assert "document-pill" in annexure.get("class", [])
+    assert annexure["data-document-kind"] == "PDF"
+
+
+def test_annexure_at_a_different_path_pills_by_filename():
+    """Pre-redesign absolute hrefs (e.g. /dmmd/2023/C13-Annex-A.pdf) survive in the
+    page while the attachment was downloaded from the asset store, so the exact-URL
+    match misses. The filename fallback is scoped to the circular's own attachments,
+    so another circular's same-named annexure is never borrowed."""
+    db = make_session()
+    current = make_circular("dmmd13", "https://www.sbp.org.pk/circulars/dmmd-13-2023")
+    other = make_circular("other", "https://www.sbp.org.pk/circulars/other")
+    db.add_all(
+        [
+            current,
+            other,
+            Attachment(
+                id="mine",
+                circular_id=current.id,
+                filename="C13-Annex-A.pdf",
+                original_url="https://www.sbp.org.pk/assets/documents/circulars/dmmd/2023/C13-Annex-A.pdf",
+                file_type="pdf",
+                extraction_status="extracted",
+            ),
+            Attachment(
+                id="theirs",
+                circular_id=other.id,
+                filename="Annexure.pdf",
+                original_url="https://www.sbp.org.pk/assets/documents/circulars/other/Annexure.pdf",
+                file_type="pdf",
+                extraction_status="extracted",
+            ),
+        ]
+    )
+    db.commit()
+
+    result = rewrite_document_links(
+        """
+        <body>
+          <a href="https://www.sbp.org.pk/dmmd/2023/C13-Annex-A.pdf">Annex A</a>
+          <a href="https://www.sbp.org.pk/dmmd/2023/Annexure.pdf">Someone else's</a>
+        </body>
+        """,
+        current,
+        db,
+    )
+    links = BeautifulSoup(result, "html.parser").find_all("a")
+    assert links[0]["href"] == "/documents/open?id=mine"
+    assert links[1]["href"] == "https://www.sbp.org.pk/dmmd/2023/Annexure.pdf"
+    assert "document-pill" not in links[1].get("class", [])
 
 
 def _make_dmmd(circular_id: str, number: int, year: int) -> Circular:

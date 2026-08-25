@@ -179,6 +179,55 @@ def extract_sbp_text(html_content: bytes) -> str:
         r"(?is)\bbest\s+view\s+screen\s+resolution\s*:.*$", "", text
     ).strip()
 
+
+# Flat asset store the redesigned site consolidated most circular attachments into.
+# Defined here rather than in `circulars` because that module already imports this one.
+ASSET_BASE_URL = "https://www.sbp.org.pk/assets/documents/circulars/"
+ATTACHMENT_EXTENSIONS = (".pdf", ".doc", ".docx", ".xls", ".xlsx")
+
+
+def extract_automation_path(soup: BeautifulSoup) -> str | None:
+    """Return the legacy department/year path from the hidden automationPathHolder span.
+
+    Archived-era circular pages carry `<span id="automationPathHolder">/psd/2016/
+    index.htm</span>` — a leftover of the pre-redesign URL structure. SBP's own
+    front-end (`circular-inner.js`) uses it to reconstruct download links for the
+    bare relative hrefs those pages emit (e.g. `href="C3-Annexure-A.pdf"`); we mirror
+    that logic since it's the only source of the original per-department/year path.
+    """
+    holder = soup.find(id="automationPathHolder")
+    if holder is None:
+        return None
+    text = holder.get_text().strip()
+    if not text:
+        return None
+    text = re.sub(r"^https?://(?:www\.)?sbp\.org\.pk", "", text, flags=re.IGNORECASE)
+    text = text.split("?")[0].split("#")[0]
+    text = text.replace("\\", "/")
+    text = re.sub(r"/[^/]*$", "/", text)
+    return text.strip("/") or None
+
+
+def resolve_attachment_href(href: str, base_url: str, automation_path: str | None) -> str:
+    """Resolve one anchor href the way SBP's own circular page resolves it.
+
+    A bare relative filename (`href="C3-Annex.pdf"`, no directory component) is an
+    archived-era enclosure. Joining it to the circular's pretty URL yields a dead
+    path like `/circulars/C3-Annex.pdf`; the live page instead rebuilds it against
+    the asset store using `automationPathHolder`, giving
+    `/assets/documents/circulars/bsrvd/2012/C3-Annex.pdf`. Mirroring that here keeps
+    the rendered link pointing at the real file and lets it match the stored
+    attachment, which `detect_attachments` resolves the same way.
+    """
+    if "/" in href or re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", href):
+        return urljoin(base_url, href)
+    # Only enclosures live in the asset store; a bare "index.htm" is still navigation.
+    if not href.split("?")[0].split("#")[0].lower().endswith(ATTACHMENT_EXTENSIONS):
+        return urljoin(base_url, href)
+    root = f"{ASSET_BASE_URL}{automation_path}/" if automation_path else ASSET_BASE_URL
+    return urljoin(root, href)
+
+
 def clean_sbp_html(html_content: bytes, base_url: str = "") -> str:
     soup = BeautifulSoup(html_content, "html.parser")
 
@@ -186,6 +235,7 @@ def clean_sbp_html(html_content: bytes, base_url: str = "") -> str:
         tag.decompose()
 
     if base_url:
+        automation_path = extract_automation_path(soup)
         for img in soup.find_all("img"):
             src = img.get("src", "")
             if src and not src.startswith(("http://", "https://", "data:")):
@@ -193,7 +243,7 @@ def clean_sbp_html(html_content: bytes, base_url: str = "") -> str:
         for a in soup.find_all("a"):
             href = a.get("href", "")
             if href and not href.startswith(("http://", "https://", "#", "javascript:", "mailto:")):
-                a["href"] = urljoin(base_url, href)
+                a["href"] = resolve_attachment_href(href, base_url, automation_path)
             a["target"] = "_blank"
             a["rel"] = "noopener noreferrer"
 

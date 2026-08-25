@@ -1,7 +1,7 @@
 from pathlib import Path
 import re
 from typing import NamedTuple
-from urllib.parse import urldefrag, urlencode, urlparse
+from urllib.parse import unquote, urldefrag, urlencode, urlparse
 
 from bs4 import BeautifulSoup, NavigableString
 from sqlalchemy import extract, func, or_
@@ -392,6 +392,37 @@ def harvest_reference_links(html: str | bytes, db: Session, current: Circular) -
     return list(targets.values())
 
 
+def _find_attachment_id(url: str, circular: Circular, db: Session) -> str | None:
+    """The stored attachment `url` points at, matching by URL and then by filename.
+
+    An exact `original_url` match is the common case. It misses whenever the href
+    written into the circular's HTML is not the URL the attachment was downloaded
+    from, which `detect_attachments` deliberately allows: bare relative filenames
+    (`href="C3-Annex.pdf"`) are resolved against the flat asset store rather than the
+    circular's own pretty URL, and pre-redesign absolute paths (`/dmmd/2023/C13-Annex-A.pdf`)
+    are stored under whichever location actually served the file. Without a fallback
+    those annexures render as plain links back to a dead sbp.org.pk path instead of
+    document pills.
+
+    The filename fallback is scoped to `circular`'s own attachments, so a generic
+    name like `annexure.pdf` can never resolve to another circular's enclosure.
+    """
+    exact = db.query(Attachment.id).filter(
+        func.lower(Attachment.original_url) == url.lower()
+    ).first()
+    if exact:
+        return exact[0]
+
+    filename = unquote(Path(urlparse(url).path).name)
+    if not filename:
+        return None
+    by_name = db.query(Attachment.id).filter(
+        Attachment.circular_id == circular.id,
+        func.lower(Attachment.filename) == filename.lower(),
+    ).first()
+    return by_name[0] if by_name else None
+
+
 def rewrite_document_links(html: str, circular: Circular, db: Session) -> str:
     soup = BeautifulSoup(html, "html.parser")
     for anchor in soup.find_all("a", href=True):
@@ -400,13 +431,11 @@ def rewrite_document_links(html: str, circular: Circular, db: Session) -> str:
         except ValueError:
             continue
         known = db.query(Circular.id).filter(func.lower(Circular.url) == url.lower()).first()
-        attachment = db.query(Attachment.id).filter(
-            func.lower(Attachment.original_url) == url.lower()
-        ).first()
+        attachment = _find_attachment_id(url, circular, db)
         if known:
             target, kind = f"/circulars/{known[0]}", "circular"
         elif attachment:
-            target = f"/documents/open?{urlencode({'id': attachment[0]})}"
+            target = f"/documents/open?{urlencode({'id': attachment})}"
             kind = Path(urlparse(url).path).suffix.lstrip(".").upper() or "document"
         else:
             continue

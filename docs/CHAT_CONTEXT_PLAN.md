@@ -33,21 +33,21 @@ for the evidence budget, and every changed circular now names what changed it: a
 
 | # | Item | Where | Effect | Effort | State |
 |---|---|---|---|---|---|
-| **C0** | Turn share: every contributor sized against `window / 6` | `ai.py:1349` `resolve_turn_share` | turn fits by arithmetic | — | ☑ landed |
-| **C0b** | Search payload ceilings scale with the share | `ai.py:1367` `_search_payload_budgets` | 72k ch → 13k ch on a 32k model | — | ☑ landed |
-| **C0c** | Chat sized by the model, window probed once | `ai.py:4691` `get_ai_client_for_user` | replaces the 4,000 default | — | ☑ landed |
-| **C1a** | Suppress the second copy of a document — lossless core of C1, absorbs C4 | `ai.py:3569` `_dedupe_repeat_row` | **19.8% of search output, lossless** | XS | ☑ landed |
-| **C1** | Per-turn document ledger — stub a document already sent | `ai.py:4278` `_apply_tool_calls` | **21.4% of tool output is a repeat** | M | ☐ |
-| **C2** | ~~Tier `full_circular_text` by rank~~ — **measured 1:1 against recall, do not ship as written** | `ai.py:3405` `_inline_body_texts` | see §5.2 | S | ⚠ blocked |
-| **C3** | Supersession pass before `_fair_shares` | `ai.py:1856` | the one request never cached | S | ☐ |
+| **C0** | Turn share: every contributor sized against `window / 6` | `ai.py:1423` `resolve_turn_share` | turn fits by arithmetic | — | ☑ landed |
+| **C0b** | Search payload ceilings scale with the share | `ai.py:1441` `_search_payload_budgets` | 72k ch → 13k ch on a 32k model | — | ☑ landed |
+| **C0c** | Chat sized by the model, window probed once | `ai.py:4916` `get_ai_client_for_user` | replaces the 4,000 default | — | ☑ landed |
+| **C1a** | Suppress the second copy of a document — lossless core of C1, absorbs C4 | `ai.py:3592` `_dedupe_repeat_row` | **19.8% of search output, lossless** | XS | ☑ landed |
+| **C1** | Fidelity ladder + enrol the document tools — extends C1a | `ai.py:3592` `_dedupe_repeat_row`, `_execute_tool` branches | **21.4% of tool output is a repeat** | M | ☐ |
+| **C2** | ~~Tier `full_circular_text` by rank~~ — **measured 1:1 against recall, do not ship as written** | `ai.py:3479` `_inline_body_texts` | see §5.2 | S | ⚠ blocked |
+| **C3** | Supersession pass before `_fair_shares` | `ai.py:1930` `_tool_result_synthesis_messages` | the one request never cached | S | ☐ |
 | **C4** | ~~One merged result list carrying both ranks~~ — **retired into C1a**, see §5.4 | — | — | — | ✗ retired |
-| **C5** | Repeat-call guard keyed on what was resolved | `ai.py:4278` | 2.2%, far more when stuck | S | ☐ |
-| **C6** | Stop when an iteration adds no new document | `ai.py:4470` `_stream_chat_impl` | removes 1–3 requests | S | ☐ |
+| **C5** | Repeat-call guard keyed on what was resolved | `ai.py:4227` `_law_details_tool` | 2.2%, far more when stuck | S | ☐ |
+| **C6** | Stop when an iteration adds no new document | `ai.py:4692` `_stream_chat_impl` | removes 1–3 requests | S | ☐ |
 | **C7** | Charge conversation history to the turn budget | `main.py:3351` | the remaining unbounded input | S | ☐ |
-| **C8** | Express the synthesis budget as a share, and measure before sending | `ai.py:1776`, `ai.py:1573` | **the guarantee** | M | ☐ |
+| **C8** | Express the synthesis budget as a share, and measure before sending | `ai.py:1850`, `ai.py:1647` | **the guarantee** | M | ☐ |
 | **C9** | Pre-warm the first search, skip iteration 1 | `main.py:3351` | −1 request, ~4.5 s | M | ☐ |
 | **C10** | Answer cache: question + selection + corpus version | new | −1 whole turn on a hit | M | ☐ |
-| **C11** | Withdrawn demoted, amender **annotated** | `search.py:1702` `dual_arm_search` | **measured net −18.1%; nothing becomes unreachable** | S | ☑ landed |
+| **C11** | Withdrawn demoted, amender **annotated** | `search.py:1742` `dual_arm_search` | **measured net −18.1%; nothing becomes unreachable** | S | ☑ landed |
 
 **Order.** **C1a and C11 are landed.** C1a was the smallest diff here and the only item that
 is *lossless* by construction (19.8% of search output); C11 followed because it improves the
@@ -99,6 +99,14 @@ reported usage, 8,628,844 characters of tool output, all on OpenRouter with
 4. **Thirty turns, one model.** Enough to see structure and rank the items. Not enough to
    promise a percentage on a different corpus or a different model's tool-calling habits.
 
+**Line anchors drift.** Every `file.py:N` below was verified against the tree at the time of
+the last edit, and `ai.py` has moved by ~200 lines twice already while this document was being
+written. Trust the symbol name, not the number; re-verify with:
+
+```bash
+grep -oE '`(ai|main|search|chat_retrieval)\.py:[0-9]+`' docs/CHAT_CONTEXT_PLAN.md | tr -d '`' | sort -u | while IFS=: read f n; do printf '%-20s %5s  ' "$f" "$n"; sed -n "${n}p" "src/sbpeye/$f"; done
+```
+
 ---
 
 ## 2. The shape of the problem
@@ -148,7 +156,7 @@ clamp is what stops a million-token window from turning one lookup into a corpus
   share. Sessions are short today — 42 messages total, largest session 9,568 chars — so it
   does not bite yet. It is unbounded by construction and will.
 - **`_synthesis_evidence_budget` is still `resolve_context_budget() * 4` characters**
-  (`ai.py:1776`) — 3,145,728 characters on the deployment's current model. It is bounded
+  (`ai.py:1850`) — 3,145,728 characters on the deployment's current model. It is bounded
   *transitively*, because the tools can no longer produce that much, but it is not itself a
   ceiling and it does not know history exists.
 
@@ -215,7 +223,7 @@ law passages              11.5%     everything else           14.3%
 
 **`search_regulatory_inventory`** — 8 calls, avg 130,658 ch, max 574,624. `passage` 36.9% —
 and note `_INVENTORY_PASSAGE_CHARS` is already 240 (`ai.py:109`), so that share is *row
-count*, not passage length. Its budget now derives from the share (`ai.py:4142`), which is
+count*, not passage length. Its budget now derives from the share (`ai.py:4361`), which is
 the right fix; `_INVENTORY_MAX_ROWS` at 1,000 is the remaining loose end.
 
 **`get_law_details`** — 15 calls, avg 5,099 ch, 83.5% passage text. The best-behaved tool in
@@ -255,7 +263,7 @@ The same argument, taken one step further. Some of what fills a share is not mer
 it is text that has been withdrawn.
 
 `status` appears **nowhere in `search.py`**. Not in ranking, not in filtering, not in scoring:
-`_apply_circular_filters` (`search.py:1093`) filters on year, department and tag, and that is
+`_apply_circular_filters` (`search.py:1158`) filters on year, department and tag, and that is
 the complete list. Measured across 1,399 search result entries handed to the model:
 
 | Status | All positions | Top-3 only | Given a full letter |
@@ -329,42 +337,115 @@ So every item below compacts in one of exactly two places:
 
 ### 5.1 — C1. Per-turn document ledger
 
-*`ai.py:4278` `_apply_tool_calls`. 21.4% of tool output is a document already sent. Effort M.*
+*`ai.py:3592` `_dedupe_repeat_row` and the `_execute_tool` document branches at `ai.py:3978`
+and `ai.py:4227`. 21.4% of tool output is a document already sent. Effort M.*
 
-`_apply_tool_calls` is the single choke point through which every tool result enters the
-conversation, and `CitationHandles` already gives every document a stable per-turn key. Add a
-ledger beside them:
+**Not in `_apply_tool_calls`.** An earlier draft of this item put the ledger there, on the
+reasoning that it is the single choke point every tool result passes through. C1a proved that
+wrong by landing somewhere better, and the difference is not cosmetic.
+
+`_apply_tool_calls` receives a result that is already a **finished JSON string**. Deduping
+there removes the same bytes — but the budget has already been spent: `_inline_body_texts`
+decided to grant a circular its full letter and charged ~3,000 characters of the inline
+allowance for it, and stripping the letter afterwards does not give that allowance to anyone
+else. C1a instead withholds *before* the allocators run, so a suppressed duplicate frees its
+slot for a document the model has not seen. Under C0's fixed share that is the difference
+between a smaller request and a better one.
+
+So C1 extends C1a's mechanism where it already sits. `_apply_tool_calls` stays exactly as it
+is: append the assistant turn, run the tool, rewrite to handles, append the tool message. It
+remains a pure append point that knows nothing about document identity — which is also what
+keeps the prompt-cache prefix stable (§4).
+
+### What C1a already built
 
 ```python
-sent: dict[str, Fidelity]   # STUB < EXCERPT < PASSAGES < FULL_LETTER < DOCUMENT_CONTEXT
+self._sent_text_keys: dict[str, list[str]]     # doc_id -> text keys the first row carried
 ```
 
-Before appending a result, walk its document entries. If a document is already in the ledger
-at equal or higher fidelity, replace that entry with a stub:
+Reset per turn (`ai.py:4589`, `ai.py:4702`), threaded as `sent` through `_inline_body_texts`
+(`ai.py:3479`), `_passage_sets` (`ai.py:3525`), `_search_result_payload` (`ai.py:3634`) and
+`_law_search_payloads` (`ai.py:3721`), with `_dedupe_repeat_row` (`ai.py:3592`) reducing a
+repeat row to a pointer. Its docstring names the two gaps C1 closes.
 
-```json
-{"citation": "[[c:BPRD-C-07-2019]]", "lexical_rank": 3,
- "already_provided": "full text, in search_corpus #1 above"}
+### C1, gap 1 — give the ledger an order
+
+`_sent_text_keys` already records *which* text keys went out. It just cannot compare two
+records. Give `_DOCUMENT_TEXT_KEYS` (`ai.py:1095`) an ordering and the ledger becomes a ladder:
+
+```
+NONE < EXCERPT < PASSAGES < FULL_LETTER < DOCUMENT_CONTEXT
+        │           │            │              │
+matching_passage_   matching_    full_          document_context
+excerpt             passages     circular_text  (get_circular_details)
 ```
 
-Only *upgrades* are written in full — a circular that arrived as a ranked excerpt and comes
-back as a full letter is written, because the second copy carries something the first did not.
+`_dedupe_repeat_row` then stops reducing unconditionally and starts comparing: a row that
+*upgrades* what the ledger holds is written in full and the ledger raised; a row at or below is
+the pointer C1a already emits. This is exactly the judgement C1a's docstring defers —
+*"a circular first seen with only an excerpt keeps the excerpt even if a later search would
+have matched real passages"*.
 
-The fidelity ladder is what makes this safe. A naive "seen this citation, skip it" would
-suppress the `get_circular_details` reading of a circular a search had already mentioned in
-one line, which is the opposite of the intent.
+The ladder is also what keeps it safe. A naive "seen this citation, skip it" would suppress the
+`get_circular_details` reading of a circular a search had mentioned in one line, which is the
+opposite of the intent.
 
-**On the worked example:** `search_corpus` #2 drops from 76,079 to roughly 22,000 chars.
-Under C0's share, that is not a smaller request so much as **54,000 characters returned to
-the budget for documents the model has not seen** — the reframing in §3.2.
+### C1, gap 2 — enrol the document tools
 
-This also settles the cache-safe half of the supersession question: once `get_circular_details`
-has delivered a circular at `DOCUMENT_CONTEXT` fidelity, any *later* search returning it emits
-a stub rather than re-inlining the letter.
+C1a covers the search branches only. `get_circular_details` (`ai.py:3978`) and
+`get_law_details` (`ai.py:4227`) neither read nor write the ledger, so the largest single
+overlap in the corpus is still unhandled: search returns circular X with its full letter, the
+model calls `get_circular_details(X)`, and `build_chat_context` hands the same letter back
+inside `document_context` — 97% of that tool's payload.
+
+```
+_execute_tool(name, args, ...)
+  │
+  ├─ search_corpus / search_circulars                        [C1a today, + upgrades]
+  │     per row:  want = fidelity this row would send
+  │               have = ledger[doc]
+  │               want > have → send whole, raise the ledger
+  │               want ≤ have → pointer row (unchanged)
+  │
+  ├─ get_circular_details(X)                                 [NEW]
+  │     have = ledger[X]
+  │       NONE             → unchanged, full document_context
+  │       FULL_LETTER      → letter → pointer; return only the annexure and
+  │                          attachment passages not yet sent
+  │       DOCUMENT_CONTEXT → metadata + "already provided above"
+  │     needs `sent` threaded into build_chat_context (`chat_retrieval.py:526`) and
+  │     ScopedChatRetriever — ScopedChunk.payload() already carries citation and
+  │     chunk_index, so the join exists
+  │
+  └─ get_law_details(L)                                      [NEW]
+        ledger records which chunk_index values went out; a repeat returns only
+        new chunks
+  │
+  ▼
+_apply_tool_calls(...)   UNCHANGED — appends, rewrites to handles, traces
+```
+
+### What it buys
+
+**On the worked example:** `search_corpus` #2 drops from 76,079 to roughly 22,000 chars — and
+under C0's share those **54,000 characters return to the budget for documents the model has not
+seen**, rather than simply vanishing.
+
+**On the supersession question:** once `get_circular_details` has delivered a circular at
+`DOCUMENT_CONTEXT`, any *later* search returning it emits a pointer instead of re-inlining the
+letter — the cache-safe half of what §5.3 handles retroactively at synthesis.
+
+**On C6:** the ledger *is* C6's predicate. "Did this iteration contribute any document above
+the fidelity already held?" is a lookup once C1 exists, which is why C6 costs almost nothing
+after this lands.
+
+**On C5:** the law-chunk half of gap 2 is C5's key —
+`(tool, resolved_document_id, returned_chunk_indices)`. The two items converge on one ledger
+rather than maintaining two.
 
 ### 5.2 — C2. Tier `full_circular_text` by rank
 
-*`ai.py:3405` `_inline_body_texts`. 18.3% of tool output; 8% of it gets cited. Effort S.*
+*`ai.py:3479` `_inline_body_texts`. 18.3% of tool output; 8% of it gets cited. Effort S.*
 
 The existing docstring is right: a 25-word term-density window on a two-page SBP letter
 reliably picks the addressee block over the operative clause, and for a short letter the fix
@@ -408,7 +489,7 @@ softens the risk; it does not make the trade free.
 
 ### 5.3 — C3. Supersession pass before `_fair_shares`
 
-*`ai.py:1856` `_tool_result_synthesis_messages`. Effort S.*
+*`ai.py:1930` `_tool_result_synthesis_messages` `_tool_result_synthesis_messages`. Effort S.*
 
 `_tool_result_sections` hands every tool result to `_fair_shares`, which splits the budget
 max-min fairly and clips what does not fit. The fairness argument is sound and well tested —
@@ -431,7 +512,7 @@ lands on the largest single request in the sample: the 285,007-token request was
 C4 originally proposed collapsing `lexical_results` and `semantic_results` into one list, each
 row carrying both ranks. That was wrong on the design, and barely better on the numbers.
 
-**On the design.** `dual_arm_search` (`search.py:1677`) exists *because* fusing was wrong for
+**On the design.** `dual_arm_search` (`search.py:1742`) exists *because* fusing was wrong for
 chat. Its docstring: the title and recency bonuses are "an order of magnitude larger than the
 entire RRF range", so "a circular that names the topic only in its body or an annexure
 therefore cannot outrank one that names it in the title, however much better the retrieval
@@ -465,12 +546,15 @@ mechanism, not a separate item, so C4 is retired into §5.12 rather than kept as
 
 ### 5.5 — C5. Repeat-call guard keyed on what was resolved
 
-*`ai.py:4278`. 2.2% of tool output; 38% on the worked example. Effort S.*
+*`ai.py:4227` `_law_details_tool`, sharing C1's ledger. 2.2% of tool output; 38% on the worked
+example. Effort S.*
 
 Keying on the argument string does not work: the four `get_law_details` calls in §2.3 had four
 different `query` values and two returned byte-identical results. Key on what the tool
-*resolved to* — `(tool, resolved_document_id, returned_chunk_indices)` — which is known after
-it runs and before its result is appended.
+*resolved to* — `(tool, resolved_document_id, returned_chunk_indices)` — which is known inside
+the tool, after it resolves and before it serializes. That is the same place C1 puts the
+fidelity check, and it uses the same ledger: C5 is the chunk-level entry C1 already needs for
+`get_law_details`.
 
 On a repeat, append a pointer:
 
@@ -485,7 +569,7 @@ discovering that.
 
 ### 5.6 — C6. Stop when an iteration adds no new document
 
-*`ai.py:4470` `_stream_chat_impl` and the same loop in `_chat_impl` at `ai.py:4360`. Effort S.*
+*`ai.py:4692` `_stream_chat_impl` and the same loop in `_chat_impl` at `ai.py:4579`. Effort S.*
 
 `_MAX_TOOL_ITERATIONS` is 5, unconditionally, with `tool_choice="auto"` every round.
 Measured: **26 of 170 tool calls (15%) returned only documents already seen**, and iterations
@@ -521,7 +605,7 @@ self-contained — the traced sessions bear this out, with a median of two messa
 
 ### 5.8 — C8. Make the ceiling a measurement, not an inference
 
-*`ai.py:1776` `_synthesis_evidence_budget`, `ai.py:1573` `_create_traced_completion`. Effort M.
+*`ai.py:1850` `_synthesis_evidence_budget`, `ai.py:1647` `_create_traced_completion`. Effort M.
 **This is the guarantee.***
 
 C0 gives a bound by construction: six contributors, each capped at a share. That is a good
@@ -545,8 +629,8 @@ Two changes:
 Shedding invalidates the cached prefix, which is exactly why it must be a backstop rather than
 a strategy: it should fire on the tail, not the median. That is what C1–C6 are for.
 
-`_is_context_size_error` (`ai.py:1222`) already exists and already works — it drives
-shrink-and-retry in checklist and entity extraction (`ai.py:2439`, `2819`, `2835`) and is
+`_is_context_size_error` (`ai.py:1291`) already exists and already works — it drives
+shrink-and-retry in checklist and entity extraction (`ai.py:2513`, `2893`, `2909`) and is
 unused in chat. Wire chat's 413 into the same gate as a second line of defence, so a window we
 mis-estimated costs one retry instead of the turn.
 
@@ -576,8 +660,8 @@ item.
 
 ### 5.11 — C11. Status-aware ranking and amender annotation
 
-*`search.py:1702` `dual_arm_search`; `_relationship_annotation` (`search.py:973`) and
-`_withdrawn_pointer` (`search.py:1023`); `WITHDRAWN_QUERY_PATTERN` (`chat_retrieval.py:55`);
+*`search.py:1742` `dual_arm_search`; `_relationship_annotation` (`search.py:1013`) and
+`_withdrawn_pointer` (`search.py:1063`); `WITHDRAWN_QUERY_PATTERN` (`chat_retrieval.py:55`);
 `_withdrawn_section` (`ai.py:1108`). **Measured net −18.1% of search output**, plus the
 correctness win in §3.3. Effort S. **☑ Landed**, pinned by `tests/test_search_currency.py`
 (29 tests).*
@@ -592,7 +676,7 @@ cannot answer "what did the old rule say?" has traded one failure for another, a
 Three rules, and the first is the one that matters most:
 
 1. **Never filter a document the user named.** `reference_matches` (from
-   `_search_by_reference`, `search.py:1526`) and `get_circular_details` bypass the status filter
+   `_search_by_reference`, `search.py:1591`) and `get_circular_details` bypass the status filter
    entirely. They are separate paths from the two ranked arms, so this is a matter of *where*
    the clause goes, not an exception to it. If someone asks about BPRD Circular 12 of 2015, they
    get BPRD Circular 12 of 2015 — with its withdrawal stated, never withheld.
@@ -727,7 +811,7 @@ confirm the payload reduction separately.
 
 ### 5.12 — C1a. Suppress the second copy of a document (the lossless core of C1)
 
-*`ai.py:3569` `_dedupe_repeat_row`, spent by `_search_result_payload` and
+*`ai.py:3592` `_dedupe_repeat_row`, spent by `_search_result_payload` and
 `_law_search_payloads`; ledger on `AIClient`, reset in both chat loops.
 **19.8% of search output**, lossless. Effort XS. **☑ Landed**, pinned by
 `tests/test_turn_text_ledger.py` (15 tests).*
@@ -817,7 +901,7 @@ Why it went first:
   duplication is fixed here, in place, without a fusion decision `dual_arm_search` deliberately
   declined to make.
 
-Two care points: the date-sorted branch of `search_corpus` (`ai.py:3673`) passes a single
+Two care points: the date-sorted branch of `search_corpus` (`ai.py:3843`) passes a single
 `results` list and must share the same set; and `reference_matches` is a third list that can
 carry the same circular as either arm, so it has to participate too.
 
@@ -894,7 +978,7 @@ reference strings and citation handles, which is what a large tool result is mad
 
 So:
 
-- **Report** with 4.0. `_estimate_tokens` (`ai.py:1334`) stays as it is for batch sizing.
+- **Report** with 4.0. `_estimate_tokens` (`ai.py:1408`) stays as it is for batch sizing.
 - **Budget** with 3.0 — `SAFE_CHARS_PER_TOKEN` in the audit script.
 - **Better: calibrate per turn.** Every provider response carries `usage.prompt_tokens` for a
   request whose exact character count is known. After iteration 1 the true ratio for *this*

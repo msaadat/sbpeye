@@ -294,3 +294,15 @@ cd frontend && npm run typecheck  # TypeScript type checking
 - `api/admin.py` **reports** and writes nothing. Reading corpus or index state must never mutate either — the audit route calls `reconcile(write=False)` for exactly that reason, and `tests/test_admin_status.py` asserts it. A new admin route that writes belongs behind a POST and an explicit operator action, not on a page that reloads; the sync controls live in `main.py` and the console calls across to them, which is what keeps this module's guarantee literally true
 - A route handler that touches the database is a plain **`def`**, never `async def`. FastAPI runs `async def` *on the event loop* and `def` in a threadpool, and this application's ORM is synchronous — so `async def` around a query does not make it concurrent, it stops every other request in the process until the query returns. Measured through this app: five concurrent 300 ms requests took 1.50 s and served 1 other request as `async def`, against 0.30 s and 39 as `def`. `async def` is right only when the body genuinely `await`s (`/api/chat/stream`, anything reading `await request.json()`). This was the default for all 34 routes in the initial commit and took until P6 to undo; `tests/test_route_concurrency.py` now fails the build rather than letting it drift back. Middleware cannot drop its `async`, so blocking work there goes through `run_in_threadpool` — see `require_authentication`
 - The databases run in **WAL** (`database.py`), so `sbpeye.db` alone is not the whole database — recent commits sit in `sbpeye.db-wal` until checkpointed. Anything that *copies* the corpus (the volume upload, `scripts/sync_volume.py`, `git add sbpeye.db`) must checkpoint first; `checkpoint_sqlite()` runs on clean shutdown, a killed process leaves the sidecar full
+
+## Known issues on the SBP site
+
+Quirks in what SBP publishes, not in our parse. Mirrored rather than corrected, so a citation
+reads the same in SBPEye as on sbp.org.pk. Where one is genuinely unusable, normalize at the
+point of display and leave the stored value alone.
+
+1. **Duplicated year in a circular reference** — the listing serves
+   `SH&SFD Circular No. 05 of 2026 of 2026`. 42 of 3,653 rows, and 17% of the most recent 90,
+   so it keeps arriving. Display-only: identity and search both reparse the reference
+   structurally, so the tail is ignored; it shows up only in the label. *Mirrored for now* —
+   see `docs/ANSWER_QUALITY_DEFECTS.md` (D15).

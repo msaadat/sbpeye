@@ -332,7 +332,7 @@ def test_environment_reports_paths_and_capabilities(client, monkeypatch, tmp_pat
     test_client, _ = client
     root = use_tmp_data_root(monkeypatch, tmp_path)
     (root / "files" / "cache").mkdir(parents=True)
-    (root / "files" / "cache" / "page.html").write_text("cached")
+    (root / "files" / "cache" / "page.html").write_text("cached", encoding="utf-8")
 
     body = test_client.get("/api/admin/environment").json()
 

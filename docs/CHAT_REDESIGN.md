@@ -18,8 +18,8 @@ Two assumptions, chosen deliberately:
 - **The loop is hybrid.** Deterministic retrieval handles the common case; the model
   escalates to tools only when the fixed pass is not enough.
 
-**Status:** design only, nothing built. §9 is the migration path, and its first step is
-independent of everything else here — worth doing whatever is decided about the rest.
+**Status:** design only, nothing built. §9 is the migration path; it assumes
+`CHAT_CONTEXT_PLAN.md` C11 has landed first.
 
 ---
 
@@ -27,19 +27,22 @@ independent of everything else here — worth doing whatever is decided about th
 
 | # | Step | Where | Effect | Effort | State |
 |---|---|---|---|---|---|
-| **R1** | Status-aware ranking | `search.py:1025` `_apply_circular_filters` | **49.2% → ~0% dead law in results** | S | ☐ |
-| **R2** | Evidence card replaces the result payload | `ai.py:3500` `_search_result_payload` | fixed cost per document | M | ☐ |
-| **R3** | Chain collapse: one card per amendment chain | `consolidation.py:61` `resolve_chain` | removes duplicate lineage members | S | ☐ |
-| **R4** | Stage 1 plan call replaces iteration 1 | new | −1 round trip, checkable output | M | ☐ |
-| **R5** | Stage 2 intent dispatch | new | retrieval becomes deterministic | L | ☐ |
-| **R6** | Collapse the tool schema to three verbs | `ai.py:134` `TOOLS` | 11,415 ch → ~1,200 ch | M | ☐ |
-| **R7** | Stage 4 verification | new | citation grounding, supersession check | M | ☐ |
+| **R1** | Evidence card replaces the result payload | `ai.py:3500` `_search_result_payload` | fixed cost per document | M | ☐ |
+| **R2** | Chain collapse: one card per amendment chain | `consolidation.py:61` `resolve_chain` | removes duplicate lineage members | S | ☐ |
+| **R3** | Stage 1 plan call replaces iteration 1 | new | −1 round trip, checkable output | M | ☐ |
+| **R4** | Stage 2 intent dispatch | new | retrieval becomes deterministic | L | ☐ |
+| **R5** | Collapse the tool schema to three verbs | `ai.py:134` `TOOLS` | 11,415 ch → ~1,200 ch | M | ☐ |
+| **R6** | Stage 4 verification | new | citation grounding, supersession check | M | ☐ |
 
-**Order.** R1 alone, first, and measure it — it needs no new architecture and it is the
-largest correctness win available. Then R2 and R3, which change what a result *is* without
-changing the loop. Then R4 and R5, which change the loop. R6 follows R5 (the tools can only
-shrink once the deterministic path carries the common case). R7 any time after R2, because
-verification needs the evidence set to check against.
+**Prerequisite.** Status-aware ranking and amender annotation is **C11** in
+`CHAT_CONTEXT_PLAN.md`. It belongs in the current design, needs nothing from this one, and every
+step below assumes it has landed — a card built over a candidate set that still contains
+withdrawn text inherits the problem.
+
+**Order.** R1 and R2 first: they change what a result *is* without changing the loop. Then R3
+and R4, which change the loop. R5 follows R4 (the tools can only shrink once the deterministic
+path carries the common case). R6 any time after R1, because verification needs the evidence
+set to check against.
 
 ---
 
@@ -60,45 +63,24 @@ Everything in §7 marked *target* is derived from the card sizing in §5, not me
 
 ## 2. The finding that reframes the problem
 
-**`status` appears nowhere in `search.py`.** Not in ranking, not in filtering, not in
-scoring. `_apply_circular_filters` (`search.py:1025`) filters on year, department and tag —
-and that is the complete list.
+**`status` appears nowhere in `search.py`.** Not in ranking, not in filtering, not in scoring.
+`_apply_circular_filters` (`search.py:1025`) filters on year, department and tag — and that is
+the complete list.
 
-The corpus is 3,655 circulars:
+Of 3,655 circulars, 273 are `superseded` or `cancelled` and 757 more are `amended`. Retrieval
+sees none of it. Measured over 1,399 result entries in the traced turns, **13.2% of what
+reaches the model is withdrawn or replaced text**, and of the `amended` entries, **64.8% arrive
+with none of their amenders named** — the `circular_relationships` graph knows the edge, and
+retrieval never looks.
 
-```
-active      2,625   71.8%
-amended       757   20.7%
-superseded    236    6.5%
-cancelled      37    1.0%
-```
+That fix belongs in the current design and is specified there: **`CHAT_CONTEXT_PLAN.md` C11**.
+This document assumes it rather than restating it.
 
-**1,030 of them — 28% — are no longer the operative text**, and retrieval cannot see it.
-
-Measured across 1,399 search result entries handed to the model in the traced turns:
-
-| Status | All positions | Top-3 only | Given a full letter |
-|---|---|---|---|
-| active | 50.8% | 51.0% | 53.3% |
-| amended | 36.1% | 37.1% | 35.0% |
-| superseded | 12.2% | 11.0% | 11.4% |
-| cancelled | 0.9% | 0.9% | 0.3% |
-
-**49.2% of what retrieval hands the model is not current law.** The proportion is the same at
-the top three positions, so this is not a tail effect — and 46.7% of the *full covering
-letters inlined*, the single most expensive item in the payload, are for documents that have
-been replaced.
-
-`_search_result_payload` does pass `status` through per result, so the model can see it. It
-has to notice, across a median of 29 candidates, while also answering the question.
-
-**This is why the symptom presents as a context problem.** Half the window is spent on dead
-law; the instinctive fix is a bigger window. The actual fix is a `WHERE` clause.
-
-The asymmetry is stark inside one file: the **law arm is version-aware** — `_law_arm` filters
+What matters *here* is the shape of the finding, because it generalises. The asymmetry is stark
+inside one file: the **law arm is version-aware** — `_law_arm` filters
 `RegDocument.delisted_at.is_(None)` (`search.py:1279`) and reads `current_version`, and
-`RegDocumentVersion.is_current` is maintained per sync. The corpus that has a currency
-concept uses it. The corpus that also has one ignores it.
+`RegDocumentVersion.is_current` is maintained per sync. The corpus that has a currency concept
+uses it. The corpus that also has one ignores it.
 
 And the graph that would drive it is already built and populated:
 
@@ -110,7 +92,9 @@ circular_relationships   3,172 edges
 reg_document_links         814   (circular ↔ law)
 ```
 
-Nothing in the retrieval path reads any of it.
+Nothing in the retrieval path reads any of it. Status is one instance; lineage, corpus routing
+and currency are the others. A design that keeps asking the model to notice what the database
+already knows will keep producing this class of bug, in a new place each time.
 
 ---
 
@@ -204,14 +188,14 @@ Intent-dispatched over the existing engine. No LLM.
 
 Three deterministic changes to ranking:
 
-1. **Status-aware ordering (R1).** `cancelled` and `superseded` are excluded unless `as_of` is
-   historical or the intent is `status`. `amended` is retained but demoted, and always carries
-   its amender. This is the §2 finding, implemented.
-2. **Chain collapse (R3).** When several members of one amendment chain hit, return the
+1. **Status-aware ordering — C11, already specified in `CHAT_CONTEXT_PLAN.md`.** Assumed here,
+   not restated. What the card needs from it is the `amended_by` annotation, which §5 renders
+   as a line on the card rather than a JSON field among thirty.
+2. **Chain collapse (R2).** When several members of one amendment chain hit, return the
    *chain* — one card, current text, lineage attached — not the members competing with each
    other for rank. `consolidation.resolve_chain` (`consolidation.py:61`) already computes the
    closure.
-3. **Corpus routing from the link graph (R5).** 814 `reg_document_links` edges make "which Act
+3. **Corpus routing from the link graph (R4).** 814 `reg_document_links` edges make "which Act
    does this circular implement" a join rather than an inference. The prompt currently spends
    a paragraph warning that `get_circular_details` cannot fetch an Act; the graph makes the
    warning unnecessary.
@@ -248,9 +232,13 @@ What each line buys:
 
 - **Fixed cost.** ~1,500–3,000 characters. Eight cards ≈ 20,000 chars ≈ 5,000 tokens, against
   72,000 characters for one `search_corpus` call today.
-- **`AMENDED BY` makes supersession structural, not vigilance.** Today it is a `status` field
-  in a JSON blob among thirty. Here it is a machine-generated instruction naming the document
-  to read instead.
+- **`AMENDED BY` is the card's reason for existing.** §2 measured that 64.8% of amended
+  circulars reach the model with no amender anywhere in the result set. Today the only signal
+  is a `status` field in a JSON blob among thirty, which says *that* something changed and
+  never *what*. Here it is a machine-generated line naming the document that changed it, with
+  the amender named so the model has a handle to open if the amendment matters. An
+  `amended` circular is still the rule — the card is what stops it being read as the whole of
+  the rule.
 - **`ANNEXURES … NOT INCLUDED` makes the cover-letter trap explicit.** The current tool
   description spends 2,744 characters explaining that a letter announcing a change without
   stating its terms is a pointer rather than an answer. The card states the absence as a fact
@@ -357,7 +345,8 @@ amended in 2021" as a footer rather than not at all. Failures annotate; only che
 | Peak single request | 49,889 tok median, 243,584 max | **~8–10k tok** |
 | Tool schema | 11,415 ch | ~1,200 ch |
 | Documents shown per turn | median 29 | 6–8 |
-| Non-operative documents shown | **49.2%** | ~0% by construction |
+| Withdrawn/replaced documents shown | **13.2%** | ~0% — *via C11, not this design* |
+| Amended documents shown without their amender named | **64.8%** | ~0% — *via C11* |
 | Turn latency | 37.8 s on the worked example | ~10–14 s |
 
 The right-hand column is derived from the card sizing in §5. It is a design target, not a
@@ -370,7 +359,7 @@ effectively empty:
 
 | Table | Rows | Verdict |
 |---|---|---|
-| `circular_relationships` | 3,172 | **Strong** — R1 and R3 work today |
+| `circular_relationships` | 3,172 | **Strong** — C11 and R2 work today |
 | `reg_document_links` | 814 | **Strong** — corpus routing works today |
 | `tags` | 3,009 of 3,655 | Strong |
 | `attachments` | 1,471 | Strong |
@@ -395,8 +384,8 @@ from seven circulars' worth of data.
   pilot set.
 - **Deterministic ranking is now on the hook for precision.** Today the model compensates for
   mediocre ranking by reading everything. Removing that crutch is the point, and it is also the
-  main way this design could be worse than what it replaces. R1 should be measured against
-  `benchmarks/score.py` and `benchmarks/check_citations.py` before R5 depends on it.
+  main way this design could be worse than what it replaces. C11 should be measured against
+  `benchmarks/score.py` and `benchmarks/check_citations.py` before R4 depends on it.
 - **The card is a new serialization to tune.** Expect two or three rounds on what belongs on it.
 
 ---
@@ -405,19 +394,18 @@ from seven circulars' worth of data.
 
 Each step is independently shippable and independently measurable.
 
-1. **R1 — status-aware ranking.** No new architecture, no re-index, no LLM. Halves the junk in
-   every result set. **Do this whatever else is decided**, and measure it against the pilot
-   question set first, because every later step inherits its precision.
-2. **R2 — the evidence card**, behind the existing tools. Same loop, better payload. This is
-   where `CHAT_CONTEXT_PLAN.md` C2 (tier full text by rank) and C4 (merge the arms) land, since
-   the card subsumes both.
-3. **R3 — chain collapse.** Small, and it depends only on R2 being in place to have somewhere
+1. **R1 — the evidence card**, behind the existing tools. Same loop, better payload. This is
+   where `CHAT_CONTEXT_PLAN.md` C1a (suppress the second copy) lands, since one card per document
+   makes duplication structurally impossible.
+2. **R2 — chain collapse.** Small, and it depends only on R1 being in place to have somewhere
    to put the lineage.
-4. **R4 — the plan call**, replacing iteration 1.
-5. **R5 — intent dispatch.** Start with `definition` and `requirement`; add intents as they earn
+3. **R3 — the plan call**, replacing iteration 1.
+4. **R4 — intent dispatch.** Start with `definition` and `requirement`; add intents as they earn
    their place. This is the largest single piece of work here.
-6. **R6 — collapse the tool schema** once R5 carries the common case.
-7. **R7 — verification.** Checks 1, 2 and 4 first; they need no LLM and no new data.
+5. **R5 — collapse the tool schema** once R4 carries the common case.
+6. **R6 — verification.** Checks 1, 2 and 4 first; they need no LLM and no new data.
+
+C11 comes before all of them and is tracked in `CHAT_CONTEXT_PLAN.md`, not here.
 
 ### Relationship to `CHAT_CONTEXT_PLAN.md`
 
@@ -426,16 +414,18 @@ The incremental plan and this design are not alternatives — most of the plan s
 | Plan item | Fate |
 |---|---|
 | C0 turn share | Stays, as the backstop for the escalation path. Matters less once the peak is 10k tokens |
+| C1a suppress the second copy | **Survives** — becomes the card registry's write path |
 | C1 document ledger | **Survives unchanged** — becomes the card registry |
 | C2 tiered full text | Subsumed by the card |
 | C3 supersession in synthesis | Subsumed — Stage 2 dedupes before the model ever sees it |
-| C4 merged arms | Subsumed by the card |
+| C4 merged arms | **Retired** — merging refuses the dual-arm design's own argument; C1a dedups in place instead |
 | C5 repeat-call guard | Survives — applies to `open_document` |
 | C6 stop on no new document | **Survives** — becomes the escalation budget |
 | C7 history as a contributor | Survives unchanged |
 | C8 measure before sending | Survives as the backstop |
 | C9 pre-warmed first search | Superseded by Stage 1 + Stage 2, which do the same thing better |
 | C10 answer cache | Orthogonal — still worth building, keyed the same way |
+| C11 status-aware ranking | **Prerequisite.** Do it in the current design; every step here assumes it |
 
-The sensible reading is that C1, C6 and C7 are worth doing now under either plan, and R1 is
-worth doing now regardless of both.
+The sensible reading is that C1a, C1, C6 and C7 are worth doing now under either plan, and C11
+is worth doing now regardless of both.

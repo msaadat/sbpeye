@@ -474,7 +474,7 @@ def test_only_gateway_calls_chat_completions_create():
     root = Path(__file__).resolve().parents[1] / "src" / "sbpeye"
     occurrences = []
     for path in root.rglob("*.py"):
-        for number, line in enumerate(path.read_text().splitlines(), 1):
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             if "chat.completions.create" in line:
                 occurrences.append((path.name, number))
     assert len(occurrences) == 1

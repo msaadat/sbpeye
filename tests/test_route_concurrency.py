@@ -56,7 +56,7 @@ def _takes_a_session(node, source: str) -> bool:
 def _offenders():
     for filename in ROUTE_FILES:
         path = SOURCE_ROOT / filename
-        source = path.read_text()
+        source = path.read_text(encoding="utf-8")
         for node in ast.walk(ast.parse(source)):
             if not isinstance(node, ast.AsyncFunctionDef) or not _is_route(node):
                 continue
@@ -84,7 +84,7 @@ def test_the_check_can_actually_find_something():
     different FastAPI idiom — the test above goes green by finding no routes at all rather
     than by the routes being correct.
     """
-    source = (SOURCE_ROOT / "main.py").read_text()
+    source = (SOURCE_ROOT / "main.py").read_text(encoding="utf-8")
     routes = [
         node
         for node in ast.walk(ast.parse(source))

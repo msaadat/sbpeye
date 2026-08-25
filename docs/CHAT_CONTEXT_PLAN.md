@@ -17,9 +17,13 @@ writing): `resolve_turn_share()`, `_search_payload_budgets()`, the window cache,
 being sized by the model instead of by a dataclass default. 51 tests pass across
 `tests/test_chat_turn_budget.py` and `tests/test_chat_synthesis_budget.py`. That work bounds
 *how much* each contributor may spend. It does nothing about *what* is spent on, and
-measured, a fifth of it is documents the model has already been given.
+measured, a fifth of it is documents the model has already been given and an eighth of it is
+text that has been withdrawn.
 
-Nine items remain. C1 is the largest and the one the rest build on.
+**C1a has landed** — a turn now hands the model each document's text once, worth 19.8% of
+search output, and it absorbed C4. Nine items remain (C2 blocked on evidence, C4 retired).
+**C11 is next**, and is the only item that changes the answer rather than the request. C1 is
+the largest and the one the rest build on.
 
 ---
 
@@ -30,21 +34,33 @@ Nine items remain. C1 is the largest and the one the rest build on.
 | **C0** | Turn share: every contributor sized against `window / 6` | `ai.py:1349` `resolve_turn_share` | turn fits by arithmetic | — | ☑ landed |
 | **C0b** | Search payload ceilings scale with the share | `ai.py:1367` `_search_payload_budgets` | 72k ch → 13k ch on a 32k model | — | ☑ landed |
 | **C0c** | Chat sized by the model, window probed once | `ai.py:4691` `get_ai_client_for_user` | replaces the 4,000 default | — | ☑ landed |
+| **C1a** | Suppress the second copy of a document — lossless core of C1, absorbs C4 | `ai.py:3565` `_dedupe_repeat_row` | **19.8% of search output, lossless** | XS | ☑ landed |
 | **C1** | Per-turn document ledger — stub a document already sent | `ai.py:4278` `_apply_tool_calls` | **21.4% of tool output is a repeat** | M | ☐ |
-| **C2** | Tier `full_circular_text` by rank instead of all hits | `ai.py:3405` `_inline_body_texts` | **18.3% of output, 8% cited** | S | ☐ |
+| **C2** | ~~Tier `full_circular_text` by rank~~ — **measured 1:1 against recall, do not ship as written** | `ai.py:3405` `_inline_body_texts` | see §5.2 | S | ⚠ blocked |
 | **C3** | Supersession pass before `_fair_shares` | `ai.py:1856` | the one request never cached | S | ☐ |
-| **C4** | One merged result list carrying both ranks | `ai.py:3441` `_passage_sets` | 14.0% of `search_corpus` | S | ☐ |
+| **C4** | ~~One merged result list carrying both ranks~~ — **retired into C1a**, see §5.4 | — | — | — | ✗ retired |
 | **C5** | Repeat-call guard keyed on what was resolved | `ai.py:4278` | 2.2%, far more when stuck | S | ☐ |
 | **C6** | Stop when an iteration adds no new document | `ai.py:4470` `_stream_chat_impl` | removes 1–3 requests | S | ☐ |
 | **C7** | Charge conversation history to the turn budget | `main.py:3351` | the remaining unbounded input | S | ☐ |
 | **C8** | Express the synthesis budget as a share, and measure before sending | `ai.py:1776`, `ai.py:1573` | **the guarantee** | M | ☐ |
 | **C9** | Pre-warm the first search, skip iteration 1 | `main.py:3351` | −1 request, ~4.5 s | M | ☐ |
 | **C10** | Answer cache: question + selection + corpus version | new | −1 whole turn on a hit | M | ☐ |
+| **C11** | Status-aware ranking + amender **annotation** | `search.py:1025` `_apply_circular_filters` | **net −8.8% of search output, and 64.8% orphaned amendments named** | S | ☐ |
 
-**Order.** C1 first — it is the largest single win and C3, C5 and C6 all reuse its ledger.
-Then C2 and C4, independent local edits to the search payload. Then C5 and C6, both small
-once C1 exists. C7 and C8 close the two holes C0 left. C9 and C10 are latency work and can
-land any time.
+**Order.** **C1a is landed** — the smallest diff here, the only item that is *lossless* by
+construction, and it returns 19.8% of search output on its own. **C11 next**, the only item
+that improves the answer rather than the request; it also cleans the ranking that C2 turns out
+to depend on. Then C1, the largest context win, whose ledger C3, C5 and C6 all reuse — C1a is
+its write path at reduced scope, so nothing is thrown away. C5 and C6 are small once
+C1 exists. C7 and C8 close the two holes C0 left. C9 and C10 are latency work and can land any
+time.
+
+**C2 is blocked on evidence**, not on effort. Measured, tiering the letter budget by rank costs
+recall roughly 1:1 — see §5.2. Re-measure after C11 and decide then.
+
+**Lossless before lossy.** C1a, C1 and C5 all remove bytes the model has already been
+given. C2 removes bytes it has not. Spend the first group completely before touching the
+second.
 
 ---
 
@@ -232,6 +248,41 @@ fifth of them go to documents the model already has. That fifth no longer merely
 request — it *displaces evidence that would otherwise have fit*. Tighter budgets make
 deduplication a retrieval-quality item, not just a size item.
 
+### 3.3 What the budgets are being spent on that is no longer the rule
+
+The same argument, taken one step further. Some of what fills a share is not merely a repeat —
+it is text that has been withdrawn.
+
+`status` appears **nowhere in `search.py`**. Not in ranking, not in filtering, not in scoring:
+`_apply_circular_filters` (`search.py:1025`) filters on year, department and tag, and that is
+the complete list. Measured across 1,399 search result entries handed to the model:
+
+| Status | All positions | Top-3 only | Given a full letter |
+|---|---|---|---|
+| active | 50.8% | 51.0% | 53.3% |
+| amended | 36.1% | 37.1% | 35.0% |
+| **superseded** | **12.2%** | **11.0%** | **11.4%** |
+| **cancelled** | **0.9%** | **0.9%** | **0.3%** |
+
+**13.2% of every result set is superseded or cancelled text**, and 11.7% of the full covering
+letters — the most expensive item in the payload — are for documents that no longer say
+anything. The corpus itself is only 7.5% non-operative, so retrieval over-represents withdrawn
+circulars by about 1.8×.
+
+**`amended` is not in that category and must not be dropped.** It means something later
+modified part of the circular; the circular is still the rule, and the base text is where the
+bulk of the requirements live. `_recompute_statuses` (`circular_ai.py:63`) maps `supersedes` →
+superseded and `cancels` → cancelled, and *every other edge type* to `amended` — including
+`adds_to` (1,423 edges) and `clarifies` (435), where nothing was changed at all.
+
+The failure with `amended` is showing it **alone**. Of 505 amended entries whose citation
+resolves to the corpus, **327 — 64.8% — arrived with none of their amenders in the same result
+set**: the model reads a figure that is still on the page of a circular still in force, and the
+document that changed it is not in front of it.
+
+That is a correctness item, not a context item, which is why C11 sits at the front of the order
+rather than among the compaction work. It happens to also return 13.2% of every share.
+
 ---
 
 ## 4. The constraint that decides the design
@@ -268,7 +319,7 @@ being assembled, not the one before it.
 So every item below compacts in one of exactly two places:
 
 - **At insertion time**, when a tool result is first appended. The prefix is untouched, the
-  cache survives, the new message is smaller. → C1, C2, C4, C5
+  cache survives, the new message is smaller. → C1a, C1, C5
 - **At synthesis time**, where the cache is already forfeit and compaction is free. → C3
 
 ---
@@ -322,19 +373,37 @@ What is wrong is the scope. The rule applies to every hit under one shared budge
 circulars each get a full letter and the answer cites one in twelve. 1,574,863 characters of
 complete covering letters went to circulars no answer referenced.
 
-Tier by what the retrievers actually said:
+The obvious fix is to tier by what the retrievers said — full letter for the top ranks,
+passages below. **Measured, that trade is close to 1:1 and this item is not the free win it
+looks like.** Cutoff `k` in either arm, over the 1,106 traced entries that carried a letter:
 
-- **rank ≤ 3 in either arm** → full letter, as today
-- **rank 4–10** → matched passages only
-- **below that** → title, reference, date, summary, citation
+| Cutoff | Body chars saved | Cited letters that keep their body |
+|---|---|---|
+| ≤ 1 | 86.6% | 28/88 = 32% |
+| ≤ 2 | 75.0% | 43/88 = 49% |
+| ≤ 3 | 64.6% | 52/88 = 59% |
+| ≤ 5 | 43.4% | 63/88 = 72% |
+| ≤ 8 | 17.2% | 81/88 = 92% |
 
-`attachment_text_chars` stays on every tier, so a low-ranked circular with annexures is still
-recognisable as one and the model can spend a `get_circular_details` call on it — the intended
-path, which C1 has just made cheap.
+There is no knee. Saving tracks loss almost proportionally, which says **rank is barely
+predictive of which letter the answer ends up using** — 41% of the letters actually cited were
+ranked below 3 in both arms. That is a finding about the retrieval ranking, not about the
+budget, and it is the same weakness `docs/CHAT_REDESIGN.md` §3 is built around.
 
-Under C0 this matters more, not less: on a 32k model the inline-body ceiling is 7,280
-characters, which is one and a half letters. Choosing *which* one and a half is now the whole
-of the decision.
+So C2 should not ship as written. Two ways forward, in order of confidence:
+
+1. **Take the lossless part first (C1a, §5.12).** Roughly 20% of search output is the identical
+   bytes sent twice. Spend that before spending anything that costs recall.
+2. **Then make rank worth tiering on**, via C11's status filter, which removes noise from the
+   ranking. Re-run this curve afterwards. If a knee appears, tier at
+   it; if it stays linear, the honest conclusion is that the letter budget should be spent on
+   *fewer, better-chosen documents* — which is the evidence card in `CHAT_REDESIGN.md` §5, not a
+   cutoff.
+
+Dropping the body still leaves `matching_passages` and `attachment_text_chars`, so a demoted
+circular remains citable and remains recognisable as a cover letter. The 41% above are letters
+the answer would have had to cite from passages instead — not documents it would have lost. That
+softens the risk; it does not make the trade free.
 
 ### 5.3 — C3. Supersession pass before `_fair_shares`
 
@@ -354,21 +423,44 @@ message list anyway and its cache hit rate is 0.0% across all five traced occurr
 lands on the largest single request in the sample: the 285,007-token request was a
 `chat.final_synthesis`.
 
-### 5.4 — C4. One merged result list carrying both ranks
+### 5.4 — C4. ~~One merged result list carrying both ranks~~ — retired into C1a
 
-*`ai.py:3441` `_passage_sets`, `ai.py:3653`. 14.0% of `search_corpus` output. Effort S.*
+*Do not merge the arms. Dedup them in place instead — §5.12.*
 
-`_passage_sets` charges a circular appearing in both arms twice, deliberately: *"the lists are
-meant to be readable independently"*. Measured, that is 223,133 chars across 22 calls, with a
-median of 2 circulars overlapping out of 10 + 10.
+C4 originally proposed collapsing `lexical_results` and `semantic_results` into one list, each
+row carrying both ranks. That was wrong on the design, and barely better on the numbers.
 
-Emit one list per circular carrying both `lexical_rank` and `semantic_rank`, with `null`
-meaning *this arm did not return it*. Every bit of the agreement signal the dual-arm design
-exists to preserve is still there and arguably more legible — agreement becomes a property of
-one row instead of something the reader reconstructs by matching citations across two lists.
+**On the design.** `dual_arm_search` (`search.py:1609`) exists *because* fusing was wrong for
+chat. Its docstring: the title and recency bonuses are "an order of magnitude larger than the
+entire RRF range", so "a circular that names the topic only in its body or an annexure
+therefore cannot outrank one that names it in the title, however much better the retrieval
+judged it to be. Handing the model both ranked lists keeps that signal intact and lets it
+decide."
 
-The tool description at `ai.py:134` needs the corresponding edit, which also trims the largest
-description in the schema.
+A single merged list has to be ordered by *something*. Whatever that something is — min rank,
+RRF, lexical-first — it is a fusion decision, which is the decision this design deliberately
+declined to make. Two lists carry two orderings for free.
+
+The merge's claimed benefit was that agreement becomes a property of one row. It already is:
+`lexical_rank` and `semantic_rank` are on every row of both lists, and they cost 1 ch/row each.
+
+**On the numbers.** The duplicated *rows* are not the cost; the duplicated *evidence* is.
+Across 237 duplicated rows in the traced turns:
+
+| | Chars | Share of search output |
+|---|---|---|
+| Full second copy — what a merge removes | 643,268 | 12.62% |
+| ├ `full_circular_text` | 268,091 | 5.26% |
+| ├ `matching_passages` | 197,831 | 3.88% |
+| └ everything else (506 ch/row) | 145,804 | 2.86% |
+
+And that residual is mostly droppable too — 96 ch/row of `matching_passage`, 30 of
+`matching_passage_excerpt` (both duplicated evidence), 64 of `url` (the citation handle is what
+the model cites with; the URL is never used), 56 of `tags`.
+
+Keep the row, drop the evidence, and a repeat lands at **~260 ch against 2,714** — about **90%
+of what a merge would remove**, with both lists still readable top to bottom. That is C1a's
+mechanism, not a separate item, so C4 is retired into §5.12 rather than kept as an alternative.
 
 ### 5.5 — C5. Repeat-call guard keyed on what was resolved
 
@@ -481,6 +573,156 @@ item.
 
 *New. −1 whole turn on a hit. Effort M.* See §6.
 
+### 5.11 — C11. Status-aware ranking and amender annotation
+
+*`search.py:1025` `_apply_circular_filters`, and the two arms of `dual_arm_search`
+(`search.py:1609`). **Net −8.8% of search output**, plus the correctness win in §3.3. Effort S.*
+
+Two clauses, and they are not the same clause.
+
+**Exclude what has been withdrawn.** `superseded` and `cancelled` circulars come out of the
+result set unless the question is explicitly historical or about supersession itself. That is a
+`WHERE` on a column that already exists and is already maintained, and it returns 517,902 ch
+across the traced turns — **10.2% of all search output**, 11.7% of it in full covering letters,
+the most expensive payload item there is.
+
+**Name the amender on the row.** Every `amended` result carries its amending circulars as
+citations. The document is not fetched — the annotation is ~140 ch against ~2,000 for a letter,
+and it adds 71,140 ch across the traced turns (+1.4%), for a **net of −8.8%**:
+
+```json
+{"citation": "[[c:BPRD-C-07-2019]]", "status": "amended",
+ "amended_by": [{"citation": "[[c:BPRD-C-03-2021]]", "date": "2021-02-11", "type": "amends"}],
+ "note": "read the amending circular before quoting a figure from this one"}
+```
+
+**Cap the fan-out.** Median fan-out is 1 and p90 is 3, but `BSD Circular No.18 of 2001` has
+**266 amenders**. Uncapped, annotating that one row costs ~16,000 ch. Name the 3 most recent
+and add `"and 263 earlier amendments"`.
+
+Two things this must *not* do:
+
+- **Do not drop `amended` results.** They are still the rule. Dropping the base text where the
+  requirements live, to avoid a figure that may have moved, is a worse failure than the one
+  being fixed.
+- **Do not demote them either.** The `amended` bucket includes every target of an `adds_to` or
+  `clarifies` edge — 1,858 of the 3,172 relationships — where nothing was changed. Ranking a
+  circular lower because someone once clarified it is noise, not signal.
+
+**What makes the annotation enough.** It converts a silent failure into a visible one: the
+model can no longer read an amended circular without being told, imperatively, that something
+changed it — and it is handed the handle. Fetching the amender is an escalation the loop
+already supports, and after C1a and C5 it is cheap. What makes it *safe* is not pre-fetching
+but checking afterwards: an answer that cites an `amended` circular and never mentions the
+amendment is one join away from being flagged. That check is `CHAT_REDESIGN.md` §7 check 4, and
+it costs nothing.
+
+**Interaction with the rest of the plan.** C11 lands *before* C1 on purpose: C1 decides what to
+keep out of a fixed budget, and it is worth having it make that decision over a candidate set
+that no longer contains withdrawn text.
+
+**How to verify.** This is the one item here whose effect is on answer quality rather than
+request size, so `--section simulate` will not show it. Measure it with
+`benchmarks/run_pilot.py` and `benchmarks/check_citations.py` against
+`benchmarks/pilot-v1-questions.md`, and re-run `chat_context_audit.py --section waste` to
+confirm the payload reduction separately.
+
+### 5.12 — C1a. Suppress the second copy of a document (the lossless core of C1)
+
+*`ai.py:3565` `_dedupe_repeat_row`, spent by `_search_result_payload` and
+`_law_search_payloads`; ledger on `AIClient`, reset in both chat loops.
+**19.8% of search output**, lossless. Effort XS. **☑ Landed**, pinned by
+`tests/test_turn_text_ledger.py` (15 tests).*
+
+C1's fidelity ladder is effort M because deciding whether a second copy is an *upgrade* needs
+the ladder. But a large part of the duplication needs no such judgement, because the second
+copy is byte-identical to the first:
+
+| | Full letters | Passages | Total | Share of search output |
+|---|---|---|---|---|
+| Same circular serialized in **both arms of one call** | 260,545 ch | 197,831 ch | 458,376 ch | **9.0%** |
+| Same circular re-sent in a **later call of the same turn** | 380,112 ch | 172,597 ch | 552,709 ch | **10.8%** |
+| Combined | 640,657 ch | 370,428 ch | **1,011,085 ch** | **19.8%** |
+
+`_inline_body_texts` already dedupes its *budget* by `circular.id` — the docstring says so, and
+`test_budget_is_charged_once_for_a_circular_in_both_arms` pins it. What is not deduped is the
+*serialization*: `_search_result_payload` is called once per arm and looks the same body up
+both times, so the letter goes on the wire twice. `_passage_sets` charges twice on purpose
+(`test_passage_budget_charges_a_circular_served_in_both_arms_twice`), on the argument that the
+two lists must be independently readable.
+
+**The fix keeps both lists, both rank fields, and every row in place.** Only the evidence moves.
+A repeat row keeps what identifies it and drops what repeats:
+
+```json
+{"citation": "[[c:BPRD-C-07-2019]]", "reference": "BPRD Circular No. 07 of 2019",
+ "title": "Enhanced Due Diligence Requirements", "date": "2019-05-14", "status": "amended",
+ "lexical_rank": 7, "semantic_rank": 2, "evidence_provided_above": true}
+```
+
+Dropped on a repeat: `full_circular_text`, `matching_passages`, `matching_passage`,
+`matching_passage_excerpt` — all four are duplicated evidence — plus `url` and `tags`, which
+carry nothing the first copy did not. Measured, that takes a repeat from **2,714 ch to ~260 ch**:
+
+| | Chars | Share of search output |
+|---|---|---|
+| `full_circular_text` on a repeat | 268,091 | 5.26% |
+| `matching_passages` on a repeat | 197,831 | 3.88% |
+| window text, `url`, `tags` on a repeat | ~90,000 | ~1.8% |
+| **removed** | **~556,000** | **~10.9%** *(intra-call)* |
+| kept, so both lists stay readable | ~62,000 | ~1.2% |
+
+That is **~90% of what merging the two arms would remove**, without merging them — see §5.4 for
+why merging is the wrong trade. Add the cross-call half and the item reaches the 19.8% above.
+
+Scope is the **turn**, not the call, so the same mechanism collects both rows of the table.
+`AIClient` is constructed per request and serves exactly one turn, so
+`self._sent_text_keys: dict[str, list[str]]`, reset at the top of `_chat_impl` and
+`_stream_chat_impl`, is enough — the same shape as the existing `self._context_budget`.
+
+**What shipped, against the sketch above.** Two differences, both deliberate:
+
+- The marker is **two keys, not one**: `duplicate_of_earlier_entry: true` says the row is a
+  repeat, and `text_provided_earlier: ["full_circular_text", ...]` names what the first row
+  carried. One boolean was not enough. A stripped row with no pointer reads as a document
+  whose text is *unavailable*, and the model answers that — or spends a
+  `get_circular_details` round recovering what is already in its own context, which costs
+  more than the duplicate did. `matching_passage_excerpt` is dropped but not named: it is a
+  window on text the pointer already names.
+- The ledger stores **which text keys went out**, not just that the document was seen, which
+  is what lets the pointer be specific and is the shape C1's fidelity ladder needs anyway.
+
+**The allocators had to change too, and this is the part that is easy to get wrong.**
+Withholding at serialization alone would leave `_inline_body_texts`, `_passage_sets` and the
+law loop *charging* their ceilings for bytes that never leave — so a second search call would
+have spent its whole letter budget on documents it then stripped, and the genuinely new
+circulars behind them would arrive with no text at all. That trades a context saving for a
+worse answer, which is the one outcome this item must not have. All three now skip the charge
+for a document already sent, and `_passage_sets` charges **one** copy rather than one per arm,
+because one is now what goes on the wire. `test_a_withheld_letter_does_not_consume_the_inline_budget`
+and its two siblings pin it.
+
+**Known limit.** A later row cannot *upgrade* an earlier one: a circular first seen with only
+an excerpt keeps the excerpt even if a later search would have matched real passages. Deciding
+when a second copy is an upgrade is exactly the judgement C1's fidelity ladder exists to make,
+and this item is deliberately the part that needs none.
+
+Why it went first:
+
+- **It is lossless by construction.** The model is not being asked to work from less; it is
+  being asked not to read the same letter twice. Nothing else in this plan can say that.
+- **It is the smallest diff here.** One new function, three allocator guards, one instance
+  attribute, one paragraph in the `search_corpus` description. No existing test changed.
+- **It is C1's mechanism at reduced scope.** When the fidelity ladder lands, `_sent_text_keys`
+  becomes the ledger and `_dedupe_repeat_row` is its write path, not something thrown away.
+- **It absorbs C4.** Retiring the arm merge into this item (§5.4) means the dual-arm
+  duplication is fixed here, in place, without a fusion decision `dual_arm_search` deliberately
+  declined to make.
+
+Two care points: the date-sorted branch of `search_corpus` (`ai.py:3673`) passes a single
+`results` list and must share the same set; and `reference_matches` is a third list that can
+carry the same circular as either arm, so it has to participate too.
+
 ---
 
 ## 6. In-app caching — what actually saves a request
@@ -571,10 +813,18 @@ for C8 in one sentence.
 
 ## 8. What lands when
 
-**First:** C1. Largest single win, and C3, C5 and C6 all reuse its ledger.
+**First:** C1a. Smallest diff in this document, lossless by construction, 19.8% of search
+output. One serializer, two call sites, one instance attribute, one existing test inverted.
 
-**Then, independently:** C2 and C4 — local edits to the search payload, neither depending on
-the other.
+**Then:** C11. The only item that improves the answer rather than the request, and it shrinks
+the candidate set every later item has to budget. Measure it with the pilot set, not with
+`--section simulate`.
+
+**Then:** C1. Largest context win, and C3, C5 and C6 all reuse its ledger — C1a is already its
+write path.
+
+**Not C2, and not C4** — C4 is retired into C1a (§5.4), and C2's curve should be re-measured
+after C11 before anyone decides on it.
 
 **Then the small ones:** C5 and C6, both cheap once C1 exists.
 

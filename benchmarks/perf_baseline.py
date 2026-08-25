@@ -70,10 +70,11 @@ def _landing_payload() -> list[Path]:
     import re
 
     entry_names = re.findall(
-        r'(?:src|href)="/spa/assets/([^"]+)"', (SPA_DIR / "index.html").read_text()
+        r'(?:src|href)="/spa/assets/([^"]+)"',
+        (SPA_DIR / "index.html").read_text(encoding="utf-8"),
     )
     entry_js = next(name for name in entry_names if name.endswith(".js"))
-    source = (SPA_ASSETS / entry_js).read_text()
+    source = (SPA_ASSETS / entry_js).read_text(encoding="utf-8")
 
     table = re.search(r"d=\(m\.f\|\|\(m\.f=\[(.*?)\]\)\)", source, re.S)
     names = re.findall(r'"([^"]+)"', table.group(1)) if table else []

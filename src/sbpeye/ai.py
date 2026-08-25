@@ -166,7 +166,12 @@ TOOLS = [
                 "without using its words.\n"
                 "Judge both lists yourself; neither is authoritative. Each entry carries "
                 "`lexical_rank` and `semantic_rank`, so you can see which circulars both "
-                "retrievers agreed on. Pay particular attention to a circular ranked highly by "
+                "retrievers agreed on. A circular both arms returned, or one an earlier "
+                "search in this conversation already returned, carries its text ONCE: the "
+                "later entry is marked `duplicate_of_earlier_entry` and names in "
+                "`text_provided_earlier` what the first entry gave you. That is a pointer "
+                "upwards, not a missing document — scroll back for the text rather than "
+                "fetching it again. Pay particular attention to a circular ranked highly by "
                 "`semantic_results` whose title looks unrelated — that usually means the answer "
                 "sits in an attachment rather than the covering letter, and consolidated "
                 "frameworks that revise earlier limits often look like this. Call "
@@ -1044,6 +1049,35 @@ SEARCH_INLINE_BODY_BUDGET_CHARS = 40_000
 # circular budget on purpose: a law hit is a pointer to open with get_law_details, not a
 # reading of the instrument, and the two corpora share one context window.
 LAW_SEARCH_PASSAGE_BUDGET_CHARS = 8_000
+
+# A turn hands the model each document's text once. A later row for the same document —
+# the other retrieval arm, or a subsequent search — keeps only what says *where it ranked*,
+# and points at the row that carried the text.
+#
+# The duplication is not a rounding error. Measured over the traced turns, across 5,096,863
+# characters of search output: 458,376 characters were the same circular serialized twice
+# inside one response (both arms read the same `_inline_body_texts` / `_passage_sets`
+# lookup, so the copies are byte-identical), and 552,709 more were the same circular
+# returning in a later call of the same turn. Law passages repeat at 40.2%. Together,
+# 19.8%. A duplicated row costs ~2,714 characters and carries nothing new; reduced to the
+# keys below it costs ~260.
+#
+# These are allowlists rather than a list of things to strip, because the failure mode of
+# a denylist here is silent: a field added to the payload later would start being
+# duplicated again and nothing would say so.
+_REPEAT_ROW_KEYS = (
+    "title", "reference", "department", "date", "status", "citation",
+    "lexical_rank", "semantic_rank",
+)
+_REPEAT_LAW_ROW_KEYS = (
+    "title", "law_type", "part_label", "citation", "lexical_rank", "semantic_rank",
+)
+# The keys within those payloads that carry substantive document text, named in the
+# pointer so the model can tell what it already has rather than only that it has
+# something. `matching_passage_excerpt` is deliberately absent: it is a 25-word window on
+# text the pointer already names, so a repeat row drops it like everything else but
+# saying "you were given an excerpt" adds nothing to "you were given the letter".
+_DOCUMENT_TEXT_KEYS = ("full_circular_text", "matching_passages", "passages")
 # Ceiling on the matched-chunk text handed over whole across one search response.
 # Chunks average ~1.5k chars, so this covers the head of both arms — which is where
 # a wrong passage does its damage, because that is what the model reads first.
@@ -1251,6 +1285,11 @@ class AIClient:
             else "json_object"
         )
         self._context_budget: int | None = None
+        # Which text-bearing payload keys this turn has already sent, per document id.
+        # Reset at the top of each chat loop; spent by `_withhold_repeated_text`. One
+        # `AIClient` serves one request and therefore one turn, so instance scope is
+        # turn scope — the same reasoning `_context_budget` above relies on.
+        self._sent_text_keys: dict[str, list[str]] = {}
 
     def _create_client(self) -> Any:
         if self.config.provider == "ollama":
@@ -3403,7 +3442,9 @@ SOURCE BLOCKS:
 
     @staticmethod
     def _inline_body_texts(
-        *result_groups: list[dict], budget: int = SEARCH_INLINE_BODY_BUDGET_CHARS
+        *result_groups: list[dict],
+        budget: int = SEARCH_INLINE_BODY_BUDGET_CHARS,
+        sent: dict[str, list[str]] | None = None,
     ) -> dict[str, str]:
         """Pick which hits are short enough to hand over whole, within one budget.
 
@@ -3431,6 +3472,14 @@ SOURCE BLOCKS:
                 body = (circular.content_text or "").strip()
                 if not body or len(body) > SEARCH_INLINE_BODY_MAX_CHARS:
                     continue
+                # Sent earlier in this turn: recorded so the serializer can mark it as
+                # provided-earlier, but not charged, because the bytes are not going out
+                # again. Charging would spend the ceiling on a letter that gets stripped
+                # and starve the letters after it, which is the one way this change could
+                # make an answer worse.
+                if sent is not None and circular.id in sent:
+                    texts[circular.id] = body
+                    continue
                 if len(body) > remaining:
                     return texts
                 texts[circular.id] = body
@@ -3442,6 +3491,7 @@ SOURCE BLOCKS:
         *result_groups: list[dict],
         body_texts: dict[str, str],
         budget: int = SEARCH_PASSAGE_BUDGET_CHARS,
+        sent: dict[str, list[str]] | None = None,
     ) -> dict[str, list[dict]]:
         """Pick which hits hand over their matched chunks whole, within one budget.
 
@@ -3476,7 +3526,14 @@ SOURCE BLOCKS:
                 circular = result["circular"]
                 if circular.id in chosen:
                     continue
+                # How many copies of this text the response will actually carry, which is
+                # what the budget is for. Without the turn ledger a circular in both arms
+                # is serialized in both, so it costs twice. With the ledger only the first
+                # occurrence keeps its passages, so it costs once — and if this turn has
+                # already sent them, the entry is stripped downstream and costs nothing.
                 copies = appearances.get(circular.id, 1)
+                if sent is not None:
+                    copies = 0 if circular.id in sent else 1
                 kept: list[dict] = []
                 spent = 0
                 for passage in result.get("passages") or []:
@@ -3497,10 +3554,53 @@ SOURCE BLOCKS:
         return chosen
 
     @staticmethod
+    def _dedupe_repeat_row(
+        payload: dict,
+        document_id: str,
+        row_keys: tuple[str, ...],
+        sent: dict[str, list[str]] | None,
+    ) -> dict:
+        """Reduce `payload` to a pointer when this turn already serialized the document.
+
+        Returns the payload to send — the original on a document's first appearance, a
+        reduced dict on every later one. A `sent` of ``None`` disables the ledger, which
+        is what every caller outside a chat turn gets: "already sent" only means something
+        within one conversation, and a serializer reached from anywhere else must not
+        withhold on the strength of a turn that is not happening.
+
+        What survives is identity and placement — enough to read the row as *this document
+        also ranked here*, which is the whole of what a second row was ever telling the
+        model. `duplicate_of_earlier_entry` marks it, and `text_provided_earlier` names
+        which text keys the earlier row carried, so the model can tell what it already has
+        rather than only that it has something. Without that pointer a stripped row reads
+        as a document whose text is unavailable, and the model spends a
+        `get_circular_details` round recovering what is already in its context — which
+        would cost more than the duplicate did.
+
+        Scope is the turn: `docs/CHAT_CONTEXT_PLAN.md` C1a. The known limit is that a later
+        row cannot *upgrade* an earlier one — a circular first seen with only an excerpt
+        keeps the excerpt even if a later search would have matched real passages. Deciding
+        when a second copy is an upgrade is C1's fidelity ladder, and this is deliberately
+        the part that needs no such judgement.
+        """
+        if sent is None:
+            return payload
+        previous = sent.get(document_id)
+        if previous is None:
+            sent[document_id] = [key for key in _DOCUMENT_TEXT_KEYS if key in payload]
+            return payload
+        reduced = {key: payload[key] for key in row_keys if key in payload}
+        reduced["duplicate_of_earlier_entry"] = True
+        if previous:
+            reduced["text_provided_earlier"] = previous
+        return reduced
+
+    @staticmethod
     def _search_result_payload(
         result: dict,
         body_texts: dict[str, str] | None = None,
         passage_sets: dict[str, list[dict]] | None = None,
+        sent: dict[str, list[str]] | None = None,
     ) -> dict:
         """Serialize one search result for a tool response.
 
@@ -3510,6 +3610,11 @@ SOURCE BLOCKS:
         granted it, is the complete covering letter — but a letter is not a document:
         `attachment_text_chars` reports how much annexure text sits behind it that no
         field here contains, which is what makes a cover letter recognisable as one.
+
+        `sent` is the turn's text ledger. Both retrieval arms serialize from the same
+        `body_texts`/`passage_sets` lookups, so a circular in both arms produces two
+        byte-identical copies; across calls the same circular comes back again. The
+        ledger sends the text once — see `_withhold_repeated_text`.
         """
         circular = result["circular"]
         matching_passage = re.sub(r"</?mark>", "", result.get("snippet") or "")
@@ -3566,11 +3671,16 @@ SOURCE BLOCKS:
         for key in ("lexical_rank", "semantic_rank"):
             if key in result:
                 payload[key] = result[key]
-        return payload
+        return AIClient._dedupe_repeat_row(
+            payload, circular.id, _REPEAT_ROW_KEYS, sent
+        )
 
     @staticmethod
     def _law_search_payloads(
-        results: list[dict], *, budget: int = LAW_SEARCH_PASSAGE_BUDGET_CHARS
+        results: list[dict],
+        *,
+        budget: int = LAW_SEARCH_PASSAGE_BUDGET_CHARS,
+        sent: dict[str, list[str]] | None = None,
     ) -> list[dict]:
         """Serialize the law arm of a search response, under one shared budget.
 
@@ -3599,17 +3709,22 @@ SOURCE BLOCKS:
                 # from a snippet.
                 payload["full_text_chars"] = len(version.content_text)
             passages = [item for item in (result.get("passages") or []) if item.get("text")]
+            # Serialized as usual and stripped by `_withhold_repeated_text` below when this
+            # turn already sent them. Not charged, for the reason `_inline_body_texts`
+            # gives: budget spent on bytes that never leave starves the laws after it.
+            charged = sent is None or document.id not in sent
             kept: list[dict] = []
             for item in passages:
                 text = item["text"].strip()
-                if len(text) > remaining:
+                if charged and len(text) > remaining:
                     break
                 kept.append({
                     "passage": text,
                     "locator": item.get("source_ref"),
                     "page": item.get("source_page"),
                 })
-                remaining -= len(text)
+                if charged:
+                    remaining -= len(text)
             if kept:
                 payload["passages"] = kept
             elif result.get("snippet"):
@@ -3619,7 +3734,11 @@ SOURCE BLOCKS:
             for key in ("lexical_rank", "semantic_rank"):
                 if key in result:
                     payload[key] = result[key]
-            payloads.append(payload)
+            payloads.append(
+                AIClient._dedupe_repeat_row(
+                    payload, document.id, _REPEAT_LAW_ROW_KEYS, sent
+                )
+            )
         return payloads
 
     def _execute_tool(
@@ -3676,14 +3795,17 @@ SOURCE BLOCKS:
                         )
                         relaxed_department = bool(results)
                     inline_budget, passage_budget, _ = self._search_payload_budgets()
-                    body_texts = self._inline_body_texts(results, budget=inline_budget)
+                    sent = self._sent_text_keys
+                    body_texts = self._inline_body_texts(
+                        results, budget=inline_budget, sent=sent
+                    )
                     passage_sets = self._passage_sets(
-                        results, body_texts=body_texts, budget=passage_budget
+                        results, body_texts=body_texts, budget=passage_budget, sent=sent
                     )
                     return json.dumps({
                         "ranking": "date",
                         "results": [
-                            self._search_result_payload(r, body_texts, passage_sets)
+                            self._search_result_payload(r, body_texts, passage_sets, sent)
                             for r in results
                         ],
                         "count": len(results),
@@ -3710,18 +3832,27 @@ SOURCE BLOCKS:
 
                 law_results = arms.pop("law_results", [])
                 inline_budget, passage_budget, law_budget = self._search_payload_budgets()
-                body_texts = self._inline_body_texts(*arms.values(), budget=inline_budget)
-                passage_sets = self._passage_sets(
-                    *arms.values(), body_texts=body_texts, budget=passage_budget
+                sent = self._sent_text_keys
+                body_texts = self._inline_body_texts(
+                    *arms.values(), budget=inline_budget, sent=sent
                 )
+                passage_sets = self._passage_sets(
+                    *arms.values(), body_texts=body_texts, budget=passage_budget, sent=sent
+                )
+                # `arms` is ordered reference_matches, lexical_results, semantic_results, so
+                # the strongest hit is the one that carries the text and the weaker arms
+                # point back at it. Which arm wins does not affect what the model reads —
+                # every arm serializes the same lookup, so the copies were identical.
                 payload = {
                     key: [
-                        self._search_result_payload(r, body_texts, passage_sets)
+                        self._search_result_payload(r, body_texts, passage_sets, sent)
                         for r in results
                     ]
                     for key, results in arms.items()
                 }
-                law_payload = self._law_search_payloads(law_results, budget=law_budget)
+                law_payload = self._law_search_payloads(
+                    law_results, budget=law_budget, sent=sent
+                )
                 unique = {
                     item["citation"]
                     for results in payload.values() for item in results
@@ -4365,6 +4496,9 @@ circular on an adjacent topic for a statute you could not retrieve.
         selected_circular_ids: list[str] | None = None,
     ) -> str:
         handles = CitationHandles()
+        # One turn, one ledger. `AIClient` is built per request so this is already empty,
+        # but the reset states the scope rather than relying on the caller's lifecycle.
+        self._sent_text_keys = {}
         full_messages = self._chat_full_messages(
             messages, circulars_context, selected_circular_ids, handles
         )
@@ -4475,6 +4609,9 @@ circular on an adjacent topic for a statute you could not retrieve.
         selected_circular_ids: list[str] | None = None,
     ):
         handles = CitationHandles()
+        # One turn, one ledger. `AIClient` is built per request so this is already empty,
+        # but the reset states the scope rather than relying on the caller's lifecycle.
+        self._sent_text_keys = {}
         full_messages = self._chat_full_messages(
             messages, circulars_context, selected_circular_ids, handles
         )

@@ -749,12 +749,43 @@ def _collect_evidence(
 
 # bm25() column weights, applied at query time. Reference outranks title
 # outranks body, mirroring the old title×3 / reference×5 token duplication.
-FTS_WEIGHTS: tuple[float, float, float] = (3.0, 5.0, 1.0)  # title, reference, body
+# One weight per column of `_FTS_CREATE_SQL`, in declaration order. FTS5 assigns bm25
+# weights positionally across *every* column, including UNINDEXED ones, so the leading
+# 0.0 for `circular_id` is load-bearing: without it each weight lands one column to the
+# left and the last column silently keeps the default of 1.0. That is what shipped —
+# `(3.0, 5.0, 1.0)` documented as "title, reference, body" actually ran as
+# circular_id=3.0 (inert), title=5.0, reference=1.0, body=1.0, so the reference column
+# was weighted a fifth of what was intended and the body weight was never applied.
+#
+# Values measured rather than assumed, over the 8 topical and 8 reference-shaped queries
+# derived from `benchmarks/pilot-v1-answer-key.md` — see `tests/test_fts_weights.py`:
+#
+#     weighting            topical MRR   top-10      reference MRR   top-10
+#     (t=5,  r=1)  shipped       0.504      6/8               0.106      4/8
+#     (t=3,  r=5)  intended      0.504      6/8               0.190      5/8
+#     (t=50, r=50) here          0.577      6/8               0.450      8/8
+#     (t=150,r=150)              0.515      6/8               0.569      8/8
+#
+# Topical relevance plateaus from about 25 and falls off a cliff at 150; reference recall
+# keeps climbing past it. 50 sits mid-plateau on both and three times below the cliff,
+# which matters more than either peak on a sixteen-query sample.
+FTS_WEIGHTS: tuple[float, ...] = (0.0, 50.0, 50.0, 1.0)  # id, title, reference, body
 
 _FTS_CREATE_SQL = (
     "CREATE VIRTUAL TABLE IF NOT EXISTS circulars_fts USING fts5("
     "circular_id UNINDEXED, title, reference, body, tokenize='unicode61')"
 )
+
+
+def _bm25_order_by(table: str, weights: tuple[float, ...]) -> str:
+    """`ORDER BY bm25(...)` with one weight per column, formatted from the tuple itself.
+
+    Built from `len(weights)` rather than a fixed `%g, %g, %g`, so a column added to the
+    table and to its weight tuple cannot leave the format string one short — which is the
+    shape of the bug this replaces, and which SQLite reports as nothing at all: FTS5
+    accepts a short weight list and defaults the rest.
+    """
+    return "bm25(%s, %s)" % (table, ", ".join(f"{w:g}" for w in weights))
 
 
 def _fts_reference_tokens(reference: str | None) -> list[str]:
@@ -858,7 +889,16 @@ def backfill_fts(db: Session, force: bool = False) -> None:
 # A separate table rather than a doc_kind column on circulars_fts: the two corpora have
 # different column shapes (a law has no reference; it has a part label), and keeping them
 # apart means nothing about circular search can regress.
-LAW_FTS_WEIGHTS: tuple[float, float, float] = (3.0, 4.0, 1.0)  # title, part_label, body
+# One weight per column, same rule and the same defect as `FTS_WEIGHTS` above: shipped as
+# three weights against four columns, so `title=3, part_label=4, body=1` actually ran as
+# document_id=3.0 (inert), title=4.0, part_label=1.0, body=1.0.
+#
+# The values are left at what the comment always claimed, because unlike the circular
+# index there is nothing to tune against: across the seven law-sourced benchmark queries
+# the ranking is *identical* at every weighting from (3, 4) to (200, 200) — a law target
+# either ranks first or is nowhere near, and column weighting does not move it. Changing
+# these numbers on that evidence would be guessing. Fixing the arity is not.
+LAW_FTS_WEIGHTS: tuple[float, ...] = (0.0, 3.0, 4.0, 1.0)  # id, title, part_label, body
 
 _LAW_FTS_CREATE_SQL = (
     "CREATE VIRTUAL TABLE IF NOT EXISTS laws_fts USING fts5("
@@ -1093,7 +1133,7 @@ class SearchEngine:
         # Quote every term so FTS5 treats it as a literal (never as a bare
         # operator), doubling any embedded quote; OR them across all columns.
         match_query = " OR ".join('"%s"' % t.replace('"', '""') for t in terms)
-        order_by = "bm25(circulars_fts, %g, %g, %g)" % FTS_WEIGHTS
+        order_by = _bm25_order_by("circulars_fts", FTS_WEIGHTS)
         try:
             rows = db.execute(
                 text(
@@ -1254,7 +1294,7 @@ class SearchEngine:
 
         _law_fts_ensure_table(db.connection())
         match_query = " OR ".join('"%s"' % t.replace('"', '""') for t in terms)
-        order_by = "bm25(laws_fts, %g, %g, %g)" % LAW_FTS_WEIGHTS
+        order_by = _bm25_order_by("laws_fts", LAW_FTS_WEIGHTS)
         try:
             rows = db.execute(
                 text(

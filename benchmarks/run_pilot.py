@@ -26,7 +26,6 @@ import re
 import time
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 SESSION_COOKIE = "sbpeye_session"
@@ -96,7 +95,6 @@ def main() -> None:
     parser.add_argument("--questions", default=str(HERE / "pilot-v1-questions.md"))
     parser.add_argument("--out", required=True, help="directory for the captured answers")
     parser.add_argument("--url", default="http://localhost:8000/api/chat")
-    parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--only", default="", help="comma-separated items, e.g. P03,P07")
     parser.add_argument(
@@ -117,12 +115,8 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     print(f"{len(questions)} question(s) -> {out}\n")
 
-    with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        for line in pool.map(
-            lambda kv: ask(args.url, kv[0], kv[1], out, args.timeout, args.cookie),
-            questions.items(),
-        ):
-            print(line, flush=True)
+    for item, question in questions.items():
+        print(ask(args.url, item, question, out, args.timeout, args.cookie), flush=True)
 
 
 if __name__ == "__main__":

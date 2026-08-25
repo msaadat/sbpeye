@@ -519,6 +519,7 @@ os.makedirs(STATIC_DIR, exist_ok=True)
 SPA_DIR = STATIC_DIR / "spa"
 SPA_INDEX = SPA_DIR / "index.html"
 SPA_ASSETS_DIR = SPA_DIR / "assets"
+ABOUT_ASSETS_DIR = SPA_DIR / "about_assets"
 
 
 class ImmutableStaticFiles(StaticFiles):
@@ -549,6 +550,16 @@ if SPA_ASSETS_DIR.exists():
         "/spa/assets",
         ImmutableStaticFiles(directory=SPA_ASSETS_DIR),
         name="spa-assets",
+    )
+if ABOUT_ASSETS_DIR.exists():
+    # about.html references these with a plain relative src, so the browser resolves
+    # them against /about_assets/ — nothing served that path until this mount, so the
+    # images rendered fine from the file on disk but 404'd once /about.html was served
+    # by the app.
+    app.mount(
+        "/about_assets",
+        StaticFiles(directory=ABOUT_ASSETS_DIR),
+        name="about-assets",
     )
 
 

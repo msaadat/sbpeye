@@ -49,7 +49,7 @@ PUBLIC_PATHS = frozenset({
 
 # Static assets: the login page has to be able to style itself, and these are shipped in
 # the image rather than derived from the corpus.
-PUBLIC_PREFIXES = ("/static/", "/spa/assets/", "/favicon")
+PUBLIC_PREFIXES = ("/static/", "/spa/assets/", "/about_assets/", "/favicon")
 
 
 def is_public_path(path: str) -> bool:

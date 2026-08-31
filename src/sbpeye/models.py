@@ -688,6 +688,12 @@ class ChatMessage(AppBase):
     role = Column(String, nullable=False)
     content = Column(Text, nullable=False)
     circular_ids = Column(Text, nullable=True)
+    # The research steps behind an assistant turn, as a JSON list of the digests
+    # `chat_steps.build_step` produces — one per tool call, in execution order. Kept
+    # with the message rather than derived on read because the tool payloads they
+    # describe exist only while the turn is running. Never sent with the message
+    # itself: the list is fetched a step at a time, when a reader opens one.
+    steps_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     session = relationship("ChatSession", back_populates="messages")

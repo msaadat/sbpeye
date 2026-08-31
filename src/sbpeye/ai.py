@@ -16,6 +16,7 @@ from openai import APIError, OpenAI
 
 from sqlalchemy.orm import Session
 
+from .chat_steps import build_step, failed_step
 from .checklist import compact_required_checklist
 from .citation_handles import CitationHandles, StreamExpander
 from .database import AppSessionLocal
@@ -1325,6 +1326,15 @@ class AIClient:
         # `AIClient` serves one request and therefore one turn, so instance scope is
         # turn scope — the same reasoning `_context_budget` above relies on.
         self._sent_text_keys: dict[str, list[str]] = {}
+        # One digested record per tool call this turn makes, in execution order, for
+        # the route to persist beside the answer. Turn-scoped for the same reason as
+        # the ledger above.
+        self._turn_steps: list[dict] = []
+
+    @property
+    def turn_steps(self) -> list[dict]:
+        """The research steps of the turn just run, oldest first."""
+        return list(self._turn_steps)
 
     def _create_client(self) -> Any:
         if self.config.provider == "ollama":
@@ -4541,6 +4551,14 @@ circular on an adjacent topic for a statute you could not retrieve.
                     tc["function"]["name"], args, db,
                     selected_circular_ids, user_query,
                 )
+                # Digested from the payload as the tools built it, before the rewrite
+                # below: the step is read by a person, and a person needs the real
+                # citation tokens the UI resolves, not the model's handles.
+                self._turn_steps.append(build_step(
+                    tc["function"]["name"], args, result,
+                    label=tool_activity_label(tc["function"]["name"]),
+                    elapsed_ms=round((time.monotonic() - tool_started) * 1000),
+                ))
                 if handles is not None:
                     # Recorded post-rewrite so the trace shows what the model was
                     # actually handed, handles and all.
@@ -4554,6 +4572,14 @@ circular on an adjacent topic for a statute you could not retrieve.
                     "tool_call_id": tc.get("id"), "name": tc["function"]["name"],
                     "arguments": args, "success": False, "error": exception_payload(exc),
                 }, stage="chat.tools", elapsed_ms=round((time.monotonic() - tool_started) * 1000))
+                # A turn that dies here still persists what it managed to answer, so
+                # the step that killed it belongs in the record beside the rest.
+                self._turn_steps.append(failed_step(
+                    tc["function"]["name"], args,
+                    label=tool_activity_label(tc["function"]["name"]),
+                    error=str(exc) or exc.__class__.__name__,
+                    elapsed_ms=round((time.monotonic() - tool_started) * 1000),
+                ))
                 raise
             full_messages.append({
                 "role": "tool",
@@ -4587,6 +4613,7 @@ circular on an adjacent topic for a statute you could not retrieve.
         # One turn, one ledger. `AIClient` is built per request so this is already empty,
         # but the reset states the scope rather than relying on the caller's lifecycle.
         self._sent_text_keys = {}
+        self._turn_steps = []
         full_messages = self._chat_full_messages(
             messages, circulars_context, selected_circular_ids, handles
         )
@@ -4700,6 +4727,7 @@ circular on an adjacent topic for a statute you could not retrieve.
         # One turn, one ledger. `AIClient` is built per request so this is already empty,
         # but the reset states the scope rather than relying on the caller's lifecycle.
         self._sent_text_keys = {}
+        self._turn_steps = []
         full_messages = self._chat_full_messages(
             messages, circulars_context, selected_circular_ids, handles
         )
@@ -4777,6 +4805,12 @@ circular on an adjacent topic for a statute you could not retrieve.
                     tool_activity_label(call["function"]["name"])
                     for call in ordered_calls
                 ],
+                # Where this round's calls will land in `turn_steps`. The narration
+                # that belongs to them is assembled by the route from streamed tokens
+                # and cannot be passed down here, so the route is told which steps to
+                # attach it to instead. Read before `_apply_tool_calls` runs, so it is
+                # the index of the round's first call.
+                "step_offset": len(self._turn_steps),
             }
 
             self._apply_tool_calls(

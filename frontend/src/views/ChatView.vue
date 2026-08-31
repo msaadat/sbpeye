@@ -15,6 +15,7 @@ import {
   buildDocumentContentUrl,
   deleteChatSession,
   downloadChatSessionMarkdown,
+  getChatMessageStep,
   getChatSession,
   getChatSessions,
   getCircularDetail,
@@ -25,6 +26,7 @@ import {
   truncateChatSession,
   type ChatMessage,
   type ChatSession,
+  type ChatStep,
   type CircularSummary,
   type ResolvedDocument,
 } from '@/lib/api'
@@ -80,6 +82,13 @@ const circularCitationCache = ref<Record<string, CircularSummary | null>>({})
 const activityLabel = ref('')
 const turnSteps = ref<TurnStep[]>([])
 const turnStepsSessionId = ref<string | null>(null)
+// What each opened step found, keyed `${messageId}:${index}`. A finished turn's
+// evidence is several times the size of the answer it produced and is rarely read,
+// so it does not travel with the conversation: a step is fetched when someone opens
+// it, and kept afterwards because a stored step never changes.
+const stepDetails = ref<Record<string, ChatStep>>({})
+const stepPending = ref<Record<string, boolean>>({})
+const stepErrors = ref<Record<string, string>>({})
 const elapsedSeconds = ref(0)
 let elapsedTimer: number | undefined
 
@@ -1141,12 +1150,51 @@ function isUnansweredUser(index: number): boolean {
 }
 
 /** Steps belong to the turn that just ran, so they render under the last answer
-    of the session they were produced in and nowhere else. */
+    of the session they were produced in and nowhere else. Only until it is saved:
+    a message that came back with `steps` renders those instead, which is the same
+    list, named the same way, and outlives the page. */
 function showsTurnSteps(index: number): boolean {
   return turnSteps.value.length > 0
     && turnStepsSessionId.value === currentSessionId.value
     && messages.value[index].role === 'assistant'
     && index === messages.value.length - 1
+}
+
+function stepKey(messageId: string, index: number): string {
+  return `${messageId}:${index}`
+}
+
+/** What an opened step found, or nothing while it is still closed. */
+function stepDetail(message: LocalMessage, index: number): ChatStep | undefined {
+  return stepDetails.value[stepKey(message.id, index)]
+}
+
+function stepArguments(step: ChatStep): string {
+  return Object.entries(step.arguments || {})
+    .map(([key, value]) => `${key}: ${String(value)}`)
+    .join(' · ')
+}
+
+/** Fetch one stored step the first time it is opened, and never again: a step is a
+    record of something that already happened, so it cannot change under the reader. */
+async function openStep(message: LocalMessage, index: number, event: Event) {
+  if (!(event.target as HTMLDetailsElement).open) return
+  const sessionId = currentSessionId.value
+  const key = stepKey(message.id, index)
+  if (!sessionId || stepDetails.value[key] || stepPending.value[key]) return
+
+  stepPending.value[key] = true
+  delete stepErrors.value[key]
+  try {
+    const payload = await getChatMessageStep(sessionId, message.id, index)
+    stepDetails.value[key] = payload.step
+  } catch (error) {
+    stepErrors.value[key] = error instanceof Error
+      ? error.message
+      : 'Unable to load this research step.'
+  } finally {
+    delete stepPending.value[key]
+  }
 }
 
 watch(contextQuery, () => {
@@ -1521,9 +1569,86 @@ onBeforeUnmount(() => {
               </div>
             </div>
 
-            <!-- Tool rounds, shown above the answer they produced. -->
+            <!-- Tool rounds, shown above the answer they produced. Live while the
+                 turn runs; once it is saved the same rounds come back from the
+                 server, one openable step at a time. -->
             <details
-              v-if="(message.pending || showsTurnSteps(index)) && turnSteps.length"
+              v-if="message.steps?.length"
+              class="assistant-steps"
+            >
+              <summary>
+                <i class="pi pi-wrench" />
+                <span>{{ message.steps.length }} research {{ message.steps.length === 1 ? 'step' : 'steps' }}</span>
+                <i class="pi pi-chevron-right steps-chevron" />
+              </summary>
+              <ol>
+                <li v-for="(header, stepIndex) in message.steps" :key="stepIndex">
+                  <details
+                    class="research-step"
+                    @toggle="openStep(message, stepIndex, $event)"
+                  >
+                    <summary>
+                      <span class="step-tools">{{ header.label }}</span>
+                      <i class="pi pi-chevron-right steps-chevron" />
+                    </summary>
+                    <div class="step-detail" @click="handleCitationClick">
+                      <p v-if="stepPending[stepKey(message.id, stepIndex)]" class="step-status">
+                        <i class="pi pi-spin pi-spinner" />
+                        <span>Loading</span>
+                      </p>
+                      <p
+                        v-else-if="stepErrors[stepKey(message.id, stepIndex)]"
+                        class="step-status step-status-error"
+                      >
+                        {{ stepErrors[stepKey(message.id, stepIndex)] }}
+                      </p>
+                      <template v-else-if="stepDetail(message, stepIndex)">
+                        <p v-if="stepDetail(message, stepIndex)!.note" class="step-note">
+                          {{ stepDetail(message, stepIndex)!.note }}
+                        </p>
+                        <p class="step-meta">
+                          <span
+                            v-if="stepArguments(stepDetail(message, stepIndex)!)"
+                            class="step-arguments"
+                          >{{ stepArguments(stepDetail(message, stepIndex)!) }}</span>
+                          <span class="step-summary">{{ stepDetail(message, stepIndex)!.summary }}</span>
+                        </p>
+                        <p
+                          v-if="stepDetail(message, stepIndex)!.error"
+                          class="step-status step-status-error"
+                        >
+                          {{ stepDetail(message, stepIndex)!.error }}
+                        </p>
+                        <ul v-if="stepDetail(message, stepIndex)!.hits?.length" class="step-hits">
+                          <li
+                            v-for="(hit, hitIndex) in stepDetail(message, stepIndex)!.hits"
+                            :key="hitIndex"
+                          >
+                            <span
+                              v-if="hit.citation"
+                              class="step-hit-citation"
+                              v-html="normalizeCitationTokens(hit.citation)"
+                            />
+                            <span v-else class="step-hit-title">{{ hit.title }}</span>
+                            <span class="step-hit-meta">
+                              <span v-if="hit.reference">{{ hit.reference }}</span>
+                              <span v-if="hit.date">{{ hit.date }}</span>
+                              <span v-if="hit.department">{{ hit.department }}</span>
+                              <span v-if="hit.status" class="step-hit-status">{{ hit.status }}</span>
+                              <span v-if="hit.match?.length">{{ hit.match.join(' + ') }}</span>
+                            </span>
+                            <p v-if="hit.snippet" class="step-hit-snippet">{{ hit.snippet }}</p>
+                            <p v-if="hit.note" class="step-hit-note">{{ hit.note }}</p>
+                          </li>
+                        </ul>
+                      </template>
+                    </div>
+                  </details>
+                </li>
+              </ol>
+            </details>
+            <details
+              v-else-if="(message.pending || showsTurnSteps(index)) && turnSteps.length"
               class="assistant-steps"
             >
               <summary>

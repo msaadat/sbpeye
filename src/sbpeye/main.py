@@ -50,6 +50,7 @@ from .laws_ai import (
 )
 from .checklist_export import build_checklist_workbook, circular_subject, law_subject
 from .chat_export import render_session_markdown, session_filename
+from .chat_steps import STEP_SCHEMA_VERSION
 from .embeddings import EmbeddingConfig, create_embedding_backend
 from .env import managed_env_path, set_managed_env_value, unset_managed_env_value
 from .link_routing import (
@@ -2868,6 +2869,7 @@ def get_chat_session(
                     "role": m.role,
                     "content": m.content,
                     "circular_ids": _normalize_circular_ids(_safe_json_list(m.circular_ids)),
+                    "steps": _step_headers(m, user),
                     "created_at": _isoformat(m.created_at),
                 }
                 for m in messages
@@ -2896,6 +2898,7 @@ def get_chat_session(
                 "role": m.role,
                 "content": m.content,
                 "circular_ids": _normalize_circular_ids(_safe_json_list(m.circular_ids)),
+                "steps": _step_headers(m, user),
                 "created_at": _isoformat(m.created_at),
             }
             for m in messages
@@ -3075,6 +3078,71 @@ def truncate_chat_session(
     return {"success": True}
 
 
+def _message_steps(message: ChatMessage) -> list[dict]:
+    """The stored research steps of one message, or nothing readable."""
+    return [
+        step for step in _safe_json_list(message.steps_json)
+        if isinstance(step, dict) and step.get("v") == STEP_SCHEMA_VERSION
+    ]
+
+
+def _steps_visible_to(user: User) -> bool:
+    """Whether research steps are offered to this account at all.
+
+    Admin-only while the feature settles: every turn records its steps regardless, so
+    lifting the gate later exposes the history that was accumulating behind it rather
+    than starting the record from that day.
+    """
+    return bool(user.is_admin)
+
+
+def _step_headers(message: ChatMessage, user: User) -> list[dict]:
+    """The name of each step, and nothing else.
+
+    What a step *found* does not travel with the conversation: a turn that searched
+    the corpus three times carries more evidence than the answer it produced, and
+    almost none of it is ever opened. One is fetched when a reader clicks it.
+
+    The names do travel, because a list of "Step 1, Step 2, Step 3" gives a reader no
+    way to choose which one to open — and the live turn already shows these labels as
+    it works, so a reloaded conversation would otherwise read as less than it did
+    while it was running.
+    """
+    if not _steps_visible_to(user):
+        return []
+    return [{"label": step.get("label") or "Research step"} for step in _message_steps(message)]
+
+
+@app.get("/api/chat/sessions/{session_id}/messages/{message_id}/steps/{step_index}")
+def chat_message_step(
+    session_id: str,
+    message_id: str,
+    step_index: int,
+    app_db: Session = Depends(get_app_db),
+    user: User = Depends(current_user),
+):
+    """One research step behind an answer, as it was recorded when the turn ran.
+
+    Read-only and entirely deterministic — the digest was parsed from the tool's own
+    payload at the time, so opening a step costs a database read and nothing else.
+    """
+    # 404 rather than 403 on the gate as well as on ownership: an account that is not
+    # offered steps should see the route the way it sees any path that is not there.
+    if not _steps_visible_to(user):
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    if not _owned_chat_session(app_db, session_id, user):
+        return JSONResponse({"error": "Session not found"}, status_code=404)
+    message = app_db.query(ChatMessage).filter(
+        ChatMessage.id == message_id, ChatMessage.session_id == session_id
+    ).first()
+    if not message:
+        return JSONResponse({"error": "Message not found"}, status_code=404)
+    steps = _message_steps(message)
+    if step_index < 0 or step_index >= len(steps):
+        return JSONResponse({"error": "Step not found"}, status_code=404)
+    return {"index": step_index, "step_count": len(steps), "step": steps[step_index]}
+
+
 def _build_chat_circulars_context(
     db: Session,
     circular_ids: list[str],
@@ -3216,9 +3284,13 @@ async def chat_message(
                 selected_circular_ids=turn_circular_ids,
             )
             emit_event("normalized_result", {"response": response_text}, stage="chat.result")
+            # No narration to attach on this path: without a stream there is nothing
+            # to have narrated, so the steps carry their tool labels alone.
+            steps = client.turn_steps
             assistant_msg = ChatMessage(
                 id=str(uuid.uuid4()), session_id=session_id,
                 role="assistant", content=response_text,
+                steps_json=json.dumps(steps) if steps else None,
             )
             app_db.add(assistant_msg)
             session.updated_at = datetime.utcnow()
@@ -3306,15 +3378,33 @@ async def chat_message_stream(
         # written after the last tool returned — survives as the saved answer.
         answer_parts: list[str] = []
         persisted = False
+        # The turn's client, hoisted so the persist paths below — including the ones
+        # that run after a failure — can read the research steps off it.
+        client = None
+        # (index into the step list, narration that preceded it). The model's
+        # "Let me pull the circular…" is the best label a step has, but it is
+        # assembled here from streamed tokens, so it is stitched on at the end.
+        note_marks: list[tuple[int, str]] = []
+
+        def collected_steps() -> list[dict]:
+            if client is None:
+                return []
+            steps = client.turn_steps
+            for offset, note in note_marks:
+                if 0 <= offset < len(steps):
+                    steps[offset]["note"] = note
+            return steps
 
         def persist(text: str, partial: bool) -> str | None:
             """Save the assistant turn. Returns the new message id, or None."""
             nonlocal persisted
             if persisted or not text.strip():
                 return None
+            steps = collected_steps()
             assistant_msg = ChatMessage(
                 id=str(uuid.uuid4()), session_id=session_id,
                 role="assistant", content=text,
+                steps_json=json.dumps(steps) if steps else None,
             )
             stream_app_db.add(assistant_msg)
             stream_session = stream_app_db.query(ChatSession).filter(
@@ -3362,7 +3452,18 @@ async def chat_message_stream(
                 ):
                     if isinstance(chunk, dict):
                         if chunk.get("phase") == "tools":
-                            chunk = {**chunk, "note": "".join(answer_parts).strip()}
+                            note = "".join(answer_parts).strip()
+                            offset = chunk.get("step_offset")
+                            if isinstance(offset, int) and note:
+                                note_marks.append((offset, note))
+                            # `step_offset` is bookkeeping for the note above. The
+                            # client is told nothing about stored steps here — it asks
+                            # for one when a reader opens it.
+                            chunk = {
+                                key: value for key, value in chunk.items()
+                                if key != "step_offset"
+                            }
+                            chunk["note"] = note
                             answer_parts.clear()
                         yield sse("status", chunk)
                         continue

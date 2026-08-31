@@ -203,6 +203,10 @@ class FakeAIClient:
 
     def __init__(self):
         self.config = FakeAIConfig()
+        # Part of the interface the chat routes read after a turn: they save the
+        # research steps beside the answer. A stub that answers without calling a
+        # tool has none, but it still has to have the attribute.
+        self.turn_steps = []
 
     def chat(self, messages, db, **kwargs):
         return "fake assistant reply"

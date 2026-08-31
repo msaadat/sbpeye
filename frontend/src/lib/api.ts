@@ -580,7 +580,40 @@ export interface ChatMessage {
   role: 'user' | 'assistant' | string
   content: string
   circular_ids?: string[]
+  /** The research steps behind this answer, named but not filled in. What each one
+      found is fetched when a reader opens it — see `getChatMessageStep`. */
+  steps?: { label: string }[]
   created_at?: string | null
+}
+
+/** One document a research step found. Every field but `title` may be absent: what a
+    hit carries depends on the tool that produced it, and the server drops empties
+    rather than sending nulls. */
+export interface ChatStepHit {
+  citation?: string
+  title: string
+  reference?: string
+  date?: string
+  department?: string
+  status?: string
+  snippet?: string
+  note?: string
+  /** Which arms of the search matched this document — reference, keyword, meaning. */
+  match?: string[]
+}
+
+export interface ChatStep {
+  tool: string
+  label: string
+  summary: string
+  arguments?: Record<string, unknown>
+  hits?: ChatStepHit[]
+  /** The model's own narration of why it made this call, when it wrote one. */
+  note?: string
+  error?: string
+  omitted?: number
+  incomplete?: boolean
+  elapsed_ms?: number
 }
 
 export interface ChatSessionDetail {
@@ -1341,6 +1374,23 @@ export async function truncateChatSession(
   return requestJson<{ success: boolean }>(
     `/chat/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}`,
     { method: 'DELETE' },
+  )
+}
+
+/** One research step behind an answer, fetched when the reader opens it.
+
+    Steps are not sent with the conversation: a turn that searched the corpus three
+    times carries more evidence than the answer it produced, and almost none of it is
+    ever looked at. The record is a parse of what the tool returned at the time, so
+    this is a database read — nothing is regenerated. */
+export async function getChatMessageStep(
+  sessionId: string,
+  messageId: string,
+  stepIndex: number,
+): Promise<{ index: number; step_count: number; step: ChatStep }> {
+  return requestJson<{ index: number; step_count: number; step: ChatStep }>(
+    `/chat/sessions/${encodeURIComponent(sessionId)}`
+    + `/messages/${encodeURIComponent(messageId)}/steps/${stepIndex}`,
   )
 }
 

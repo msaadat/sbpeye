@@ -589,6 +589,16 @@ def _ensure_app_columns(bind=None):
                     "ON chat_sessions (user_id)"
                 ))
 
+        if "chat_messages" in table_names:
+            existing = {c["name"] for c in insp.get_columns("chat_messages")}
+            # Added with the research-step record. Turns written before it stay NULL:
+            # the tool payloads they were built from are long gone, and a step list
+            # cannot be reconstructed after the fact.
+            if "steps_json" not in existing:
+                conn.execute(text(
+                    "ALTER TABLE chat_messages ADD COLUMN steps_json TEXT"
+                ))
+
         if "users" in table_names:
             existing = {c["name"] for c in insp.get_columns("users")}
             for column, ddl in (

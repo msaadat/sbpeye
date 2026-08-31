@@ -25,6 +25,7 @@ EXPECTED_ROUTES = {
     ("GET", "/api/app/status"),
     ("GET", "/api/chat/sessions"),
     ("GET", "/api/chat/sessions/{session_id}"),
+    ("GET", "/api/chat/sessions/{session_id}/messages/{message_id}/steps/{step_index}"),
     ("GET", "/api/circulars/browse"),
     ("GET", "/api/circulars/browse_recent"),
     ("GET", "/api/circulars/by_url"),

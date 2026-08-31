@@ -1539,6 +1539,113 @@ a.context-chip:hover {
   line-height: 1.45;
 }
 
+/* A saved step opens onto what the tool actually returned. The row stays the same
+   height closed, so a turn's step list reads as a list whether or not anything in
+   it has been opened. */
+.research-step > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.research-step > summary::-webkit-details-marker {
+  display: none;
+}
+
+.research-step[open] > summary .steps-chevron {
+  transform: rotate(90deg);
+}
+
+.step-detail {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.3rem 0 0.5rem;
+  padding: 0.45rem 0.55rem;
+  border-left: 2px solid var(--sbp-border);
+  background: var(--sbp-surface);
+  border-radius: var(--sbp-radius-sm);
+}
+
+.step-status {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0;
+}
+
+.step-status-error {
+  color: var(--sbp-danger);
+}
+
+.step-note {
+  margin: 0;
+  color: var(--sbp-text);
+  line-height: 1.45;
+}
+
+.step-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.5rem;
+  margin: 0;
+}
+
+.step-arguments {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--sbp-green-text);
+  overflow-wrap: anywhere;
+}
+
+.step-hits {
+  display: grid;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.step-hits > li {
+  display: grid;
+  gap: 0.15rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid var(--sbp-border);
+}
+
+.step-hits > li:first-child {
+  padding-top: 0;
+  border-top: none;
+}
+
+.step-hit-title {
+  color: var(--sbp-text);
+}
+
+.step-hit-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.45rem;
+  font-size: var(--sbp-fs-eyebrow);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.step-hit-status {
+  color: var(--sbp-warning);
+}
+
+.step-hit-snippet {
+  margin: 0;
+  color: var(--sbp-text);
+  line-height: 1.45;
+}
+
+.step-hit-note {
+  margin: 0;
+  font-style: italic;
+}
+
 /* Autoscroll now yields to a reader who has scrolled up; this is how they get
    back without hunting for the bottom of a growing thread. */
 .jump-latest {

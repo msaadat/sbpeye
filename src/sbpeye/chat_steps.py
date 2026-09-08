@@ -198,6 +198,25 @@ def _law_hits(payload: dict) -> list[dict]:
     ]
 
 
+def _attachment_hits(payload: dict) -> list[dict]:
+    """One hit per passage read from inside a single attachment."""
+    citation = payload.get("attachment_citation") or payload.get("citation")
+    title = _clip(payload.get("filename"), 200) or "Attachment"
+    passages = _rows(payload, "passages")
+    if not passages:
+        return [_document_hit({**payload, "title": title, "citation": citation})]
+    return [
+        _hit(
+            citation=citation,
+            title=title,
+            reference=_clip(payload.get("circular"), 120),
+            snippet=_clip(row.get("passage"), _SNIPPET_CHARS),
+            note=("Page " + str(row["page"])) if row.get("page") is not None else None,
+        )
+        for row in passages
+    ]
+
+
 def _inventory_hits(payload: dict) -> list[dict]:
     hits = []
     for row in _rows(payload, "results"):
@@ -224,6 +243,8 @@ def _hits_for(name: str, payload: dict) -> list[dict]:
         return _value_hits(payload)
     if name == "get_law_details":
         return _law_hits(payload)
+    if name == "read_attachment":
+        return _attachment_hits(payload)
     if name == "search_regulatory_inventory":
         return _inventory_hits(payload)
     if name == "get_circular_details":
@@ -241,10 +262,13 @@ def _summary(name: str, payload: dict, hits: list[dict], omitted: int) -> str:
     """One line naming what the step found, phrased for the tool that ran."""
     if name == "get_circular_details" and not _rows(payload, "candidates"):
         return hits[0].get("title", "Circular") if hits else "Nothing found"
-    if name == "get_law_details":
+    if name in ("get_law_details", "read_attachment"):
         count = payload.get("passage_count")
         if isinstance(count, int) and count:
-            title = payload.get("resolved_title") or "the law"
+            title = (
+                payload.get("resolved_title") or payload.get("filename")
+                or ("the law" if name == "get_law_details" else "the attachment")
+            )
             return f"{count} passage{'s' if count != 1 else ''} from {title}"
     if name == "search_regulatory_inventory":
         matched = payload.get("documents_matched")

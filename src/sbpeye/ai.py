@@ -98,6 +98,7 @@ TOOL_LABELS = {
     "get_latest_circulars": "Fetching latest circulars",
     "get_circular_details": "Reading circular details",
     "get_law_details": "Reading the law text",
+    "read_attachment": "Reading the annexure",
     "query_regulatory_values": "Looking up regulatory values",
     "get_circulars_by_tag": "Browsing circulars by tag",
     "search_regulatory_inventory": "Taking inventory across every document",
@@ -172,7 +173,10 @@ TOOLS = [
                 "later entry is marked `duplicate_of_earlier_entry` and names in "
                 "`text_provided_earlier` what the first entry gave you. That is a pointer "
                 "upwards, not a missing document — scroll back for the text rather than "
-                "fetching it again. Pay particular attention to a circular ranked highly by "
+                "fetching it again. A repeat entry that carries `matching_passages` with "
+                "`passages_not_provided_earlier` is bringing you passages of that document "
+                "no earlier entry did — a sharper query reached a different part of its "
+                "annexure — so read them. Pay particular attention to a circular ranked highly by "
                 "`semantic_results` whose title looks unrelated — that usually means the answer "
                 "sits in an attachment rather than the covering letter, and consolidated "
                 "frameworks that revise earlier limits often look like this. Call "
@@ -183,13 +187,16 @@ TOOLS = [
                 "`full_circular_text` is the circular's complete covering LETTER, not its "
                 "complete content — quote it rather than spending a get_circular_details "
                 "call to re-read the same letter. When `attachment_text_chars` is present "
-                "the circular has annexures whose text is NOT in this result. A letter that "
-                "announces a change without stating its terms ('details are at Annexure', "
-                "'the Framework has been amended') is a pointer, not an answer: the operative "
-                "figures live in the annexure, and revised limits usually arrive this way. "
-                "Do not conclude from an older circular that states a figure outright over a "
-                "newer one whose figure is in an annexure you have not read — call "
-                "get_circular_details on the newer one first.\n"
+                "the circular has annexures whose text is NOT in this result beyond the "
+                "`matching_passages` shown. A letter that announces a change without stating "
+                "its terms ('details are at Annexure', 'the Framework has been amended') is a "
+                "pointer, not an answer: the operative figures live in the annexure, and "
+                "revised limits usually arrive this way. Do not conclude from an older "
+                "circular that states a figure outright over a newer one whose figure is in "
+                "an annexure you have not read — call get_circular_details on the newer one "
+                "first, or read_attachment when a passage or contents listing has already "
+                "told you which page or section holds it. Repeating a search does not open "
+                "an annexure; read_attachment does.\n"
                 "CURRENCY. The ranked lists hold circulars that are still in force. One "
                 "that matched but has been superseded or cancelled is moved to "
                 "`withdrawn_matches` — citation, title, date and `superseded_by`, with no "
@@ -244,11 +251,60 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_circular_details",
-            "description": "Fetch a specific circular by reference number or title, including its circular text and question-relevant passages from extracted annexures and attachments. Use this when the user refers to a specific circular (e.g. 'BPRD Circular No. 12 of 2023') or needs its complete document set.",
+            "description": (
+                "Fetch a specific circular by reference number or title: its covering "
+                "letter in full, an attachment manifest, and passages from its annexures "
+                "and attachments matched to `query` (or, without one, to the user's "
+                "question). Use this when the user refers to a specific circular (e.g. "
+                "'BPRD Circular No. 12 of 2023') or needs its complete document set. "
+                "Passages this conversation has already shown you are listed as "
+                "'already provided earlier' rather than repeated, so a second call with "
+                "a sharper `query` returns what the first did not. To read a known page "
+                "or paragraph of an attachment, use read_attachment instead."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "circular_reference": {"type": "string", "description": "The circular's reference number, e.g. 'BPRD Circular No. 12 of 2023' or title"}
+                    "circular_reference": {"type": "string", "description": "The circular's reference number, e.g. 'BPRD Circular No. 12 of 2023' or title"},
+                    "query": {"type": "string", "description": "What you need from inside its attachments, e.g. 'definition of stable retail deposits and their run-off rate'. Defaults to the user's question."}
+                },
+                "required": ["circular_reference"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_attachment",
+            "description": (
+                "Read inside one attachment of a circular — an annexure, framework, "
+                "instructions or guidelines PDF behind a covering letter — the way "
+                "get_law_details reads inside an Act. Use it whenever a search result "
+                "shows `attachment_text_chars`, a contents listing, or a `[[a:...]]` "
+                "citation and the answer is in the attachment rather than the letter: "
+                "the letter announces the rule, the annexure states it.\n"
+                "Give `circular_reference`, name the `attachment` when the circular has "
+                "more than one (its filename or `[[a:...]]` citation), and ask for one of:\n"
+                "- `page`: every chunk of that page, in order. Use when you have seen a "
+                "page number — in a contents listing, or on a passage already returned.\n"
+                "- `section`: a paragraph or section number as the document numbers it, "
+                "e.g. '4.11', '3.4', 'Part 2'. Semantic search cannot find a number by "
+                "meaning; this scans for the heading directly.\n"
+                "- `query`: what you need, by meaning and keyword. Matches come back with "
+                "the chunk either side, so a paragraph split across a chunk boundary "
+                "arrives whole.\n"
+                "Passages are whole index chunks with `chunk_index` and `page`; consecutive "
+                "indexes are consecutive text. `pages` gives the attachment's page range."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "circular_reference": {"type": "string", "description": "The circular the attachment belongs to, e.g. 'BPRD Circular No. 08 of 2016'"},
+                    "attachment": {"type": "string", "description": "Which attachment, by filename ('C8-Annex.pdf') or citation ('[[a:C8-Annex]]'). Optional when the circular has one attachment."},
+                    "page": {"type": "integer", "description": "A page number of the attachment to return whole"},
+                    "section": {"type": "string", "description": "A paragraph or section number to locate, e.g. '4.11', 'Part 2', 'B'"},
+                    "query": {"type": "string", "description": "What you need from the attachment, e.g. 'stable retail deposits definition run-off rate'"},
+                    "limit": {"type": "integer", "description": "Number of matched passages for `query` before neighbour expansion (1-10)", "default": 5}
                 },
                 "required": ["circular_reference"]
             }
@@ -1095,6 +1151,22 @@ _REPEAT_LAW_ROW_KEYS = (
 # saying "you were given an excerpt" adds nothing to "you were given the letter".
 _DOCUMENT_TEXT_KEYS = ("full_circular_text", "matching_passages", "passages")
 
+
+def _passage_ledger_key(circular_id: str, passage: dict) -> str:
+    """The turn-ledger identity of one search passage — `chat_retrieval.passage_key`.
+
+    Imported lazily: `chat_retrieval` reaches `search`, which is fine, but this module
+    is imported by the checklist and inventory paths that `chat_retrieval` also touches,
+    and a module-level import here would close that loop.
+    """
+    from .chat_retrieval import passage_key
+
+    return passage_key(
+        passage.get("attachment_id") or circular_id,
+        passage.get("chunk_index"),
+        passage.get("text") or "",
+    )
+
 # Said once per response, not once per pointer. There can be a dozen withdrawn matches and
 # the instruction is the same for all of them; repeating it is the pattern `_dedupe_repeat_row`
 # exists to remove. Measured, the pointers themselves are ~190 characters against 2,814 for
@@ -1118,6 +1190,12 @@ def _withdrawn_section(pointers: list[dict]) -> dict:
 # Chunks average ~1.5k chars, so this covers the head of both arms — which is where
 # a wrong passage does its damage, because that is what the model reads first.
 SEARCH_PASSAGE_BUDGET_CHARS = 24_000
+# One result's share of that. `SearchEngine.ATTACHMENT_EVIDENCE_K` plus neighbour
+# expansion lets one annexure arrive with a dozen chunks; without a per-result ceiling
+# the first result in an arm could spend the whole response on itself. Seven or eight
+# index chunks — a hit, its neighbours, and a second run — is what a reader needs from
+# one document in a *search* result; more than that is what `read_attachment` is for.
+SEARCH_PASSAGES_PER_RESULT_CHARS = 7_000
 # Everything one search response may hand back, across both corpora. Named because the
 # turn budget below is expressed as a share of it: these three numbers are what a search
 # was tuned to be worth reading when the window has room for all of it.
@@ -1326,6 +1404,13 @@ class AIClient:
         # `AIClient` serves one request and therefore one turn, so instance scope is
         # turn scope — the same reasoning `_context_budget` above relies on.
         self._sent_text_keys: dict[str, list[str]] = {}
+        # Which *passages* this turn has already sent, per circular id, keyed by
+        # `chat_retrieval.passage_key` — the index's own chunk ids, so a passage from
+        # `search_corpus`, `get_circular_details` and `read_attachment` is the same
+        # passage under the same key. The text-key ledger above says *that* a document
+        # was sent; this says *which parts*, which is what lets a later search hand
+        # over the parts it has not. Same scope, same reset.
+        self._sent_passages: dict[str, set[str]] = {}
         # One digested record per tool call this turn makes, in execution order, for
         # the route to persist beside the answer. Turn-scoped for the same reason as
         # the ledger above.
@@ -3537,6 +3622,8 @@ SOURCE BLOCKS:
         body_texts: dict[str, str],
         budget: int = SEARCH_PASSAGE_BUDGET_CHARS,
         sent: dict[str, list[str]] | None = None,
+        sent_passages: dict[str, set[str]] | None = None,
+        per_result: int = SEARCH_PASSAGES_PER_RESULT_CHARS,
     ) -> dict[str, list[dict]]:
         """Pick which hits hand over their matched chunks whole, within one budget.
 
@@ -3555,6 +3642,14 @@ SOURCE BLOCKS:
         A circular in both arms is served in both — the lists are meant to be readable
         independently — so it is charged for both. Charging once would let the budget
         understate what actually goes on the wire by about half.
+
+        `sent_passages` is the turn's passage ledger, ``{circular_id: {passage key}}``
+        (`chat_retrieval.passage_key`). A passage already in the model's context is
+        skipped here — not charged, not sent — so the budget goes to what is new, and a
+        repeat circular whose *new* passages survive is served once (`copies` = 1)
+        rather than stripped. `per_result` caps one circular's share: with attachment
+        evidence no longer cut at three chunks, one annexure could otherwise take the
+        whole response's passage budget from the results after it.
         """
         appearances: dict[str, int] = {}
         for group in result_groups:
@@ -3578,7 +3673,9 @@ SOURCE BLOCKS:
                 # already sent them, the entry is stripped downstream and costs nothing.
                 copies = appearances.get(circular.id, 1)
                 if sent is not None:
-                    copies = 0 if circular.id in sent else 1
+                    already = circular.id in sent and sent_passages is None
+                    copies = 0 if already else 1
+                seen = (sent_passages or {}).get(circular.id) or set()
                 kept: list[dict] = []
                 spent = 0
                 for passage in result.get("passages") or []:
@@ -3589,6 +3686,14 @@ SOURCE BLOCKS:
                         and circular.id in body_texts
                     ):
                         continue
+                    if sent_passages is not None and (
+                        _passage_ledger_key(circular.id, passage) in seen
+                    ):
+                        continue
+                    # The first passage is worth exceeding the per-result share for —
+                    # a single table chunk can be long — the ones after it are not.
+                    if kept and spent + len(text) > per_result:
+                        break
                     if spent + len(text) * copies > remaining:
                         break
                     kept.append({**passage, "text": text})
@@ -3604,6 +3709,7 @@ SOURCE BLOCKS:
         document_id: str,
         row_keys: tuple[str, ...],
         sent: dict[str, list[str]] | None,
+        fresh_keys: tuple[str, ...] = (),
     ) -> dict:
         """Reduce `payload` to a pointer when this turn already serialized the document.
 
@@ -3638,6 +3744,20 @@ SOURCE BLOCKS:
         reduced["duplicate_of_earlier_entry"] = True
         if previous:
             reduced["text_provided_earlier"] = previous
+        # Passages the row carries that no earlier row did — the passage ledger has
+        # already filtered them (`_search_result_payload`), so anything left under the
+        # key is new to the model and travels. Without this a second search that ranks
+        # the same annexure by a sharper query hands back a pointer to the *first*
+        # search's chunks, and no query the model can write ever reaches the rest of the
+        # document: measured on the Basel III liquidity question, six successive
+        # searches with the answer at rank 8 of the store, all answered "provided
+        # earlier". `_DOCUMENT_TEXT_KEYS`' record is raised so the pointer stays honest.
+        for key in fresh_keys:
+            if key in payload:
+                reduced[key] = payload[key]
+                reduced["passages_not_provided_earlier"] = True
+                if key not in previous:
+                    sent[document_id] = [*previous, key]
         return reduced
 
     @staticmethod
@@ -3646,6 +3766,7 @@ SOURCE BLOCKS:
         body_texts: dict[str, str] | None = None,
         passage_sets: dict[str, list[dict]] | None = None,
         sent: dict[str, list[str]] | None = None,
+        sent_passages: dict[str, set[str]] | None = None,
     ) -> dict:
         """Serialize one search result for a tool response.
 
@@ -3690,21 +3811,35 @@ SOURCE BLOCKS:
             payload["attachment_text_chars"] = attachment_chars
 
         passages = (passage_sets or {}).get(circular.id) or []
+        # The passage ledger is consulted at the wire, not in `_passage_sets`: both arms
+        # read the same `passage_sets` entry, and it is the first row serialized that
+        # carries the passages, so recording them there is what makes the second row a
+        # pointer to them rather than a second copy.
+        seen = sent_passages.setdefault(circular.id, set()) if sent_passages is not None else None
+        if seen is not None:
+            passages = [
+                item for item in passages
+                if _passage_ledger_key(circular.id, item) not in seen
+            ]
         if passages:
             payload["matching_passages"] = [
                 {
                     "passage": item["text"],
                     "source": item.get("match_source"),
                     "page": item.get("source_page"),
+                    "chunk_index": item.get("chunk_index"),
                     "attachment_citation": (
                         f"[[attachment:{item['attachment_id']}|"
                         f"{item['attachment_filename']}]]"
                         if item.get("attachment_id") and item.get("attachment_filename")
                         else None
                     ),
+                    **({"context_for_neighbour": True} if item.get("is_neighbour") else {}),
                 }
                 for item in passages
             ]
+            if seen is not None:
+                seen.update(_passage_ledger_key(circular.id, item) for item in passages)
         elif matching_passage:
             # Budget spent, or a lexical-only hit with no located chunk. A window is
             # all there is here, so it is labelled as the excerpt it is.
@@ -3724,7 +3859,8 @@ SOURCE BLOCKS:
             if key in result:
                 payload[key] = result[key]
         return AIClient._dedupe_repeat_row(
-            payload, circular.id, _REPEAT_ROW_KEYS, sent
+            payload, circular.id, _REPEAT_ROW_KEYS, sent,
+            fresh_keys=("matching_passages",) if sent_passages is not None and passages else (),
         )
 
     @staticmethod
@@ -3814,11 +3950,22 @@ SOURCE BLOCKS:
                     return json.dumps({"error": "No search query provided"})
                 limit = max(1, min(int(arguments.get("limit", 5)), 10))
                 retriever = ScopedChatRetriever(db, selected_circular_ids)
+                # One ledger set across the selection: chunk ids carry their document,
+                # so a set per circular buys nothing here.
+                sent = set().union(
+                    *(self._sent_passages.get(cid, set()) for cid in retriever.circular_ids)
+                )
                 results = retriever.search(
                     query,
                     limit=limit,
                     token_budget=max(1, self.config.max_context_tokens // 4),
+                    sent_chunk_ids=sent,
                 )
+                by_chunk = {chunk.chunk_id: chunk for chunk in retriever._chunks}
+                for chunk_id in retriever.last_sent_chunk_ids:
+                    chunk = by_chunk.get(chunk_id)
+                    if chunk is not None:
+                        self._sent_passages.setdefault(chunk.circular_id, set()).add(chunk_id)
                 return json.dumps({"results": results, "count": len(results)})
 
             if name == "search_corpus":
@@ -3881,17 +4028,21 @@ SOURCE BLOCKS:
                             item.update(annotation)
                     inline_budget, passage_budget, _ = self._search_payload_budgets()
                     sent = self._sent_text_keys
+                    sent_passages = self._sent_passages
                     body_texts = self._inline_body_texts(
                         results, budget=inline_budget, sent=sent
                     )
                     passage_sets = self._passage_sets(
-                        results, body_texts=body_texts, budget=passage_budget, sent=sent
+                        results, body_texts=body_texts, budget=passage_budget, sent=sent,
+                        sent_passages=sent_passages,
                     )
                     return json.dumps({
                         "ranking": "date",
                         **_withdrawn_section(withdrawn_matches),
                         "results": [
-                            self._search_result_payload(r, body_texts, passage_sets, sent)
+                            self._search_result_payload(
+                                r, body_texts, passage_sets, sent, sent_passages
+                            )
                             for r in results
                         ],
                         "count": len(results),
@@ -3922,11 +4073,13 @@ SOURCE BLOCKS:
                 withdrawn_matches = arms.pop("withdrawn_matches", [])
                 inline_budget, passage_budget, law_budget = self._search_payload_budgets()
                 sent = self._sent_text_keys
+                sent_passages = self._sent_passages
                 body_texts = self._inline_body_texts(
                     *arms.values(), budget=inline_budget, sent=sent
                 )
                 passage_sets = self._passage_sets(
-                    *arms.values(), body_texts=body_texts, budget=passage_budget, sent=sent
+                    *arms.values(), body_texts=body_texts, budget=passage_budget, sent=sent,
+                    sent_passages=sent_passages,
                 )
                 # `arms` is ordered reference_matches, lexical_results, semantic_results, so
                 # the strongest hit is the one that carries the text and the weaker arms
@@ -3934,7 +4087,9 @@ SOURCE BLOCKS:
                 # every arm serializes the same lookup, so the copies were identical.
                 payload = {
                     key: [
-                        self._search_result_payload(r, body_texts, passage_sets, sent)
+                        self._search_result_payload(
+                            r, body_texts, passage_sets, sent, sent_passages
+                        )
                         for r in results
                     ]
                     for key, results in arms.items()
@@ -3986,86 +4141,10 @@ SOURCE BLOCKS:
                 return json.dumps({"results": out, "count": len(out)})
 
             elif name == "get_circular_details":
-                from .models import Circular
-                from sqlalchemy import or_
-                ref = arguments.get("circular_reference", "").strip()
-                if not ref:
-                    return json.dumps({"error": "No circular reference provided"})
-                from .search import SearchEngine, search_engine
+                return self._circular_details_tool(arguments, db, user_query)
 
-                has_year = bool(re.search(r"\b(?:19\d{2}|20\d{2})\b", ref))
-                ref_matches = SearchEngine._search_by_reference(ref, db, limit=5)
-                if len(ref_matches) > 1 and not has_year:
-                    return json.dumps({
-                        "error": (
-                            "Ambiguous circular reference. Include the year to "
-                            "retrieve a specific circular."
-                        ),
-                        "candidates": [
-                            {
-                                "title": item.title,
-                                "reference": item.reference,
-                                "department": item.department,
-                                "date": item.date.strftime("%Y-%m-%d") if item.date else None,
-                                "citation": (
-                                    f"[[circular:{item.id}|{item.display_name}]]"
-                                ),
-                            }
-                            for item in ref_matches
-                        ],
-                    })
-
-                c = ref_matches[0] if ref_matches else None
-                # Try exact reference match, then title ILIKE, when the query is
-                # not a parsed circular reference.
-                if not c:
-                    c = db.query(Circular).filter(Circular.reference == ref).first()
-                if not c:
-                    c = db.query(Circular).filter(
-                        or_(
-                            Circular.title.ilike(f"%{ref}%"),
-                            Circular.reference.ilike(f"%{ref}%"),
-                        )
-                    ).first()
-                if not c:
-                    results, _ = search_engine.search(ref, db, limit=1)
-                    c = results[0]["circular"] if results else None
-                if not c:
-                    return json.dumps({"error": f"Circular not found: {ref}"})
-                from .chat_retrieval import build_chat_context
-                from .search import _relationship_annotation
-
-                document_context, _ = build_chat_context(
-                    db,
-                    [c.id],
-                    user_query or ref,
-                    self.config.max_context_tokens,
-                )
-                # C11 rule 1: this path never filters on status — a circular the asker
-                # named is returned whatever became of it — so the withdrawal has to be
-                # *stated* here instead. Handing over a superseded circular's full text
-                # with nothing but a `status` field to mark it is how a withdrawn rule
-                # gets quoted as current.
-                changed = _relationship_annotation(c) or {}
-                return json.dumps({
-                    **changed,
-                    "title": c.title,
-                    "reference": c.reference,
-                    "department": c.department,
-                    "date": c.date.strftime("%Y-%m-%d") if c.date else None,
-                    "url": c.url,
-                    "summary": c.summary,
-                    "tags": json.loads(c.tags) if c.tags else [],
-                    "compliance_checklist": compact_required_checklist(c.compliance_checklist),
-                    "status": c.status or "active",
-                    "content_preview": (c.content_text or "")[:2000],
-                    "document_context": document_context,
-                    "citation": f"[[circular:{c.id}|{c.display_name}]]",
-                    "attachment_citations": [
-                        f"[[attachment:{item.id}|{item.filename}]]"
-                        for item in c.attachments
-                    ],
-                })
+            elif name == "read_attachment":
+                return self._read_attachment_tool(arguments, db)
 
             elif name == "get_law_details":
                 return self._law_details_tool(arguments, db)
@@ -4233,6 +4312,269 @@ SOURCE BLOCKS:
                 return match
         results, _ = search_engine.search(cleaned, db, limit=1, source="laws")
         return results[0]["law"] if results else None
+
+    @staticmethod
+    def _resolve_circular(ref: str, db: Session) -> tuple[Any, dict | None]:
+        """One circular for a reference or title, or the error payload to return.
+
+        ``(circular, None)`` on success, ``(None, payload)`` when the reference is
+        ambiguous or nothing matched. Shared by `get_circular_details` and
+        `read_attachment`, so the two tools resolve "BPRD Circular No. 08 of 2016"
+        to the same document — a reader that opens an annexure by a different
+        resolution than the search that named it is how the wrong annexure gets read.
+        """
+        from sqlalchemy import or_
+
+        from .models import Circular
+        from .search import SearchEngine, search_engine
+
+        has_year = bool(re.search(r"\b(?:19\d{2}|20\d{2})\b", ref))
+        ref_matches = SearchEngine._search_by_reference(ref, db, limit=5)
+        if len(ref_matches) > 1 and not has_year:
+            return None, {
+                "error": (
+                    "Ambiguous circular reference. Include the year to "
+                    "retrieve a specific circular."
+                ),
+                "candidates": [
+                    {
+                        "title": item.title,
+                        "reference": item.reference,
+                        "department": item.department,
+                        "date": item.date.strftime("%Y-%m-%d") if item.date else None,
+                        "citation": (
+                            f"[[circular:{item.id}|{item.display_name}]]"
+                        ),
+                    }
+                    for item in ref_matches
+                ],
+            }
+
+        c = ref_matches[0] if ref_matches else None
+        # Try exact reference match, then title ILIKE, when the query is
+        # not a parsed circular reference.
+        if not c:
+            c = db.query(Circular).filter(Circular.reference == ref).first()
+        if not c:
+            c = db.query(Circular).filter(
+                or_(
+                    Circular.title.ilike(f"%{ref}%"),
+                    Circular.reference.ilike(f"%{ref}%"),
+                )
+            ).first()
+        if not c:
+            results, _ = search_engine.search(ref, db, limit=1)
+            c = results[0]["circular"] if results else None
+        if not c:
+            return None, {"error": f"Circular not found: {ref}"}
+        return c, None
+
+    def _circular_details_tool(self, arguments: dict, db: Session, user_query: str) -> str:
+        """One circular: identity, covering letter, and passages from its annexures.
+
+        The passages are retrieved for `query` when the model gives one, else for the
+        user's question. Before `query` existed every call retrieved for the original
+        question, so a model that had learned from a first read *where* in the annexure
+        the answer sat — "Part 1, section 4" — could not act on it: a second call
+        returned the same five passages as the first. `read_attachment` is the tool for
+        a page or a paragraph by number; this one takes a sharper question.
+        """
+        ref = str(arguments.get("circular_reference", "")).strip()
+        if not ref:
+            return json.dumps({"error": "No circular reference provided"})
+        c, error = self._resolve_circular(ref, db)
+        if error is not None:
+            return json.dumps(error)
+
+        from .chat_retrieval import build_chat_context
+        from .search import _relationship_annotation
+
+        query = str(arguments.get("query", "") or "").strip() or user_query or ref
+        sent = self._sent_passages.setdefault(c.id, set())
+        document_context, retriever = build_chat_context(
+            db,
+            [c.id],
+            query,
+            self.config.max_context_tokens,
+            sent_chunk_ids=sent,
+        )
+        sent.update(retriever.last_sent_chunk_ids)
+        # C11 rule 1: this path never filters on status — a circular the asker
+        # named is returned whatever became of it — so the withdrawal has to be
+        # *stated* here instead. Handing over a superseded circular's full text
+        # with nothing but a `status` field to mark it is how a withdrawn rule
+        # gets quoted as current.
+        changed = _relationship_annotation(c) or {}
+        return json.dumps({
+            **changed,
+            "title": c.title,
+            "reference": c.reference,
+            "department": c.department,
+            "date": c.date.strftime("%Y-%m-%d") if c.date else None,
+            "url": c.url,
+            "summary": c.summary,
+            "tags": json.loads(c.tags) if c.tags else [],
+            "compliance_checklist": compact_required_checklist(c.compliance_checklist),
+            "status": c.status or "active",
+            "content_preview": (c.content_text or "")[:2000],
+            "document_context": document_context,
+            "citation": f"[[circular:{c.id}|{c.display_name}]]",
+            "attachment_citations": [
+                f"[[attachment:{item.id}|{item.filename}]]"
+                for item in c.attachments
+            ],
+        })
+
+    @staticmethod
+    def _match_attachment(circular: Any, wanted: str) -> tuple[Any, list[Any]]:
+        """The attachment `wanted` names, or the readable candidates when it does not.
+
+        `wanted` may be a filename, a filename without its extension, or the citation
+        handle the model was shown (``[[a:C8-Annex]]``, ``[[attachment:…|C8-Annex.pdf]]``).
+        An empty `wanted` resolves when the circular has exactly one attachment with
+        text, which is the common case: a circular and its annexure.
+        """
+        readable = [
+            item for item in circular.attachments
+            if (item.content_text or "").strip()
+        ]
+        label = wanted.strip()
+        if label.startswith("[[") and label.endswith("]]"):
+            label = label[2:-2]
+            label = label.split("|", 1)[-1] if "|" in label else label.split(":", 1)[-1]
+        label = label.strip().casefold()
+        if not label:
+            return (readable[0] if len(readable) == 1 else None), readable
+        slug = re.sub(r"[^a-z0-9]+", "-", label).strip("-")
+        for item in readable:
+            filename = (item.filename or "").casefold()
+            stem = re.sub(r"\.[a-z0-9]{1,5}$", "", filename)
+            if label in (filename, stem, item.id.casefold()):
+                return item, readable
+            if slug and slug == re.sub(r"[^a-z0-9]+", "-", stem).strip("-"):
+                return item, readable
+        partial = [
+            item for item in readable
+            if label in (item.filename or "").casefold()
+            or (slug and slug in re.sub(r"[^a-z0-9]+", "-", (item.filename or "").casefold()))
+        ]
+        if len(partial) == 1:
+            return partial[0], readable
+        return None, readable
+
+    def _read_attachment_tool(self, arguments: dict, db: Session) -> str:
+        """Read inside one circular attachment — the annexure analogue of `get_law_details`.
+
+        The gap it closes, from session `15fd3ff1` (2026-09-08): asked what Basel III
+        counts as a "stable" deposit, the model read the annexure's contents page,
+        named the section holding the answer, and had no way to ask for it. Six
+        `search_corpus` calls later it answered that the section was "not available".
+        The text was on page 15 of a 63-page attachment the corpus had held for two
+        months.
+        """
+        from .chat_retrieval import ScopedAttachmentRetriever
+
+        ref = str(arguments.get("circular_reference", "")).strip()
+        if not ref:
+            return json.dumps({"error": "No circular reference provided"})
+        circular, error = self._resolve_circular(ref, db)
+        if error is not None:
+            return json.dumps(error)
+
+        wanted = str(arguments.get("attachment", "") or "")
+        attachment, readable = self._match_attachment(circular, wanted)
+        citation = f"[[circular:{circular.id}|{circular.display_name}]]"
+        if attachment is None:
+            if not readable:
+                return json.dumps({
+                    "error": "This circular has no attachment with extracted text.",
+                    "citation": citation,
+                    "attachments": [
+                        {
+                            "attachment_citation": f"[[attachment:{item.id}|{item.filename}]]",
+                            "extraction_status": item.extraction_status or "unknown",
+                        }
+                        for item in circular.attachments
+                    ],
+                })
+            return json.dumps({
+                "error": (
+                    "Name which attachment to read — this circular has more than one."
+                    if not wanted.strip()
+                    else "No attachment of this circular matches that name."
+                ),
+                "citation": citation,
+                "attachments": [
+                    {
+                        "attachment_citation": f"[[attachment:{item.id}|{item.filename}]]",
+                        "text_chars": len(item.content_text or ""),
+                    }
+                    for item in readable
+                ],
+            })
+
+        budget = max(1, self.config.max_context_tokens // 4)
+        retriever = ScopedAttachmentRetriever(attachment)
+        query = str(arguments.get("query", "") or "").strip()
+        section = str(arguments.get("section", "") or "").strip()
+        limit = max(1, min(int(arguments.get("limit", 5) or 5), 10))
+        page: int | None = None
+        raw_page = arguments.get("page")
+        if raw_page not in (None, ""):
+            try:
+                page = int(str(raw_page).strip().lstrip("pP").strip(". "))
+            except ValueError:
+                return json.dumps({"error": f"`page` must be a number, got {raw_page!r}"})
+
+        pages = retriever.pages
+        passages: list[dict] = []
+        notes: list[str] = []
+        if page is not None:
+            passages = retriever.page(page, token_budget=budget)
+            if not passages:
+                span = f"{pages[0]}-{pages[-1]}" if pages else "none"
+                notes.append(
+                    f"No page {page} in this attachment (pages with text: {span})."
+                )
+        if not passages and section:
+            passages = retriever.section(section, token_budget=budget)
+            if not passages:
+                notes.append(
+                    f"No paragraph or section numbered {section} was located; the "
+                    "passages below, if any, come from the query instead."
+                )
+        if not passages and query:
+            passages = retriever.search(query, limit=limit, token_budget=budget)
+        if not passages and not (query or section or page is not None):
+            passages = retriever.search(
+                circular.title or attachment.filename, limit=limit, token_budget=budget
+            )
+        if not passages:
+            notes.append(
+                "Nothing in this attachment matched. Do not infer its contents — say "
+                "what you could not find."
+            )
+
+        self._sent_passages.setdefault(circular.id, set()).update(
+            retriever.chunk_ids(passages)
+        )
+        payload = {
+            "circular": circular.reference or circular.title,
+            "citation": citation,
+            "attachment_citation": f"[[attachment:{attachment.id}|{attachment.filename}]]",
+            "filename": attachment.filename,
+            "full_text_chars": len(attachment.content_text or ""),
+            "chunk_count": retriever.chunk_count,
+            "pages": (
+                {"first": pages[0], "last": pages[-1], "count": len(pages)}
+                if pages else None
+            ),
+            "passages": passages,
+            "passage_count": len(passages),
+        }
+        if notes:
+            payload["note"] = " ".join(notes)
+        return json.dumps(payload)
 
     def _law_details_tool(self, arguments: dict, db: Session) -> str:
         """Read inside one law — the statute analogue of `get_circular_details`."""
@@ -4472,7 +4814,12 @@ Use your tools to search and retrieve relevant documents before answering.
 
 TOOLS
 - If you need more details on a circular found in a search, use the get_circular_details
-tool with the circular reference or title.
+tool with the circular reference or title, and give it a `query` for what you need.
+- When the answer sits inside an attachment — an annexure, framework, instructions or
+guidelines PDF behind a covering letter — read it with read_attachment. It takes a
+`page`, a paragraph or section number (`section`), or a `query`, and returns the matched
+chunks with their neighbours. A search result that names the page or section you need is
+a reason to call it, not a reason to search again.
 - When the answer depends on what an Act or set of Regulations says, read the instrument
 itself with get_law_details. get_circular_details searches circulars only and cannot fetch
 an Act; a circular that cites an Act is not a source for what the Act requires.
@@ -4613,6 +4960,7 @@ circular on an adjacent topic for a statute you could not retrieve.
         # One turn, one ledger. `AIClient` is built per request so this is already empty,
         # but the reset states the scope rather than relying on the caller's lifecycle.
         self._sent_text_keys = {}
+        self._sent_passages = {}
         self._turn_steps = []
         full_messages = self._chat_full_messages(
             messages, circulars_context, selected_circular_ids, handles
@@ -4727,6 +5075,7 @@ circular on an adjacent topic for a statute you could not retrieve.
         # One turn, one ledger. `AIClient` is built per request so this is already empty,
         # but the reset states the scope rather than relying on the caller's lifecycle.
         self._sent_text_keys = {}
+        self._sent_passages = {}
         self._turn_steps = []
         full_messages = self._chat_full_messages(
             messages, circulars_context, selected_circular_ids, handles

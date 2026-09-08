@@ -48,6 +48,7 @@ for the evidence budget, and every changed circular now names what changed it: a
 | **C9** | Pre-warm the first search, skip iteration 1 | `main.py:3351` | −1 request, ~4.5 s | M | ☐ |
 | **C10** | Answer cache: question + selection + corpus version | new | −1 whole turn on a hit | M | ☐ |
 | **C11** | Withdrawn demoted, amender **annotated** | `search.py:1742` `dual_arm_search` | **measured net −18.1%; nothing becomes unreachable** | S | ☑ landed |
+| **C12** | Passage-keyed ledger, annexure evidence widened, `read_attachment` | `ai.py` `_sent_passages`, `search.py` `_expand_attachment_evidence`, `chat_retrieval.py` `ScopedAttachmentRetriever` | the annexure answer reachable at all — see §5.13 | M | ☑ landed |
 
 **Order.** **C1a and C11 are landed.** C1a was the smallest diff here and the only item that
 is *lossless* by construction (19.8% of search output); C11 followed because it improves the
@@ -906,6 +907,55 @@ Two care points: the date-sorted branch of `search_corpus` (`ai.py:3843`) passes
 carry the same circular as either arm, so it has to participate too.
 
 ---
+
+### 5.13 — C12. Passage-keyed ledger, annexure evidence, `read_attachment`
+
+*`ai.py` `_sent_passages` beside `_sent_text_keys`, spent by `_passage_sets` /
+`_search_result_payload` / `_dedupe_repeat_row(fresh_keys=…)`; `search.py`
+`ATTACHMENT_EVIDENCE_K`, `_expand_attachment_evidence`, `order_evidence`,
+`is_listing_chunk`; `chat_retrieval.py` `ScopedChatRetriever._stored_chunks`,
+`IndexedDocumentRetriever`, `ScopedAttachmentRetriever`, `passage_key`. Effort M.
+**☑ Landed**, pinned by `tests/test_attachment_reach.py` (25 tests).*
+
+Found from session `15fd3ff1` (2026-09-08), not from the byte counts: asked what Basel III
+counts as a "stable" deposit, the model answered that the defining section of BPRD Circular
+No. 08 of 2016's annexure was not available to it. The trace shows the vector arm retrieving
+that section (chunks 43–44 of `C8-Annex.pdf`, page 15) at ranks 8 and 9 of the store on the
+very first search. Four things then lost it, and C1a was one of them.
+
+**What C1a could not do.** The ledger records *which text keys* a document's first row
+carried. Six later searches ranked the same circular first, each by a sharper query that
+matched a different part of the annexure, and each came back as
+`text_provided_earlier: [full_circular_text, matching_passages]` — a pointer to the first
+search's three chunks. C1's fidelity ladder would not have helped: every one of those rows was
+at the PASSAGES rung. The ledger needed a second axis, *which passages*, keyed by the store's
+own chunk ids so that a chunk from `search_corpus`, `get_circular_details` and `read_attachment`
+is one chunk. A repeat row now carries only what no earlier row did, marked
+`passages_not_provided_earlier`, and the scoped retrievers return already-sent hits as
+`provided_earlier` pointers that cost nothing.
+
+**Evidence was cut before it was budgeted.** `EVIDENCE_K = 3` kept the three nearest chunks per
+circular by global distance — the whole of what the model ever saw of a 222-chunk annexure.
+Attachment chunks now keep `ATTACHMENT_EVIDENCE_K` (8), the chat arms fetch one neighbour
+either side in a single store call, and `order_evidence` serves the densest hit first with
+its neighbours around it and contents pages last. The real bound is characters:
+`SEARCH_PASSAGES_PER_RESULT_CHARS` per circular, so an annexure cannot take the response.
+
+**The scoped retriever's vector arm was scrambled.** `ScopedChatRetriever` re-chunked locally at
+350 words under the store's 130-word `{doc}__chunk_{n}` ids. On the real annexure Chroma's
+chunk 53 is page 17; the local chunk 53 was page 34. Every `get_circular_details` call ran that
+way and this one returned the contents page. Both scoped retrievers now read their chunks from
+the store, as `ScopedLawRetriever` already did.
+
+**No verb for a page.** The model read "Part 1, section 4" off that contents page and had no
+tool that took a page or a paragraph of an attachment. `read_attachment(page | section |
+query)` is `get_law_details` for annexures, on the same retriever base; `get_circular_details`
+takes a `query` so a second call can be sharper than the first.
+
+Replayed against the live corpus, model-free: the first search now carries pages 15 (43–46)
+inside its per-result share; the second and third searches hand over pages 14, 16, 26–27 and
+31–33, 39–40 as `passages_not_provided_earlier`; `read_attachment(section="4.11")` returns
+chunks 42–44 and `page=15` returns 43–47.
 
 ## 6. In-app caching — what actually saves a request
 

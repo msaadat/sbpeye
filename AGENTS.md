@@ -103,14 +103,40 @@ on them before it reads a description, which is why the discovery tool is not ca
 | Tool | Reaches | Notes |
 |---|---|---|
 | `search_corpus` | circulars **and** laws | Default search. Returns `lexical_results` / `semantic_results` (circulars, unfused, both ranks visible), `reference_matches`, and `law_results` (laws, RRF-fused, ranked separately — a rank among laws is not comparable with a rank among circulars). Department/tag filters are circular-only and drop the law arm. |
-| `get_circular_details` | one circular + attachments | Cannot fetch a law. |
+| `get_circular_details` | one circular + attachments | Letter, manifest, and annexure passages for `query` (default: the user's question). Cannot fetch a law. Passages the turn already sent are listed as pointers, not repeated. |
+| `read_attachment` | inside one attachment | The annexure analogue of `get_law_details`: `page`, `section` (a paragraph number, "4.11") or `query`; hits come back with `ATTACHMENT_NEIGHBOUR_CHUNKS` either side. Names the attachment by filename or `[[a:…]]` handle; optional when the circular has one. |
 | `get_law_details` | inside one law | `query` or `section`; matched chunks come back with `LAW_NEIGHBOUR_CHUNKS` either side, because a statute's sub-sections split across chunk boundaries. Reports `resolved_title` rather than passing a near-match off as the requested document. |
 | `search_selected_documents` | pinned circulars | Scoped; errors when nothing is pinned. |
 | `search_regulatory_inventory` | every document | Exhaustive "list all" sweeps only. Rows are pointers with one short excerpt — drill in with the two `get_*_details` tools. |
 | `get_latest_circulars`, `get_circulars_by_tag`, `query_regulatory_values` | circulars | Recency, tag browse, structured values. |
 
 Retrieval into the laws corpus is exercised by `tests/test_law_chat_reach.py`, which
-documents the 2026-08-23 benchmark failure each property fixes.
+documents the 2026-08-23 benchmark failure each property fixes; retrieval into a
+circular's annexures by `tests/test_attachment_reach.py`, from the 2026-09-08 session in
+which the defining paragraph of a 63-page annexure was retrieved and then lost.
+
+**Chunk geometry is the index's.** Every retriever that resolves a Chroma chunk id must
+hold the chunk the store wrote under that id: `ScopedChatRetriever` and
+`IndexedDocumentRetriever` (`chat_retrieval.py`) read their chunks *from* the store and
+fall back to `prepare_index_chunks` — never `prepare_reference_chunks` — when it has none.
+The scoped retriever once re-chunked locally at 350 words under the store's 130-word ids,
+so a vector hit on chunk 53 boosted a passage thirty pages away; every
+`get_circular_details` call ran with its semantic arm scrambled that way.
+
+**Evidence.** `_collect_evidence` keeps `EVIDENCE_K` body chunks and
+`ATTACHMENT_EVIDENCE_K` attachment chunks per circular; the chat arms then fetch
+`EVIDENCE_NEIGHBOURS` either side of each attachment hit in one store call
+(`_expand_attachment_evidence`) and `order_evidence` serves the densest hit first with
+its neighbours around it, contents pages last (`is_listing_chunk`). What goes on the wire
+is bounded by characters — `SEARCH_PASSAGE_BUDGET_CHARS` per response,
+`SEARCH_PASSAGES_PER_RESULT_CHARS` per circular — not by the count.
+
+**Passage ledger.** Beside `_sent_text_keys` (which documents a turn has sent) the client
+keeps `_sent_passages` (which chunks, keyed by `passage_key` — the store's own ids, so a
+chunk from `search_corpus`, `get_circular_details` and `read_attachment` is the same
+chunk). A repeat search row carries only passages no earlier row did, marked
+`passages_not_provided_earlier`; the scoped retrievers return already-sent hits as
+`provided_earlier` pointers that cost no budget.
 
 **Turn budget.** A chat turn is assembled from the selected-circular context plus one
 tool result per round, and the loop keeps every one of them, so the request grows

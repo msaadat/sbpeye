@@ -648,6 +648,10 @@ class MatchEvidence:
     source_ref: str | None = None
     distance: float | None = None
     chunk_index: int | None = None
+    # Fetched for its position next to a hit, not because it matched. It travels with
+    # the hit so a paragraph split across a chunk boundary arrives whole; it never
+    # decides the snippet or the page a result cites.
+    is_neighbour: bool = False
 
 
 def _evidence_from_chunk(
@@ -690,9 +694,10 @@ def choose_evidence(
     Ties keep the retrieval order, so the nearest chunk wins when nothing separates
     them on density.
     """
+    matched = [item for item in evidence if item.text and not item.is_neighbour]
     scored = [
         (item, best_window(item.text, query_tokens))
-        for item in evidence
+        for item in (matched or evidence)
         if item.text
     ]
     if not scored:
@@ -703,8 +708,101 @@ def choose_evidence(
     return item, highlight_terms(window, query_tokens)
 
 
+# Any numbered provision heading, used only to measure how many a chunk holds. A table
+# of contents is heading-shaped by construction and lists every topic of the document,
+# so it out-scores the provision itself on any term-density measure. Shared with
+# `chat_retrieval.IndexedDocumentRetriever.section`, which found the same failure on
+# the SBP Act's contents page and settles it the same way: count the headings.
+_HEADING_SCAN = re.compile(r"(?:^|[^0-9A-Za-z])\d{1,3}[A-Z]{0,2}\s*[.:)]\s*[-–—]*\s*[A-Z]")
+# A chunk holding this many headings, or this many dotted leaders, is a listing of the
+# document rather than a part of it. Measured on the Basel III liquidity annexure: the
+# contents page carries 30+ headings and 40 leaders, the densest real provision 6 and 0.
+_LISTING_HEADINGS = 10
+_LISTING_LEADERS = 3
+
+
+def is_listing_chunk(text: str) -> bool:
+    """Whether a chunk is a contents page or index rather than provision text."""
+    return (
+        text.count(".....") >= _LISTING_LEADERS
+        or len(_HEADING_SCAN.findall(text)) >= _LISTING_HEADINGS
+    )
+
+
+def _passage_density(item: MatchEvidence, query_tokens: set[str]) -> int:
+    # A listing chunk ranks below every real passage: it names the answer's heading
+    # and holds none of its text, which is the one way density misleads badly.
+    if is_listing_chunk(item.text):
+        return -1
+    return _window_density(best_window(item.text, query_tokens), query_tokens)
+
+
+def order_evidence(
+    evidence: list[MatchEvidence], query_tokens: set[str], *, radius: int = 1
+) -> list[MatchEvidence]:
+    """Order a document's evidence for a reader: best run first, each run in page order.
+
+    Retrieval order is distance order, and within one document distance is a poor
+    guide to which chunk holds the answer — on the Basel III liquidity annexure the
+    query "stable deposits … run-off rates" ranked the LCR scope paragraph and a
+    reporting template above the paragraph that defines stable deposits, because
+    those repeat "LCR" and the definition does not. Term density, the tie-break
+    `choose_evidence` already applies to pick a snippet, separates them: the
+    definition carries "stable", "retail deposits", "insured" and "run-off"; the
+    template carries "LCR" three times.
+
+    Neighbours (`is_neighbour`) complicate a plain sort. A hit and the chunk before it
+    are one passage split by the chunker, and a reader that gets them apart, or
+    reversed, reads a rule that was never written. So each hit is taken with the chunks
+    within `radius` of it as one passage; passages that *overlap* — two hits a chunk
+    apart share a neighbour — are one passage and merge; passages that are merely
+    adjacent do not, because a hit on page 7 and a hit on page 8 are two findings
+    even when the chunker numbered them consecutively, and merging them would let one
+    long stretch of a document crowd out a better hit further in. Passages are ranked
+    by their densest hit, ties by retrieval order, and read in document order inside.
+    """
+    if not evidence:
+        return []
+    position = {id(item): index for index, item in enumerate(evidence)}
+    by_key: dict[tuple[str | None, int], MatchEvidence] = {}
+    loose: list[MatchEvidence] = []
+    for item in evidence:
+        if item.chunk_index is None:
+            loose.append(item)
+        else:
+            by_key.setdefault((item.source_id, item.chunk_index), item)
+    hits = sorted(
+        (item for item in by_key.values() if not item.is_neighbour),
+        key=lambda item: (-_passage_density(item, query_tokens), position[id(item)]),
+    )
+    # Neighbours whose hit was dropped by `_collect_evidence`'s cap have no passage to
+    # join; they are hits of their own, ranked last, rather than lost.
+    orphans = sorted(
+        (item for item in by_key.values() if item.is_neighbour),
+        key=lambda item: position[id(item)],
+    )
+    passages: list[set[tuple[str | None, int]]] = []
+    for hit in hits + orphans:
+        window = {
+            (hit.source_id, index)
+            for index in range(hit.chunk_index - radius, hit.chunk_index + radius + 1)
+            if (hit.source_id, index) in by_key
+        }
+        if hit.is_neighbour:
+            window = {(hit.source_id, hit.chunk_index)}
+        joined = next((run for run in passages if run & window), None)
+        if joined is None:
+            passages.append(window)
+        else:
+            joined |= window
+    ordered = [
+        by_key[key] for run in passages for key in sorted(run, key=lambda key: key[1])
+    ]
+    return ordered + sorted(loose, key=lambda item: position[id(item)])
+
+
 def _collect_evidence(
-    results: dict, owner_key: str, keep: int
+    results: dict, owner_key: str, keep: int, attachment_keep: int | None = None
 ) -> tuple[dict[str, int], dict[str, list[MatchEvidence]]]:
     """Split one Chroma response into per-owner ranks and per-owner evidence.
 
@@ -712,9 +810,19 @@ def _collect_evidence(
     ``circular_id`` for circulars, ``document_id`` for laws. Ranks are unchanged
     from the old de-duplicating loop, so RRF fusion behaves exactly as before; the
     evidence is the part that used to be dropped on the floor.
+
+    `keep` bounds the body chunks retained per owner and `attachment_keep` (default:
+    the same) the attachment chunks — counted separately, because a covering letter
+    and its annexure are different sizes of thing. Three chunks covers a two-page
+    letter; on a 222-chunk annexure it is the whole of what the model will ever see
+    of the document, chosen by global distance rank. Measured on the Basel III
+    liquidity question, the defining paragraph was the annexure's 4th and 5th nearest
+    chunk — retrieved, then discarded here at a cap of 3.
     """
     ranks: dict[str, int] = {}
     evidence: dict[str, list[MatchEvidence]] = {}
+    attachment_keep = keep if attachment_keep is None else attachment_keep
+    retained: dict[tuple[str, bool], int] = {}
     ids = results["ids"][0] if results.get("ids") else []
     metas = results["metadatas"][0] if results.get("metadatas") else []
     documents = results["documents"][0] if results.get("documents") else []
@@ -731,15 +839,18 @@ def _collect_evidence(
         # it is left out of the evidence and the caller falls back to scanning.
         if not chunk_text:
             continue
-        bucket = evidence.setdefault(owner_id, [])
-        if len(bucket) < keep:
-            bucket.append(
-                _evidence_from_chunk(
-                    meta,
-                    chunk_text,
-                    distances[index] if index < len(distances) else None,
-                )
+        is_attachment = meta.get("doc_type") == "attachment"
+        slot = (owner_id, is_attachment)
+        if retained.get(slot, 0) >= (attachment_keep if is_attachment else keep):
+            continue
+        retained[slot] = retained.get(slot, 0) + 1
+        evidence.setdefault(owner_id, []).append(
+            _evidence_from_chunk(
+                meta,
+                chunk_text,
+                distances[index] if index < len(distances) else None,
             )
+        )
     return ranks, evidence
 
 
@@ -1113,7 +1224,17 @@ class SearchEngine:
     DEPT_MATCH_BONUS = 0.02        # per-word department overlap bonus
     RECENCY_WEIGHT = 0.008         # recency decay weight
     REFERENCE_BONUS = 0.5          # bonus for exact reference matches
-    EVIDENCE_K = 3                 # matched chunks retained per result
+    EVIDENCE_K = 3                 # matched body chunks retained per result
+    # Attachment chunks retained per result. Wider than `EVIDENCE_K` because the
+    # count is not the real bound — `_passage_sets` in `ai.py` budgets what goes on
+    # the wire by characters, per result and per response — so this only needs to be
+    # large enough that the chunk holding the answer survives retrieval. Sized from
+    # the case in `_collect_evidence`'s docstring (position 5) with room to spare;
+    # `CANDIDATE_COUNT` is the ceiling either way.
+    ATTACHMENT_EVIDENCE_K = 8
+    # Chunks either side of an attachment hit fetched with it, for the chat arms. See
+    # `_expand_attachment_evidence`.
+    EVIDENCE_NEIGHBOURS = 1
 
     def _fts_ranks(self, db: Session, expanded_tokens: list[str]) -> dict[str, int]:
         """Rank circulars via the persistent FTS5 index for the expanded query.
@@ -1283,7 +1404,79 @@ class SearchEngine:
             )
             return {}, {}
 
-        return _collect_evidence(results, "circular_id", self.EVIDENCE_K)
+        return _collect_evidence(
+            results, "circular_id", self.EVIDENCE_K, self.ATTACHMENT_EVIDENCE_K
+        )
+
+    def _expand_attachment_evidence(
+        self,
+        evidence_by_id: dict[str, list[MatchEvidence]],
+        circular_ids: set[str],
+    ) -> None:
+        """Fetch the chunks either side of each attachment hit, for `circular_ids`.
+
+        In place, one Chroma `get` for all of them. An annexure is numbered in
+        paragraphs and the chunker does not respect them: "4.11. Stable retail deposits
+        are the amount of the retail deposits that are fully insured…" ends one chunk
+        and the conditions it goes on to list open the next. A hit on either half,
+        served alone, is a definition with its conditions missing — the failure
+        `LAW_NEIGHBOUR_CHUNKS` fixed for statutes, arriving here from the other corpus.
+
+        Body chunks are not expanded: a covering letter short enough to matter travels
+        whole as `full_circular_text`. Neighbours are marked `is_neighbour`, so they
+        never pick the snippet or the cited page, and `order_evidence` keeps them
+        beside the hit they belong to. Index ids are ``{attachment_id}__chunk_{n}``,
+        written by `scraper.circulars._replace_document_chunks`; a store that cannot
+        answer leaves the evidence exactly as it was.
+        """
+        if self.EVIDENCE_NEIGHBOURS <= 0:
+            return
+        wanted: dict[str, tuple[str, int]] = {}
+        for circular_id in circular_ids:
+            items = evidence_by_id.get(circular_id) or []
+            present = {
+                (item.source_id, item.chunk_index)
+                for item in items
+                if item.doc_type == "attachment" and item.chunk_index is not None
+            }
+            for item in items:
+                if (
+                    item.doc_type != "attachment"
+                    or item.chunk_index is None
+                    or not item.source_id
+                    # A contents page's neighbours are more contents page.
+                    or is_listing_chunk(item.text)
+                ):
+                    continue
+                for offset in range(-self.EVIDENCE_NEIGHBOURS, self.EVIDENCE_NEIGHBOURS + 1):
+                    index = item.chunk_index + offset
+                    if offset == 0 or index < 0 or (item.source_id, index) in present:
+                        continue
+                    wanted[f"{item.source_id}__chunk_{index}"] = (circular_id, index)
+        if not wanted:
+            return
+        try:
+            stored = collection.get(
+                ids=list(wanted), include=["documents", "metadatas"]
+            )
+        except Exception:
+            logger.info("Neighbour chunk fetch unavailable", exc_info=True)
+            return
+        ids = stored.get("ids") or []
+        documents = stored.get("documents") or []
+        metadatas = stored.get("metadatas") or []
+        for position, chunk_id in enumerate(ids):
+            if chunk_id not in wanted or position >= len(documents):
+                continue
+            text = documents[position]
+            if not text or is_listing_chunk(text):
+                continue
+            meta = metadatas[position] if position < len(metadatas) else {}
+            circular_id, _ = wanted[chunk_id]
+            neighbour = _evidence_from_chunk(meta or {}, text, None)
+            evidence_by_id.setdefault(circular_id, []).append(
+                MatchEvidence(**{**neighbour.__dict__, "is_neighbour": True})
+            )
 
     def _law_fts_ranks(self, db: Session, expanded_tokens: list[str]) -> dict[str, int]:
         """Rank laws/regulations via the `laws_fts` index. ``{document_id: rank}``."""
@@ -1460,15 +1653,19 @@ class SearchEngine:
         code re-derived the passage independently and then had to check whether the
         two agreed before it dared cite a page; they now agree by construction.
 
-        `passages` carries *every* retained chunk whole, in retrieval order, for readers
-        that can take more than one preview. Windowing is safe on prose and unsafe on a
-        table: PDF extraction interleaves a table's columns, so a window centred on the
-        query's words lands mid-row and can pair one row's label with the next row's
-        figure. Whole chunks are the only form of a table that cannot mislead, so the
-        preview and the passage list deliberately carry different things — a snippet for
-        a human scanning results, and the passage itself for a reader that will quote it.
+        `passages` carries *every* retained chunk whole, in `order_evidence`'s order —
+        densest run first, document order within a run — for readers that can take more
+        than one preview. Windowing is safe on prose and unsafe on a table: PDF
+        extraction interleaves a table's columns, so a window centred on the query's
+        words lands mid-row and can pair one row's label with the next row's figure.
+        Whole chunks are the only form of a table that cannot mislead, so the preview
+        and the passage list deliberately carry different things — a snippet for a
+        human scanning results, and the passage itself for a reader that will quote it.
         """
-        evidence_list = evidence_by_id.get(circular.id) or []
+        evidence_list = order_evidence(
+            evidence_by_id.get(circular.id) or [], snippet_tokens,
+            radius=self.EVIDENCE_NEIGHBOURS,
+        )
         passages = [
             {
                 "text": item.text,
@@ -1477,6 +1674,8 @@ class SearchEngine:
                 "attachment_filename": self._evidence_filename(circular, item),
                 "source_page": item.page,
                 "source_ref": item.source_ref,
+                "chunk_index": item.chunk_index,
+                "is_neighbour": item.is_neighbour,
             }
             for item in evidence_list
             if item.text
@@ -1869,7 +2068,7 @@ class SearchEngine:
                 result.update(annotation)
             return result
 
-        def arm(ranks: dict[str, int]) -> list[dict]:
+        def arm(ranks: dict[str, int]) -> list[str]:
             """The arm's top `limit`, with withdrawn hits set aside rather than replaced.
 
             The slice comes *before* the split on purpose. Filtering first and slicing
@@ -1890,7 +2089,7 @@ class SearchEngine:
                     demoted.setdefault(circular_id)
                 else:
                     kept.append(circular_id)
-            return [build(circular_id) for circular_id in kept]
+            return kept
 
         # `reference_matches` is built from `_search_by_reference` and never consults
         # `withdrawn`: a circular the asker named by reference is returned whatever its
@@ -1900,14 +2099,22 @@ class SearchEngine:
         # at all — so applying the status clause uniformly across all three lists would
         # answer "what did circular X say?" with five irrelevant active circulars and no
         # mention of X.
-        arms = {
-            "reference_matches": [
-                build(c.id) for c in ref_results if c.id in id_to_circular
-            ],
+        chosen = {
+            "reference_matches": [c.id for c in ref_results if c.id in id_to_circular],
             "lexical_results": arm(fts_ranks),
             "semantic_results": arm(vector_ranks),
-            "law_results": law_results,
         }
+        # Only the circulars that will be serialized, in one store round trip, after the
+        # arms are cut: the 50 candidates the vector arm scored are five times what the
+        # response carries.
+        self._expand_attachment_evidence(
+            vector_evidence, {cid for ids in chosen.values() for cid in ids}
+        )
+        arms = {
+            key: [build(circular_id) for circular_id in ids]
+            for key, ids in chosen.items()
+        }
+        arms["law_results"] = law_results
         named = {result["circular"].id for result in arms["reference_matches"]}
         arms["withdrawn_matches"] = [
             _withdrawn_pointer(id_to_circular[circular_id])

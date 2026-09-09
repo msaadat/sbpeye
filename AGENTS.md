@@ -316,7 +316,13 @@ cd frontend && npm run typecheck  # TypeScript type checking
 - AI config: Settings DB takes priority over env vars. Env vars: `AI_PROVIDER`, `AI_BASE_URL`, `AI_API_KEY`, `AI_MODEL`, `AI_CHAT_MODEL`
 - Circular scraping runs from the CLI (`sbpeye circulars sync`) or from the admin console's
   Sync tab, which posts to `/api/circulars/sync` in `main.py`
-- All AI batch operations (summarize, tags, checklist, relationships) are run via CLI and results stored in DB
+- Circular sync indexes extracted attachments by default alongside circular bodies. Already
+  vectorized attachments are skipped; the full pipeline's explicit `--no-attachment-vectorize`
+  opt-out is preserved.
+- AI batch operations can run via CLI or the admin Sync tab's `llm_features` checkboxes.
+  Sync generates only selected missing analyses for successfully fetched circulars, through
+  `circular_ai.run_sync_generation` and durable generation jobs; all checkboxes default off.
+  Relationships run before chain consolidation. Results and failures are stored in DB.
 - `api/admin.py` **reports** and writes nothing. Reading corpus or index state must never mutate either — the audit route calls `reconcile(write=False)` for exactly that reason, and `tests/test_admin_status.py` asserts it. A new admin route that writes belongs behind a POST and an explicit operator action, not on a page that reloads; the sync controls live in `main.py` and the console calls across to them, which is what keeps this module's guarantee literally true
 - A route handler that touches the database is a plain **`def`**, never `async def`. FastAPI runs `async def` *on the event loop* and `def` in a threadpool, and this application's ORM is synchronous — so `async def` around a query does not make it concurrent, it stops every other request in the process until the query returns. Measured through this app: five concurrent 300 ms requests took 1.50 s and served 1 other request as `async def`, against 0.30 s and 39 as `def`. `async def` is right only when the body genuinely `await`s (`/api/chat/stream`, anything reading `await request.json()`). This was the default for all 34 routes in the initial commit and took until P6 to undo; `tests/test_route_concurrency.py` now fails the build rather than letting it drift back. Middleware cannot drop its `async`, so blocking work there goes through `run_in_threadpool` — see `require_authentication`
 - The databases run in **WAL** (`database.py`), so `sbpeye.db` alone is not the whole database — recent commits sit in `sbpeye.db-wal` until checkpointed. Anything that *copies* the corpus (the volume upload, `scripts/sync_volume.py`, `git add sbpeye.db`) must checkpoint first; `checkpoint_sqlite()` runs on clean shutdown, a killed process leaves the sidecar full

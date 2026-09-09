@@ -20,6 +20,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useToast } from 'primevue/usetoast'
 import Button from 'primevue/button'
 import Card from 'primevue/card'
+import Checkbox from 'primevue/checkbox'
 import Column from 'primevue/column'
 import DataTable from 'primevue/datatable'
 import InputNumber from 'primevue/inputnumber'
@@ -40,6 +41,7 @@ import {
   type ApiError,
   type AppStatus,
   type CircularSyncStatus,
+  type CircularSyncFeature,
   type SbpReachability,
 } from '@/lib/api'
 import { ABSENT, formatCount, formatDate } from './adminFormat'
@@ -70,6 +72,15 @@ const forceFetch = ref(false)
 const forceDownload = ref(false)
 const fullListing = ref(false)
 const showOptions = ref(false)
+const llmFeatures = ref<CircularSyncFeature[]>([])
+const analysisOptions: { value: CircularSyncFeature; label: string }[] = [
+  { value: 'summary', label: 'Summaries' },
+  { value: 'tags', label: 'Tags' },
+  { value: 'checklist', label: 'Compliance checklists' },
+  { value: 'relationships', label: 'Amendment relationships' },
+  { value: 'entities', label: 'Regulatory values' },
+  { value: 'consolidation', label: 'Consolidated requirements' },
+]
 
 const optionsChanged = computed(
   () =>
@@ -80,7 +91,8 @@ const optionsChanged = computed(
     !includeAttachments.value ||
     forceFetch.value ||
     forceDownload.value ||
-    fullListing.value,
+    fullListing.value ||
+    llmFeatures.value.length > 0,
 )
 
 /** How many circulars SBP is listing that this corpus does not hold. */
@@ -180,6 +192,7 @@ async function start(): Promise<void> {
       force_fetch: forceFetch.value,
       force_download: forceDownload.value,
       full_listing: fullListing.value,
+      llm_features: llmFeatures.value,
     })
     toast.add({
       severity: 'success',
@@ -379,9 +392,40 @@ onUnmounted(stopPolling)
           <Message v-if="sync?.error" severity="error" :closable="false">{{ sync.error }}</Message>
 
           <Message v-if="running" severity="info" :closable="false">
-            Sync is running on the server. Counts are written when it finishes, so this
+            Sync and any selected AI analyses are running on the server. Counts are written when it finishes, so this
             shows a state rather than a progress bar. Leaving the page does not stop it.
           </Message>
+
+          <p v-if="sync?.generation" class="field-hint" role="status">
+            AI analysis: {{ formatCount(sync.generation.completed) }} completed,
+            {{ formatCount(sync.generation.skipped) }} already available or not applicable,
+            {{ formatCount(sync.generation.errors) }} failed. Details are recorded in Runs.
+          </p>
+
+          <fieldset class="analysis-options" :disabled="running || starting">
+            <legend>AI analysis after sync</legend>
+            <p class="field-hint">
+              Choose analyses for circulars fetched by this sync. Existing analyses are kept.
+              Leave all unchecked to sync and index only. Uses your configured AI provider.
+            </p>
+            <div class="analysis-checkboxes">
+              <div v-for="option in analysisOptions" :key="option.value" class="inline-toggle">
+                <Checkbox
+                  v-model="llmFeatures"
+                  :input-id="`sync-analysis-${option.value}`"
+                  :value="option.value"
+                  :disabled="running || starting"
+                />
+                <label :for="`sync-analysis-${option.value}`">{{ option.label }}</label>
+              </div>
+            </div>
+            <p v-if="llmFeatures.includes('consolidation')" class="field-hint">
+              Consolidates resolved amendment chains. Select relationships too to discover new chains.
+            </p>
+            <p v-if="llmFeatures.includes('checklist')" class="field-hint">
+              Checklists can take several model calls for long documents.
+            </p>
+          </fieldset>
 
           <div class="sync-actions">
             <Button
@@ -424,7 +468,7 @@ onUnmounted(stopPolling)
 
             <label class="inline-toggle">
               <ToggleSwitch v-model="includeAttachments" />
-              <span>Download attachments</span>
+              <span>Download and index attachments</span>
             </label>
             <label class="inline-toggle">
               <ToggleSwitch v-model="fullListing" />
@@ -510,6 +554,25 @@ onUnmounted(stopPolling)
   padding: 0.9rem 0 0;
   border-top: 1px solid var(--sbp-border);
   margin-top: 0.75rem;
+}
+
+.analysis-options {
+  border: 1px solid var(--sbp-border);
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+  margin: 1rem 0;
+}
+
+.analysis-options legend {
+  padding: 0 0.35rem;
+  font-size: var(--sbp-fs-meta);
+}
+
+.analysis-checkboxes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: 0.75rem;
+  margin: 0.75rem 0;
 }
 
 .sync-field {

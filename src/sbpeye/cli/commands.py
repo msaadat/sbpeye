@@ -797,6 +797,7 @@ def run_all(dept, year, limit, skip_llm, no_attachment_vectorize, full_listing, 
             verbose=verbose,
             workers=workers,
             full_listing=full_listing,
+            index_attachments=not no_attachment_vectorize,
         )
     finally:
         db.close()

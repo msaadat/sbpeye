@@ -49,6 +49,8 @@ function describeParameters(raw?: string | null): string {
   }
   const parts: string[] = []
   for (const [key, value] of Object.entries(parsed)) {
+    // Sync's analysis outcome is shown by the sync status, not as a request option.
+    if (key === 'generation_result') continue
     if (value === null || value === false || value === 0 || value === '' || key === 'kind') continue
     // An unset multi-value option is stored as `[]`, which is truthy — without this it
     // renders as a bare "Doc types:" with nothing after it on every unfiltered laws run.

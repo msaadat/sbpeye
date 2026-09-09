@@ -67,12 +67,20 @@ export interface CircularSyncStatus {
   processed_count?: number | null
   skipped_count?: number | null
   error_count?: number | null
+  generation?: {
+    completed: number
+    skipped: number
+    errors: number
+    error_details: string[]
+  } | null
   remote_check_status?: RemoteCircularCheckStatus
   remote_checked_at?: string | null
   remote_new_count?: number | null
   remote_newest?: RemoteCircularNewest | null
   remote_error?: string | null
 }
+
+export type CircularSyncFeature = 'summary' | 'tags' | 'checklist' | 'relationships' | 'entities' | 'consolidation'
 
 export interface CircularSyncRequest {
   departments?: string | string[] | null
@@ -85,6 +93,7 @@ export interface CircularSyncRequest {
   include_attachments?: boolean
   workers?: number
   full_listing?: boolean
+  llm_features?: CircularSyncFeature[]
 }
 
 export type LlmStatusState =

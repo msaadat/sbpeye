@@ -649,6 +649,7 @@ def scrape_circulars(
     include_attachments: bool = True,
     workers: int = 4,
     full_listing: bool = False,
+    index_attachments: bool = True,
 ):
     """
     Main entry point: discovers and processes circulars one by one.
@@ -697,12 +698,12 @@ def scrape_circulars(
     worker_count = max(1, workers)
     print(f"Processing {len(pending)} circular(s) with {worker_count} worker(s)")
 
-    def process_one(circ_info: dict) -> None:
+    def process_one(circ_info: dict) -> str | None:
         from ..database import SessionLocal
 
         worker_db = SessionLocal()
         try:
-            process_circular(
+            circular = process_circular(
                 worker_db,
                 title=circ_info["title"],
                 url=circ_info["url"],
@@ -715,11 +716,14 @@ def scrape_circulars(
                 force_fetch=force_fetch,
                 force_download=force_download,
                 include_attachments=include_attachments,
+                index_attachments=index_attachments,
             )
+            return circular.id if circular is not None else None
         finally:
             worker_db.close()
 
     errors = 0
+    processed_ids: list[str] = []
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = {
             executor.submit(process_one, item): (index, item)
@@ -728,7 +732,9 @@ def scrape_circulars(
         for future in as_completed(futures):
             index, item = futures[future]
             try:
-                future.result()
+                circular_id = future.result()
+                if circular_id is not None:
+                    processed_ids.append(circular_id)
                 print(f"[{index}/{len(pending)}] {item['title']}")
             except Exception as exc:
                 errors += 1
@@ -744,6 +750,7 @@ def scrape_circulars(
         "processed": len(pending) - errors,
         "errors": errors,
         "skipped": skipped,
+        "circular_ids": sorted(set(processed_ids)),
     }
 
 
@@ -761,6 +768,7 @@ def process_circular(
     force_download: bool = False,
     include_attachments: bool = True,
     old_url: str | None = None,
+    index_attachments: bool = True,
 ):
     """Download and idempotently store a circular and its attachments."""
     if verbose:
@@ -827,8 +835,20 @@ def process_circular(
         db.commit()
 
     _index_circular(circular, verbose=verbose, db=db)
+    if index_attachments:
+        vectorize_attachments(db, circular, verbose=verbose)
     index_circular_fts(db, circular)
     _link_circular_to_laws(db, circular, verbose=verbose)
+    if index_attachments:
+        failed = [
+            attachment for attachment in circular.attachments
+            if (attachment.content_text or "").strip() and not attachment.is_vectorized
+        ]
+        if failed:
+            raise RuntimeError(
+                f"Circular saved, but {len(failed)} attachment(s) could not be indexed. "
+                "Retry with 'sbpeye attachments vectorize'."
+            )
     return circular
 
 

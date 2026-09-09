@@ -1,4 +1,5 @@
 import json
+import uuid
 from datetime import datetime
 
 from sqlalchemy import or_
@@ -7,7 +8,7 @@ from sqlalchemy.orm import Session
 from .ai import get_ai_client
 from .database import SessionLocal
 from .link_routing import resolve_reference_in_context
-from .models import AIGenerationJob, Circular, CircularEntity, CircularRelationship
+from .models import AIGenerationJob, Circular, CircularConsolidation, CircularEntity, CircularRelationship
 from .llm_debug import emit_event, trace_operation
 
 
@@ -15,6 +16,7 @@ GENERATION_FEATURES = ("summary", "tags", "checklist", "relationships", "entitie
 # Consolidation is a chain-level, multi-call operation, so it is a standalone
 # action rather than part of "all".
 GENERATION_ACTIONS = (*GENERATION_FEATURES, "consolidation", "all")
+SYNC_GENERATION_FEATURES = (*GENERATION_FEATURES, "consolidation")
 # What "all" actually runs. The checklist is the most expensive feature here — one LLM
 # call per chunk of the circular — and is wanted far less often than the rest, so it is
 # opt-in: ask for `checklist` by name to get one.
@@ -283,3 +285,75 @@ def generation_job_payload(job: AIGenerationJob) -> dict:
         "started_at": job.started_at.isoformat() if job.started_at else None,
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
     }
+
+
+def run_sync_generation(circular_ids: list[str], features: list[str]) -> dict:
+    """Generate selected missing analyses, sequentially, after the sync has stored its rows.
+
+    Feature-first ordering resolves relationships across the whole batch before chain
+    consolidation. Each analysis uses the same durable jobs/traces as the detail page.
+    No provider is contacted for unchecked or already-generated features.
+    """
+    invalid = set(features) - set(SYNC_GENERATION_FEATURES)
+    if invalid:
+        raise ValueError(f"Unknown sync analysis: {', '.join(sorted(invalid))}")
+    result = {"completed": 0, "skipped": 0, "errors": 0, "error_details": []}
+    ids = list(dict.fromkeys(circular_ids))
+    for feature in SYNC_GENERATION_FEATURES:
+        if feature not in features:
+            continue
+        for circular_id in ids:
+            db = SessionLocal()
+            try:
+                circular = db.get(Circular, circular_id)
+                if circular is None:
+                    raise ValueError("Synced circular is no longer present.")
+                if feature == "consolidation":
+                    from .consolidation import resolve_chain
+
+                    members = resolve_chain(db, circular_id)
+                    if len(members) < 2:
+                        result["skipped"] += 1
+                        continue
+                    existing = db.get(CircularConsolidation, members[0].id)
+                    if (existing is not None and not existing.stale
+                            and json.loads(existing.member_ids) == [m.id for m in members]):
+                        result["skipped"] += 1
+                        continue
+                else:
+                    timestamp = getattr(circular, f"{feature}_generated_at")
+                    # Legacy summary/tag/checklist rows may predate timestamps.
+                    value_field = {"summary": "summary", "tags": "tags",
+                                   "checklist": "compliance_checklist"}.get(feature)
+                    if timestamp is not None or (value_field and getattr(circular, value_field)):
+                        result["skipped"] += 1
+                        continue
+                active = db.query(AIGenerationJob.id).filter(
+                    AIGenerationJob.circular_id == circular_id,
+                    AIGenerationJob.status.in_(("queued", "running")),
+                ).first()
+                if active:
+                    raise ValueError("Another analysis is already running for this circular.")
+                job = AIGenerationJob(
+                    id=str(uuid.uuid4()), target_kind="circular", circular_id=circular_id,
+                    feature=feature, status="queued",
+                )
+                db.add(job)
+                db.commit()
+                job_id = job.id
+                # Do not retain a read transaction while another session runs the model.
+                db.close()
+                run_generation_job(job_id)
+                db = SessionLocal()
+                job = db.get(AIGenerationJob, job_id)
+                if job is None or job.status != "succeeded":
+                    raise RuntimeError(job.error if job and job.error else "Analysis did not finish.")
+                result["completed"] += 1
+            except Exception as exc:
+                db.rollback()
+                result["errors"] += 1
+                if len(result["error_details"]) < 10:
+                    result["error_details"].append(f"{circular_id} ({feature}): {exc}")
+            finally:
+                db.close()
+    return result

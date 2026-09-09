@@ -36,7 +36,10 @@ from .llm_debug import (
 )
 from .search import backfill_fts, backfill_laws_fts, index_circular_fts, resolve_metric_terms, search_engine
 from .ai import AIClient, AIConfig, MissingUserAIConfig, classify_provider_state, friendly_chat_error, get_ai_client, get_ai_client_for_user, get_provider_api_key, get_provider_definition, normalize_provider
-from .circular_ai import GENERATION_ACTIONS, generation_job_payload, run_generation_job
+from .circular_ai import (
+    GENERATION_ACTIONS, SYNC_GENERATION_FEATURES, generation_job_payload,
+    run_generation_job, run_sync_generation,
+)
 from .laws_ai import (
     CONTAINER_FEATURES,
     GAP_MANIFEST,
@@ -724,6 +727,9 @@ def _sync_status_payload(sync_status: SyncStatus | None, last_success: SyncStatu
         "last_sync_raw": last_sync_dt.isoformat() if isinstance(last_sync_dt, datetime) else None,
         "error": sync_status.error if sync_status else None,
         "parameters": _parse_sync_parameters(sync_status.parameters if sync_status else None),
+        "generation": _parse_sync_parameters(
+            sync_status.parameters if sync_status else None
+        ).get("generation_result"),
         "processed_count": sync_status.processed_count if sync_status else None,
         "skipped_count": sync_status.skipped_count if sync_status else None,
         "error_count": sync_status.error_count if sync_status else None,
@@ -759,17 +765,27 @@ def _sync_options_from_payload(data: dict) -> dict:
         raise ValueError("Workers must be between 1 and 8.")
 
     include_attachments = bool(data.get("include_attachments", not data.get("no_attachments", False)))
+    llm_features = data.get("llm_features", [])
+    if not isinstance(llm_features, list) or any(
+        not isinstance(feature, str) or feature not in SYNC_GENERATION_FEATURES
+        for feature in llm_features
+    ):
+        raise ValueError(
+            f"LLM features must be a list containing only: {', '.join(SYNC_GENERATION_FEATURES)}."
+        )
     return {
         "departments": departments or None,
         "years": years or None,
         "limit": limit,
-        "skip_llm": bool(data.get("skip_llm", True)),
+        # Explicit feature selection is the only way sync opts into model calls.
+        "skip_llm": not bool(llm_features),
         "verbose": bool(data.get("verbose", False)),
         "force_fetch": bool(data.get("force_fetch", False)),
         "force_download": bool(data.get("force_download", False)),
         "include_attachments": include_attachments,
         "workers": workers,
         "full_listing": bool(data.get("full_listing", False)),
+        "llm_features": [feature for feature in SYNC_GENERATION_FEATURES if feature in llm_features],
     }
 
 
@@ -783,7 +799,12 @@ def _run_circular_sync(job_id: str, options: dict) -> None:
         job.started_at = datetime.utcnow()
         db.commit()
 
-        result = scrape_circulars(db, **options) or {}
+        scrape_options = dict(options)
+        llm_features = scrape_options.pop("llm_features", [])
+        result = scrape_circulars(db, **scrape_options) or {}
+        # End the scraper session's read transaction before generation opens its own.
+        db.rollback()
+        generation = run_sync_generation(result.get("circular_ids", []), llm_features) if llm_features else None
 
         job = db.query(SyncStatus).filter(SyncStatus.job_id == job_id).first()
         if not job:
@@ -791,10 +812,17 @@ def _run_circular_sync(job_id: str, options: dict) -> None:
         job.status = "success"
         job.completed_at = datetime.utcnow()
         job.last_sync_date = job.completed_at
-        job.error = None
+        job.error = (
+            "Some selected AI analyses failed. " + "; ".join(generation["error_details"])
+            if generation and generation["errors"] else None
+        )
+        if generation is not None:
+            job.parameters = json.dumps({
+                **_parse_sync_parameters(job.parameters), "generation_result": generation,
+            })
         job.processed_count = int(result.get("processed") or 0)
         job.skipped_count = int(result.get("skipped") or 0)
-        job.error_count = int(result.get("errors") or 0)
+        job.error_count = int(result.get("errors") or 0) + (generation["errors"] if generation else 0)
         db.commit()
         _clear_remote_circular_check_cache()
     except Exception as exc:

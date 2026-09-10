@@ -74,7 +74,10 @@ const router = createRouter({
       path: '/admin',
       component: () => import('@/views/AdminView.vue'),
       children: [
-        { path: '', redirect: '/admin/corpus' },
+        { path: '', redirect: '/admin/overview' },
+        ...['overview', 'documents', 'analysis', 'search-index', 'jobs'].map(path => ({
+          path, component: () => import('@/views/admin/AdminMaintenanceTab.vue'),
+        })),
         {
           path: 'corpus',
           name: 'admin-corpus',

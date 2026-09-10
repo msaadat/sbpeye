@@ -386,8 +386,10 @@ async def _serving_lifespan(_app: FastAPI):
         fail_interrupted_traces()
         fail_interrupted_ai_jobs()
         from .circular_jobs import recover_jobs
+        from .admin_maintenance import recover as recover_maintenance
         with SessionLocal() as mirror_db:
             recover_jobs(mirror_db)
+            recover_maintenance(mirror_db)
         fail_interrupted_sync_jobs()
         maintenance.start_thread(_warm_up_search_index)
     # Started here rather than run here: the first scrape is a live HTTP round-trip to
@@ -1366,6 +1368,46 @@ def skip_mirror_gap(gap_id: str, data: SkipRequest, db: Session = Depends(get_db
     return _mirror_transition(db, gap_id, "skip", data.reason)
 
 
+from . import admin_maintenance as corpus_maintenance
+
+
+@app.post("/api/circulars/maintenance/jobs", dependencies=[Depends(require_admin)], status_code=202)
+def start_maintenance_job(data: corpus_maintenance.BatchRequest, db: Session = Depends(get_db)):
+    if not _CIRCULAR_SYNC_LOCK.acquire(blocking=False):
+        raise _mirror_busy()
+    job = None
+    try:
+        job = corpus_maintenance.create_job(db, data)
+        job_id = job.job_id
+        def worker():
+            try:
+                corpus_maintenance.run_job(job_id, SessionLocal)
+            finally:
+                _CIRCULAR_SYNC_LOCK.release()
+        if not maintenance.start_thread(worker):
+            raise ValueError("The application is in maintenance mode")
+    except Exception as exc:
+        db.rollback()
+        if job is not None:
+            job.status, job.error, job.completed_at = "failed", str(exc), mirror_now()
+            db.commit()
+        _CIRCULAR_SYNC_LOCK.release()
+        raise HTTPException(409, str(exc)) from exc
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.post("/api/circulars/maintenance/jobs/{job_id}/cancel", dependencies=[Depends(require_admin)])
+def cancel_maintenance_job(job_id: str, db: Session = Depends(get_db)):
+    job = db.query(SyncStatus).filter_by(job_id=job_id).first()
+    if job is None or json.loads(job.parameters or "{}").get("operation") != "maintenance":
+        raise HTTPException(404, "Unknown maintenance job")
+    if job.status in {"queued", "running"}:
+        corpus_maintenance.cancel_job(job_id)
+        job.progress = mirror_dumps({**json.loads(job.progress), "cancel_requested": True})
+        db.commit()
+    return {"job_id": job_id, "status": job.status}
+
+
 @app.post("/api/circulars/mirror/gaps/{gap_id}/requeue", dependencies=[Depends(require_admin)])
 def requeue_mirror_gap(gap_id: str, db: Session = Depends(get_db)):
     return _mirror_transition(db, gap_id, "requeue")
@@ -1950,6 +1992,8 @@ async def generate_circular_intelligence(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
+    if _CIRCULAR_SYNC_LOCK.locked():
+        return JSONResponse({"error": "A corpus operation is running. Start analysis after it finishes."}, status_code=409)
     circular_id = resolve_identity_id(db, circular_id)
     try:
         data = await request.json()

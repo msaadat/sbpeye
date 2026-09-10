@@ -148,6 +148,7 @@ onUnmounted(() => { disposed = true; clearTimeout(timer) })
     </template></Card>
 
     <Card v-if="job"><template #title>Backfill progress</template><template #content>
+      <RouterLink :to="{ path: '/admin/documents', query: { source_job_id: job.job_id } }">Audit this batch and fetch missing attachments</RouterLink>
       <AdminStatusChip :status="job.status" /><p v-if="job.error_count">Completed items include {{ job.error_count }} required-stage errors. Stored circulars remain resolved; index repair uses stored text.</p><p>{{ job.error }}</p>
       <div class="metrics"><span v-for="(value, key) in job.progress" :key="key">{{ String(key).replace(/_/g, ' ') }}: {{ typeof value === 'number' ? Math.round(value) : value }}</span></div>
       <Button v-if="active(job.status)" label="Cancel after active requests finish" severity="secondary" :disabled="submitting || Boolean(job.progress.cancel_requested)" @click="act(`backfill/${job.job_id}/cancel`)" />

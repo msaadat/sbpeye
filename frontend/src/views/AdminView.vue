@@ -17,16 +17,19 @@ const route = useRoute()
 const { user: currentUser, isAdmin, load: loadCurrentUser } = useCurrentUser()
 
 const tabs = [
-  { label: 'Corpus', icon: 'pi pi-database', to: '/admin/corpus' },
-  { label: 'Index', icon: 'pi pi-sitemap', to: '/admin/index' },
-  { label: 'Sync', icon: 'pi pi-cloud-download', to: '/admin/sync' },
+  { label: 'Overview', icon: 'pi pi-home', to: '/admin/overview' },
   { label: 'Mirror', icon: 'pi pi-clone', to: '/admin/mirror' },
-  { label: 'Runs', icon: 'pi pi-history', to: '/admin/runs' },
+  { label: 'Documents', icon: 'pi pi-file', to: '/admin/documents' },
+  { label: 'AI analysis', icon: 'pi pi-sparkles', to: '/admin/analysis' },
+  { label: 'Search index', icon: 'pi pi-sitemap', to: '/admin/search-index' },
+  { label: 'Jobs', icon: 'pi pi-history', to: '/admin/jobs' },
+]
+const administration = [
   { label: 'Users', icon: 'pi pi-users', to: '/admin/users' },
-  { label: 'Deployment', icon: 'pi pi-server', to: '/admin/deployment' },
+  { label: 'System', icon: 'pi pi-server', to: '/admin/deployment' },
 ]
 
-const activeTab = computed(() => tabs.find((tab) => route.path.startsWith(tab.to)))
+const activeTab = computed(() => [...tabs, ...administration].find((tab) => route.path.startsWith(tab.to)))
 
 onMounted(loadCurrentUser)
 </script>
@@ -35,7 +38,7 @@ onMounted(loadCurrentUser)
   <div class="admin-view">
     <header class="admin-header">
       <h1>Admin console</h1>
-      <p>Corpus and index status, corpus sync, run history, accounts, and deployment configuration.</p>
+      <p>Audit coverage, inspect affected documents, and complete missing work in batches.</p>
     </header>
 
     <!--
@@ -50,7 +53,7 @@ onMounted(loadCurrentUser)
     <template v-else>
       <nav class="admin-tabs" aria-label="Admin sections">
         <RouterLink
-          v-for="tab in tabs"
+          v-for="tab in [...tabs, ...administration]"
           :key="tab.to"
           :to="tab.to"
           class="admin-tab"
@@ -60,6 +63,13 @@ onMounted(loadCurrentUser)
           <i :class="tab.icon" aria-hidden="true" />
           <span>{{ tab.label }}</span>
         </RouterLink>
+      </nav>
+
+      <nav class="admin-tabs" aria-label="Diagnostics and additional tools">
+        <RouterLink class="admin-tab" to="/admin/corpus">Corpus statistics & laws</RouterLink>
+        <RouterLink class="admin-tab" to="/admin/index">Index diagnostics</RouterLink>
+        <RouterLink class="admin-tab" to="/admin/sync">Sync & EcoData</RouterLink>
+        <RouterLink class="admin-tab" to="/admin/runs">All run history</RouterLink>
       </nav>
 
       <RouterView />

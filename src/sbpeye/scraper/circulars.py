@@ -15,6 +15,7 @@ from ..checklist import PAGE_MARKER_RE, prepare_index_chunks, prepare_reference_
 from ..search import index_circular_fts
 from .clean_html import extract_automation_path, extract_sbp_text
 from ..link_routing import normalize_reference, normalize_sbp_url
+from ..circular_identity import circular_identity
 import uuid
 from urllib.parse import unquote, urljoin, urlparse
 
@@ -40,39 +41,19 @@ ASSET_BASE_URL = f"{BASE_URL}/assets/documents/circulars/"
 _CHROMA_WRITE_LOCK = threading.Lock()
 
 
-def circular_identity(reference: str | None, url: str) -> str:
-    """The stable primary-key id for a circular.
-
-    A circular's identity is its normalized reference (e.g. "BPRD CIRCULAR NO 4 OF
-    2025"), so the same circular gets the same id whether it is scraped from the new
-    site, from the archive, or under a different URL slug. Unreferenced circulars fall
-    back to a URL-derived id.
-    """
-    basis = normalize_reference(reference) or url
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, basis))
+class EmptyCircularContent(ValueError):
+    pass
 
 
 def _get_sbp(url: str, **kwargs):
-    """Fetch an SBP URL while validating every redirect target."""
-    current_url = normalize_sbp_url(url)
-    for _ in range(6):
-        # allow_redirects=False so each hop reaches the validation below.
-        response = requests.get(current_url, allow_redirects=False, **kwargs)
-        status_code = getattr(response, "status_code", 200)
-        if status_code not in {301, 302, 303, 307, 308}:
-            return response
-        location = getattr(response, "headers", {}).get("location")
-        response.close()
-        if not location:
-            raise ValueError("SBP returned a redirect without a destination.")
-        current_url = normalize_sbp_url(urljoin(current_url, location))
-    raise ValueError("SBP document fetch exceeded the redirect limit.")
+    from .http import get
+    return get(url, **kwargs)
 
 
 def fetch_page(url: str) -> BeautifulSoup:
     """Fetch a URL and return a BeautifulSoup object."""
     print(f"Fetching {url}")
-    resp = requests.get(url, headers=HEADERS, timeout=50)
+    resp = _get_sbp(url, headers=HEADERS, timeout=50)
     resp.raise_for_status()
     return BeautifulSoup(resp.content, "html.parser")
 
@@ -84,14 +65,32 @@ def fetch_page_cached(url: str, force: bool = False) -> bytes:
     cache_file = HTML_CACHE_DIR / f"{circular_id}.html"
 
     if cache_file.exists() and not force:
-        return cache_file.read_bytes()
+        cached = cache_file.read_bytes()
+        if _valid_circular_html(cached):
+            return cached
 
     response = _get_sbp(url, headers=HEADERS, timeout=50)
-    response.raise_for_status()
-    temp_file = cache_file.with_suffix(".html.part")
-    temp_file.write_bytes(response.content)
-    temp_file.replace(cache_file)
-    return response.content
+    try:
+        response.raise_for_status()
+        content = response.content
+        if not _valid_circular_html(content):
+            raise EmptyCircularContent(f"Empty or invalid circular HTML from {url}")
+        temp_file = cache_file.with_suffix(".html.part")
+        temp_file.write_bytes(content)
+        temp_file.replace(cache_file)
+        return content
+    finally:
+        response.close()
+
+
+def _valid_circular_html(content: bytes) -> bool:
+    soup = BeautifulSoup(content, "html.parser")
+    title = soup.title.get_text(" ", strip=True).casefold() if soup.title else ""
+    if any(marker in title for marker in ("just a moment", "access denied", "attention required", "verify you are human")):
+        return False
+    if soup.select_one("#challenge-form, #cf-challenge-running"):
+        return False
+    return bool(extract_sbp_text(content).strip())
 
 
 def cached_circular_html(circular) -> bytes | None:
@@ -251,38 +250,34 @@ def download_attachment(
     temp_path = destination.with_name(f"{destination.name}.part")
     last_error: str | None = None
     for candidate_url in candidates:
-        response = None
-        try:
-            response = _get_sbp(
-                candidate_url, headers=HEADERS, timeout=60, stream=True
-            )
-            response.raise_for_status()
-            valid = True
+        def consume(response, deadline):
+            import time
+            total = 0
             with temp_path.open("wb") as output:
-                for index, chunk in enumerate(
-                    response.iter_content(chunk_size=1024 * 1024)
-                ):
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if time.monotonic() >= deadline:
+                        raise requests.Timeout("Attachment operation deadline exceeded")
                     if not chunk:
                         continue
-                    if index == 0 and not _content_matches_file_type(
-                        chunk, att_info.get("file_type")
-                    ):
-                        valid = False
-                        break
+                    if total == 0 and not _content_matches_file_type(chunk, att_info.get("file_type")):
+                        raise ValueError(f"{candidate_url} did not return a valid {att_info.get('file_type')} file.")
+                    total += len(chunk)
+                    if total > 100 * 1024 * 1024:
+                        raise ValueError("Attachment exceeds the 100 MiB download limit")
                     output.write(chunk)
-            if not valid:
-                temp_path.unlink(missing_ok=True)
-                last_error = f"{candidate_url} did not return a valid {att_info.get('file_type')} file."
-                continue
+            if not total:
+                raise ValueError("Empty attachment response")
+            return True
+        try:
+            _get_sbp(candidate_url, headers=HEADERS, stream=True, consume=consume, deadline_seconds=600)
             temp_path.replace(destination)
             return destination, True, None, candidate_url
         except Exception as exc:
+            from .http import Cancelled
             temp_path.unlink(missing_ok=True)
+            if isinstance(exc, Cancelled):
+                raise
             last_error = str(exc)
-            continue
-        finally:
-            if response is not None:
-                response.close()
 
     logging.warning("Failed to download attachment %s: %s", att_info["url"], last_error)
     return None, False, last_error, att_info["url"]
@@ -442,7 +437,7 @@ def process_attachment(
         db.commit()
         return attachment
 
-    attachment.local_path = str(local_path.relative_to(PROJECT_ROOT))
+    attachment.local_path = local_path.relative_to(PROJECT_ROOT).as_posix()
     attachment.filename = att_info["filename"]
     attachment.original_url = resolved_url
     attachment.file_type = att_info["file_type"]
@@ -637,7 +632,45 @@ def _matches_department(item: dict, filters: list[str]) -> bool:
     return any(f.lower() in haystack for f in filters)
 
 
-def scrape_circulars(
+def scrape_circulars(db: Session, departments=None, years=None, limit=0, skip_llm=True,
+                     verbose=False, force_fetch=False, force_download=False,
+                     include_attachments=True, workers=4, full_listing=False,
+                     index_attachments=True, run_id=None, delay=0.5):
+    """Persist a CLI run even if discovery fails before any item is dispatched."""
+    import json
+    from ..models import SyncStatus
+    from ..circular_jobs import preflight
+    preflight(db)
+    owns_run = run_id is None
+    run_id = run_id or str(uuid.uuid4())
+    if owns_run:
+        db.add(SyncStatus(job_id=run_id, kind="circulars", status="running", started_at=datetime.utcnow(),
+                          parameters=json.dumps({"operation": "ordinary_sync", "departments": departments,
+                                                 "years": years, "workers": workers, "delay": delay})))
+        db.commit()
+    try:
+        result = _scrape_circulars(db, departments=departments, years=years, limit=limit,
+                                  skip_llm=skip_llm, verbose=verbose, force_fetch=force_fetch,
+                                  force_download=force_download, include_attachments=include_attachments,
+                                  workers=workers, full_listing=full_listing, index_attachments=index_attachments,
+                                  run_id=run_id, delay=delay)
+        if owns_run:
+            job = db.query(SyncStatus).filter_by(job_id=run_id).one()
+            job.status, job.completed_at = "success", datetime.utcnow()
+            job.last_sync_date = job.completed_at
+            job.processed_count, job.skipped_count, job.error_count = result["processed"], result["skipped"], result["errors"]
+            db.commit()
+        return result
+    except BaseException as exc:
+        db.rollback()
+        if owns_run:
+            job = db.query(SyncStatus).filter_by(job_id=run_id).one()
+            job.status, job.error, job.completed_at = "failed", str(exc), datetime.utcnow()
+            db.commit()
+        raise
+
+
+def _scrape_circulars(
     db: Session,
     departments: list[str] | None = None,
     years: list[str] | None = None,
@@ -650,6 +683,8 @@ def scrape_circulars(
     workers: int = 4,
     full_listing: bool = False,
     index_attachments: bool = True,
+    run_id: str | None = None,
+    delay: float = 0.5,
 ):
     """
     Main entry point: discovers and processes circulars one by one.
@@ -662,15 +697,22 @@ def scrape_circulars(
         skip_llm: If True, skip LLM relationship extraction.
         verbose: If True, print progress details.
     """
+    from ..circular_jobs import preflight, ordinary_attempt_start, ordinary_attempt_finish
+    from ..models import SyncStatus
+    from .http import RequestPacer, http_job
+    from ..mirror import reconcile
+    preflight(db)
+    pacer = RequestPacer(delay)
     # With filters we must scan the whole listing to find matches, so only push the
     # limit down into the crawler for the unfiltered "latest N" case.
     filtering = bool(departments or years)
-    discovered = discover_circulars(
-        limit=0 if filtering else limit,
-        verbose=verbose,
-        stop_at_date=None if full_listing else _latest_circular_date(db),
-        full_listing=full_listing,
-    )
+    with http_job(pacer):
+        discovered = discover_circulars(
+            limit=0 if filtering else limit,
+            verbose=verbose,
+            stop_at_date=None if full_listing else _latest_circular_date(db),
+            full_listing=full_listing,
+        )
 
     if departments:
         discovered = [c for c in discovered if _matches_department(c, departments)]
@@ -679,6 +721,7 @@ def scrape_circulars(
     if verbose and filtering:
         print(f"Filtered to {len(discovered)} circular(s)")
 
+    discovered = [item["descriptor"] for item in reconcile(discovered, [])["items"] if item["bucket"] == "missing"]
     pending: list[dict] = []
     skipped = 0
     for circ_info in discovered:
@@ -702,6 +745,10 @@ def scrape_circulars(
         from ..database import SessionLocal
 
         worker_db = SessionLocal()
+        stages, failure = {}, None
+        attempt_id = ordinary_attempt_start(worker_db, circ_info, run_id)
+        context = http_job(pacer)
+        context.__enter__()
         try:
             circular = process_circular(
                 worker_db,
@@ -717,10 +764,18 @@ def scrape_circulars(
                 force_download=force_download,
                 include_attachments=include_attachments,
                 index_attachments=index_attachments,
+                outcome=stages,
             )
             return circular.id if circular is not None else None
+        except Exception as exc:
+            failure = exc
+            raise
         finally:
+            worker_db.rollback()
             worker_db.close()
+            context.__exit__(None, None, None)
+            with SessionLocal() as outcome_db:
+                ordinary_attempt_finish(outcome_db, attempt_id, stages, failure)
 
     errors = 0
     processed_ids: list[str] = []
@@ -769,20 +824,23 @@ def process_circular(
     include_attachments: bool = True,
     old_url: str | None = None,
     index_attachments: bool = True,
+    outcome: dict | None = None,
 ):
     """Download and idempotently store a circular and its attachments."""
     if verbose:
         print(f"  Fetching: {url}")
 
+    outcome = outcome if outcome is not None else {}
+    outcome.update(body="pending", fts="pending", vector="pending", attachments="deferred", law_links="pending")
+    from ..identity_migration import identity_preflight
+    identity_preflight(db.connection().connection.driver_connection)
     circular_id = circular_identity(reference, url)
     raw_html = fetch_page_cached(url, force=force_fetch)
     soup = BeautifulSoup(raw_html, "html.parser")
     content_text = extract_sbp_text(raw_html)
 
-    if not content_text:
-        if verbose:
-            print(f"  [SKIP] No content")
-        return
+    if not content_text or not content_text.strip():
+        raise EmptyCircularContent(f"No circular content extracted from {url}")
 
     existing = db.query(Circular).filter(Circular.id == circular_id).first()
     circular_date = None
@@ -816,6 +874,12 @@ def process_circular(
     circular.content_text = content_text
     db.commit()
 
+    outcome["body"] = "ready"
+    index_circular_fts(db, circular)
+    outcome["fts"] = "ready"
+    indexed = _index_circular(circular, verbose=verbose, db=db)
+    outcome["vector"] = "failed" if indexed is False else "ready"
+
     if verbose:
         print(f"  [DB] Saved ({len(content_text)} chars, dept={department})")
 
@@ -834,21 +898,26 @@ def process_circular(
         circular.attachments_scanned_at = datetime.utcnow()
         db.commit()
 
-    _index_circular(circular, verbose=verbose, db=db)
+    if include_attachments:
+        outcome["attachments"] = "warning" if any(a.extraction_status == "error" for a in circular.attachments) else "ready"
     if index_attachments:
         vectorize_attachments(db, circular, verbose=verbose)
     index_circular_fts(db, circular)
-    _link_circular_to_laws(db, circular, verbose=verbose)
+    linked = _link_circular_to_laws(db, circular, verbose=verbose)
+    outcome["law_links"] = "warning" if linked is False else "ready"
     if index_attachments:
         failed = [
             attachment for attachment in circular.attachments
             if (attachment.content_text or "").strip() and not attachment.is_vectorized
         ]
         if failed:
+            outcome["attachments"] = "warning"
             raise RuntimeError(
                 f"Circular saved, but {len(failed)} attachment(s) could not be indexed. "
                 "Retry with 'sbpeye attachments vectorize'."
             )
+    if indexed is False:
+        raise RuntimeError("Circular saved, but body vector indexing failed")
     return circular
 
 
@@ -870,9 +939,11 @@ def _link_circular_to_laws(db: Session, circular: Circular, verbose: bool = Fals
                 f"  [LINK] {counts['url_scan']} url, {counts['name_match']} name "
                 f"reference(s) to laws/regulations"
             )
+        return True
     except Exception:
         db.rollback()
         logging.exception("Laws cross-linking failed for circular %s", circular.id)
+        return False
 
 
 def _delete_document_chunks(
@@ -1068,6 +1139,7 @@ def _index_circular(
         _record_ledger(
             db, "circular", circular.id, "circular", circular.id, document["text"], count
         )
+        return True
     except Exception as e:
         logging.exception("ChromaDB indexing failed for %s", circular.url)
         if verbose:
@@ -1076,6 +1148,7 @@ def _index_circular(
             db, "circular", circular.id, "circular", circular.id, document["text"], 0,
             error=str(e),
         )
+        return False
 
 
 def vectorize_attachment(
@@ -1226,39 +1299,4 @@ def _extract_date(text: str) -> datetime | None:
     return None
 
 
-def _parse_listing_date(date_str: str, year: str = "") -> datetime | None:
-    """Parse a date string from the circular listing table."""
-    date_str = date_str.strip()
-    if not date_str:
-        return None
-
-    # Append the year only if no year already appears in the date string.
-    if year and not re.search(r"\b(?:19|20)\d{2}\b", date_str):
-        date_str = f"{date_str}, {year}"
-
-    clean_date_str = re.sub(r'(?<=\d)(st|nd|rd|th)', '', date_str) #14th, 2nd etc
-    clean_date_str = re.sub(r"\s+,\s*", ", ", clean_date_str)   # "January 15 , 2025" -> "January 15, 2025"
-    clean_date_str = re.sub(r"\s+", " ", clean_date_str)        # "January  15, 2025" -> "January 15, 2025"
-
-    formats = [
-        "%b %d, %Y",
-        "%d %B %Y",
-        "%B %d, %Y",
-        "%B %d %Y",
-        "%d-%b-%Y",
-        "%d-%b-%y",
-        "%d.%m.%Y",
-        "%d/%m/%Y",
-        "%d-%m-%Y",
-        "%Y-%m-%d",
-        "%d %B, %Y",
-        "%d %B %Y",
-    ]
-
-    for fmt in formats:
-        try:
-            return datetime.strptime(clean_date_str, fmt)
-        except ValueError:
-            continue
-
-    return None
+from ..circular_dates import parse_listing_date as _parse_listing_date

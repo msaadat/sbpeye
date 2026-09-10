@@ -27,7 +27,7 @@ dependencies = [
 ]
 
 [project.scripts]
-sbpeye = "sbpeye.cli.commands:main"
+sbpeye = "sbpeye.cli.bootstrap:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -601,6 +601,7 @@ def run_history(limit: int = Query(25, ge=1, le=200), db: Session = Depends(get_
 
     return {
         "generated_at": datetime.utcnow().isoformat(),
+        "mirror_audits": [mirror_reads.payload(row) for row in db.query(MirrorAudit).order_by(MirrorAudit.started_at.desc()).limit(limit)],
         "sync_runs": [_sync_run_payload(row) for row in sync_rows],
         "ai_jobs": [
             {
@@ -764,3 +765,86 @@ def sbp_reachability(
         return JSONResponse({"error": str(exc), "targets": sorted(TARGETS), "arms": list(ARMS)}, status_code=400)
     finally:
         _REACHABILITY_LOCK.release()
+
+
+# Mirror reads never crawl, recover jobs, or change queue eligibility.
+from typing import Literal
+from fastapi import HTTPException
+from fastapi.responses import Response
+from .. import mirror_reads
+from ..mirror_models import MirrorAudit, MirrorAuditItem, MirrorGap, MirrorAttempt
+
+
+@router.get("/mirror")
+def mirror_overview(db: Session = Depends(get_db)):
+    return mirror_reads.overview(db)
+
+
+@router.get("/mirror/audits")
+def mirror_audits(limit: int = Query(25, ge=1, le=100), db: Session = Depends(get_db)):
+    return [mirror_reads.payload(row) for row in db.query(MirrorAudit).order_by(MirrorAudit.started_at.desc(), MirrorAudit.id).limit(limit)]
+
+
+@router.get("/mirror/audits/{audit_id}")
+def mirror_audit(audit_id: str, db: Session = Depends(get_db)):
+    row = db.get(MirrorAudit, audit_id)
+    if row is None:
+        raise HTTPException(404, "Unknown audit")
+    return mirror_reads.payload(row)
+
+
+@router.get("/mirror/audits/{audit_id}/items")
+def mirror_audit_items(audit_id: str, page: int = Query(1, ge=1), per_page: int = Query(50, ge=1, le=100),
+                       bucket: Literal["matched", "drifted", "missing", "ambiguous", "unlisted_local"] | None = None,
+                       diagnostic: Literal["identity_collision", "listing_duplicate"] | None = None,
+                       year: int | None = None, department: str | None = Query(None, max_length=100),
+                       q: str | None = Query(None, max_length=200), db: Session = Depends(get_db)):
+    if db.get(MirrorAudit, audit_id) is None:
+        raise HTTPException(404, "Unknown audit")
+    query = db.query(MirrorAuditItem).filter_by(audit_id=audit_id)
+    if bucket:
+        query = query.filter_by(bucket=bucket)
+    if diagnostic:
+        query = query.filter(MirrorAuditItem.evidence.contains(diagnostic))
+    if year:
+        query = query.filter_by(year=year)
+    if department:
+        query = query.filter(MirrorAuditItem.department.ilike(f"%{department}%"))
+    if q:
+        query = query.filter(MirrorAuditItem.descriptor.ilike(f"%{q}%"))
+    return mirror_reads.paginate(query.order_by(MirrorAuditItem.item_key), page, per_page)
+
+
+@router.get("/mirror/gaps.csv")
+def mirror_gaps_csv(status: Literal["pending", "running", "resolved", "failed", "skipped"] | None = None,
+                    year: int | None = None, department: str | None = Query(None, max_length=100),
+                    q: str | None = Query(None, max_length=200), eligible: bool | None = None, db: Session = Depends(get_db)):
+    result = mirror_reads.gaps_csv(mirror_reads.gaps_query(db, status, year, department, q, eligible))
+    return Response(result, media_type="text/csv", headers={"Content-Disposition": 'attachment; filename="mirror-gaps.csv"'})
+
+
+@router.get("/mirror/gaps")
+def mirror_gaps(page: int = Query(1, ge=1), per_page: int = Query(50, ge=1, le=100),
+                status: Literal["pending", "running", "resolved", "failed", "skipped"] | None = None,
+                year: int | None = None, department: str | None = Query(None, max_length=100),
+                q: str | None = Query(None, max_length=200), eligible: bool | None = None, db: Session = Depends(get_db)):
+    return mirror_reads.paginate(mirror_reads.gaps_query(db, status, year, department, q, eligible), page, per_page)
+
+
+def _mirror_job(db, job_id):
+    import json
+    row = db.query(SyncStatus).filter_by(job_id=job_id).first()
+    if row is None or json.loads(row.parameters or "{}").get("operation") != "mirror_backfill":
+        raise HTTPException(404, "Unknown backfill job")
+    return row
+
+
+@router.get("/mirror/jobs/{job_id}")
+def mirror_job(job_id: str, db: Session = Depends(get_db)):
+    return mirror_reads.payload(_mirror_job(db, job_id))
+
+
+@router.get("/mirror/jobs/{job_id}/attempts")
+def mirror_job_attempts(job_id: str, page: int = Query(1, ge=1), per_page: int = Query(50, ge=1, le=100), db: Session = Depends(get_db)):
+    _mirror_job(db, job_id)
+    return mirror_reads.paginate(db.query(MirrorAttempt).filter_by(job_id=job_id).order_by(MirrorAttempt.started_at.desc(), MirrorAttempt.id), page, per_page)

@@ -17,7 +17,7 @@ from pathlib import Path
 
 
 SOURCE_ROOT = Path(__file__).resolve().parent.parent / "src" / "sbpeye"
-ROUTE_FILES = ["main.py", "api/admin.py", "api/debug.py", "auth_routes.py"]
+ROUTE_FILES = ["main.py", "api/admin.py", "api/debug.py", "api/mirror_migration.py", "auth_routes.py"]
 ROUTE_METHODS = {"get", "post", "put", "delete", "patch", "head", "options"}
 
 # Anything that means a database session is in play. A handler holding one is blocking by

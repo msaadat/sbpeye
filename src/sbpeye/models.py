@@ -519,6 +519,8 @@ class SyncStatus(Base):
     completed_at = Column(DateTime, nullable=True)
     error = Column(Text, nullable=True)
     parameters = Column(Text, nullable=True)
+    selection = Column(Text, nullable=True)
+    progress = Column(Text, nullable=True)
     processed_count = Column(Integer, nullable=True)
     skipped_count = Column(Integer, nullable=True)
     error_count = Column(Integer, nullable=True)

@@ -240,7 +240,7 @@ def test_fetch_page_cached_uses_uuid_filename(monkeypatch, tmp_path):
         return response
 
     monkeypatch.setattr(scraper, "HTML_CACHE_DIR", tmp_path)
-    monkeypatch.setattr(scraper.requests, "get", fake_get)
+    monkeypatch.setattr(scraper, "_get_sbp", fake_get)
     url = "https://www.sbp.org.pk/circular.htm"
 
     assert scraper.fetch_page_cached(url) == response.content
@@ -254,7 +254,7 @@ def test_fetch_page_cached_uses_uuid_filename(monkeypatch, tmp_path):
 def test_download_attachment_streams_to_id_based_path(monkeypatch, tmp_path):
     response = FakeResponse(b"%PDF document bytes")
     monkeypatch.setattr(scraper, "ATTACHMENTS_DIR", tmp_path)
-    monkeypatch.setattr(scraper, "_get_sbp", lambda *args, **kwargs: response)
+    monkeypatch.setattr(scraper, "_get_sbp", lambda *args, **kwargs: _http_stub(response, kwargs))
     info = {
         "url": "https://www.sbp.org.pk/files/report.pdf",
         "filename": "report.pdf",
@@ -280,7 +280,7 @@ def test_download_attachment_falls_back_when_primary_content_is_html(monkeypatch
         fallback: FakeResponse(b"%PDF real pdf bytes"),
     }
     monkeypatch.setattr(scraper, "ATTACHMENTS_DIR", tmp_path)
-    monkeypatch.setattr(scraper, "_get_sbp", lambda url, **kwargs: responses[url])
+    monkeypatch.setattr(scraper, "_get_sbp", lambda url, **kwargs: _http_stub(responses[url], kwargs))
     info = {
         "url": primary,
         "fallback_url": fallback,
@@ -305,7 +305,7 @@ def test_download_attachment_reports_error_when_no_candidate_is_valid(monkeypatc
         fallback: FakeResponse(b"<html>404</html>"),
     }
     monkeypatch.setattr(scraper, "ATTACHMENTS_DIR", tmp_path)
-    monkeypatch.setattr(scraper, "_get_sbp", lambda url, **kwargs: responses[url])
+    monkeypatch.setattr(scraper, "_get_sbp", lambda url, **kwargs: _http_stub(responses[url], kwargs))
     info = {
         "url": primary,
         "fallback_url": fallback,
@@ -804,3 +804,12 @@ def test_attachment_vectorize_by_id_reindexes_only_selected(monkeypatch):
 
     assert indexed == 1
     assert vectorized == ["selected"]
+
+
+def _http_stub(response, kwargs):
+    if "consume" not in kwargs:
+        return response
+    try:
+        return kwargs["consume"](response, float("inf"))
+    finally:
+        response.close()

@@ -91,6 +91,11 @@ const router = createRouter({
           component: () => import('@/views/admin/AdminSyncTab.vue'),
         },
         {
+          path: 'mirror',
+          name: 'admin-mirror',
+          component: () => import('@/views/admin/AdminMirrorTab.vue'),
+        },
+        {
           path: 'runs',
           name: 'admin-runs',
           component: () => import('@/views/admin/AdminRunsTab.vue'),

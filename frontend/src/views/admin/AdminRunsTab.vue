@@ -112,6 +112,10 @@ onMounted(load)
     </div>
 
     <template v-else-if="history">
+      <Card v-if="history.mirror_audits?.length" class="glass-panel">
+        <template #title>Mirror audits</template>
+        <template #content><ul><li v-for="audit in history.mirror_audits" :key="audit.id"><RouterLink to="/admin/mirror">{{ formatDate(audit.started_at) }}</RouterLink> ? <AdminStatusChip :status="audit.status" /> ? {{ audit.distinct_total }} identities <span v-if="audit.error">{{ audit.error }}</span></li></ul></template>
+      </Card>
       <Message v-if="activeRuns.length" severity="info" :closable="false">
         {{ activeRuns.length }} run{{ activeRuns.length === 1 ? '' : 's' }} in flight.
         Refresh to follow progress.

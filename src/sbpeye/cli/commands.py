@@ -40,8 +40,9 @@ def circulars():
 @click.option("--no-attachments", is_flag=True, help="Skip attachment discovery and download")
 @click.option("--full-listing", is_flag=True, help="Crawl every listing page instead of stopping at the latest local circular date")
 @click.option("--workers", type=click.IntRange(1), default=1, show_default=True, help="Concurrent circular downloads")
+@click.option("--delay", type=click.FloatRange(0, 10), default=0.5, show_default=True, help="Minimum request spacing across workers")
 @click.option("--verbose", "-v", is_flag=True, help="Print extra details")
-def sync(dept, year, limit, skip_llm, force_fetch, force_download, no_attachments, full_listing, workers, verbose):
+def sync(dept, year, limit, skip_llm, force_fetch, force_download, no_attachments, full_listing, workers, delay, verbose):
     """Scrape circulars from SBP website."""
     from sbpeye.scraper.circulars import scrape_circulars
 
@@ -49,6 +50,7 @@ def sync(dept, year, limit, skip_llm, force_fetch, force_download, no_attachment
     try:
         scrape_circulars(
             db,
+            delay=delay,
             departments=list(dept) if dept else None,
             years=list(year) if year else None,
             limit=limit,
@@ -75,6 +77,11 @@ def process_url(url, dept, skip_llm, verbose):
     """Process a single circular by its URL."""
     from sbpeye.scraper.circulars import process_circular
 
+    from sbpeye.circular_jobs import preflight, ordinary_attempt_start, ordinary_attempt_finish
+    from sbpeye.models import SyncStatus
+    from sbpeye.mirror import dumps, now
+    from sbpeye.link_routing import normalize_sbp_url
+    url = normalize_sbp_url(url)
     db = SessionLocal()
     try:
         existing = db.query(Circular).filter(Circular.url == url).first()
@@ -82,15 +89,34 @@ def process_url(url, dept, skip_llm, verbose):
             print(f"Circular already exists in DB: {existing.title}")
             return
 
+        preflight(db)
+        run_id = str(uuid.uuid4())
+        db.add(SyncStatus(job_id=run_id, kind="circulars", status="running", started_at=now(), parameters=dumps({"operation":"process_url"})))
+        db.commit()
+        descriptor = {"url":url, "title":url.rsplit("/", 1)[-1] or url, "department":dept}
+        attempt_id = ordinary_attempt_start(db, descriptor, run_id)
+        stages, failure = {}, None
         print(f"Processing: {url}")
-        process_circular(
-            db,
-            title=url.rsplit("/", 1)[-1] or url,
-            url=url,
-            department=dept,
-            skip_llm=skip_llm,
-            verbose=verbose,
-        )
+        try:
+            process_circular(
+                db,
+                title=url.rsplit("/", 1)[-1] or url,
+                url=url,
+                department=dept,
+                skip_llm=skip_llm,
+                verbose=verbose,
+                outcome=stages,
+            )
+        except Exception as exc:
+            failure = exc
+            raise
+        finally:
+            db.rollback()
+            ordinary_attempt_finish(db, attempt_id, stages, failure)
+            job = db.query(SyncStatus).filter_by(job_id=run_id).one()
+            job.status, job.error, job.completed_at = "failed" if failure else "success", str(failure) if failure else None, now()
+            db.commit()
+
     finally:
         db.close()
 
@@ -2196,8 +2222,10 @@ laws_relationships = _laws_feature_command(
 
 
 from sbpeye.cli.inventory_cmd import inventory  # noqa: E402  (command registration)
+from sbpeye.cli.mirror import mirror
 
 cli.add_command(inventory)
+circulars.add_command(mirror)
 
 
 def main():

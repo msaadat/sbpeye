@@ -13,7 +13,6 @@ See docs/INVENTORY_SEARCH_PLAN.md section 10.
 
 import hashlib
 import logging
-import uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -93,8 +92,7 @@ def chunk_counts_by_source(collection, batch_size: int = 5000) -> Counter:
         offset += len(ids)
 
 
-def _ledger_row_id(ledger_id: str) -> str:
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, ledger_id))
+from ..index_identity import ledger_row_id as _ledger_row_id
 
 
 def expected_chunk_count(text: str) -> int:

@@ -20,6 +20,7 @@ const tabs = [
   { label: 'Corpus', icon: 'pi pi-database', to: '/admin/corpus' },
   { label: 'Index', icon: 'pi pi-sitemap', to: '/admin/index' },
   { label: 'Sync', icon: 'pi pi-cloud-download', to: '/admin/sync' },
+  { label: 'Mirror', icon: 'pi pi-clone', to: '/admin/mirror' },
   { label: 'Runs', icon: 'pi pi-history', to: '/admin/runs' },
   { label: 'Users', icon: 'pi pi-users', to: '/admin/users' },
   { label: 'Deployment', icon: 'pi pi-server', to: '/admin/deployment' },

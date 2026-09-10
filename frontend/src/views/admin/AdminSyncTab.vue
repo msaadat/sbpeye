@@ -277,6 +277,7 @@ onUnmounted(stopPolling)
 </script>
 
 <template>
+  <p>Freshness checks the first listing page only. <RouterLink to="/admin/mirror">See Mirror for full coverage.</RouterLink></p>
   <div class="admin-tab-body">
     <div class="tab-toolbar">
       <span v-if="sync" class="muted-text">

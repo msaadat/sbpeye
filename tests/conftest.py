@@ -9,12 +9,20 @@ Every test also runs against an in-memory vector store — see `isolated_vector_
 
 import math
 import os
+import tempfile
 from datetime import datetime
 
 # Set before the application is imported: `auth.secret_key()` refuses to invent one, and
 # the lifespan check runs the moment a TestClient starts. Tests need a stable value so a
 # cookie minted in one request is still valid in the next.
 os.environ.setdefault("SBPEYE_SECRET_KEY", "test-secret-key-not-used-anywhere-real-0123")
+
+# Isolate storage before collection imports database.py. Per-test fixtures run too
+# late to protect against PersistentClient and database initialization at import.
+_test_storage = tempfile.TemporaryDirectory(prefix="sbpeye-tests-", ignore_cleanup_errors=True)
+os.environ["SBPEYE_DATA_DIR"] = _test_storage.name
+os.environ["SBPEYE_APP_DB"] = os.path.join(_test_storage.name, "app.db")
+os.environ["SBPEYE_DEBUG_DB"] = os.path.join(_test_storage.name, "debug.db")
 
 import pytest
 from fastapi.testclient import TestClient

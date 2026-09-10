@@ -1,3 +1,52 @@
+export interface IdentityMapping { old_id: string; new_id: string; reference: string; url: string; conflicts: string[] }
+export interface IdentityMaintenance {
+  status: string; maintenance: boolean; busy: boolean; can_cancel: boolean; can_apply: boolean;
+  apply_started?: boolean; phase?: string; error?: string; manifest_hash?: string; backup_directory?: string;
+  mappings: IdentityMapping[]; conflicts: Array<{ old_id: string; reasons: string[] }>; drift_count: number;
+}
+export interface IdentityRecord {
+  circular: Record<string, unknown>; attachments: Array<{ id: string; filename: string; original_url: string; content_text?: string }>;
+  dependencies: unknown[]; app_dependencies: unknown[]; cached_html: string | null; review: Record<string, unknown>;
+}
+export const getIdentityMaintenance = () => requestJson<IdentityMaintenance>('/circulars/mirror/identity')
+export const getIdentityRecord = (id: string) => requestJson<IdentityRecord>(`/circulars/mirror/identity/records/${encodeURIComponent(id)}`)
+export const identityAction = (action: string, body: unknown = {}) => requestJson<IdentityMaintenance>(`/circulars/mirror/identity/${action}`, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+})
+
+export interface MirrorDescriptor { title?: string; reference?: string; url?: string; department?: string; year?: string }
+export interface MirrorAudit {
+  id: string; status: string; started_at: string | null; error: string | null; error_code: string | null;
+  raw_total: number; distinct_total: number; local_total: number;
+  counts: Record<string, number>; coverage: Record<string, Record<string, number>>;
+  diagnostics: Array<{ page: number; yield?: number; error?: string }>;
+}
+export interface MirrorGap {
+  id: string; status: string; descriptor: MirrorDescriptor; eligible: boolean;
+  eligibility_reason: string; attempts: number; last_error: string | null;
+  variants: MirrorDescriptor[]; year: number | null;
+}
+export interface MirrorFinding {
+  item_key: string; bucket: string; descriptor: MirrorDescriptor; variants: MirrorDescriptor[];
+  evidence: { diagnostics: string[]; candidate_ids?: string[]; metadata_conflict?: boolean };
+}
+export interface MirrorJob {
+  job_id: string; status: string; error: string | null; error_count: number;
+  progress: Record<string, number | string | boolean>; parameters: Record<string, unknown>;
+}
+export interface MirrorOverview {
+  audit: MirrorAudit | null; latest_complete_audit: MirrorAudit | null;
+  active_job: MirrorJob | null; queue_counts: Record<string, number>;
+}
+export interface MirrorPage<T> { items: T[]; total: number; page: number; per_page: number }
+export interface MirrorAttempt { id: string; outcome: string; descriptor: { descriptor?: MirrorDescriptor }; error: string | null; stages: Record<string, string> }
+export const getMirrorOverview = () => requestJson<MirrorOverview>('/admin/mirror')
+export const getMirrorGaps = (query: string) => requestJson<MirrorPage<MirrorGap>>(`/admin/mirror/gaps?${query}`)
+export const getMirrorFindings = (id: string, query: string) => requestJson<MirrorPage<MirrorFinding>>(`/admin/mirror/audits/${encodeURIComponent(id)}/items?${query}`)
+export const getMirrorJob = (id: string) => requestJson<MirrorJob>(`/admin/mirror/jobs/${encodeURIComponent(id)}`)
+export const getMirrorAttempts = (id: string, page = 1) => requestJson<MirrorPage<MirrorAttempt>>(`/admin/mirror/jobs/${encodeURIComponent(id)}/attempts?page=${page}`)
+export const mirrorAction = <T>(path: string, body: unknown = {}) => requestJson<T>(`/circulars/mirror/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+
 export interface ApiErrorPayload {
   error?: string
   message?: string
@@ -985,6 +1034,7 @@ export interface AdminAiJob {
 
 export interface AdminRunHistory {
   generated_at: string
+  mirror_audits: MirrorAudit[]
   sync_runs: AdminSyncRun[]
   ai_jobs: AdminAiJob[]
 }

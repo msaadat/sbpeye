@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, Request, BackgroundTasks, Form, Body
+from fastapi import FastAPI, Depends, Request, BackgroundTasks, Form, Body, HTTPException
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import (
     FileResponse,
@@ -27,6 +27,9 @@ import threading
 from .database import PROJECT_ROOT, AppSessionLocal, engine, Base, checkpoint_sqlite, get_app_db, get_db, SessionLocal, has_vector_store_data
 from .models import AIGenerationJob, Attachment, CachedDocument, SyncStatus, circular_sync_only, Circular, CircularEntity, CircularRelationship, EcoDataSeries, EcoDataEntry, RegDocument, RegDocumentLink, RegDocumentVersion, Settings, ChatSession, ChatMessage, ResearchWorkspace, User, WorkspaceCircular, upsert_settings
 from .api.admin import router as admin_router
+from .api.mirror_migration import router as migration_router
+from . import migration_console
+from .maintenance import maintenance, MaintenanceMiddleware, web_process_lease
 from .api.debug import router as debug_router
 from .llm_debug import (
     bind_context,
@@ -282,12 +285,12 @@ def _ensure_document_cached(
                 download_error or "Attachment could not be downloaded."
             )
             return document, None
-        document.local_path = str(local_path.relative_to(PROJECT_ROOT))
+        document.local_path = local_path.relative_to(PROJECT_ROOT).as_posix()
         db.commit()
         return document, _cached_document_path(document)
 
     path, _, error, _ = download_attachment("standalone", info, force=True)
-    document.local_path = str(path.relative_to(PROJECT_ROOT)) if path else None
+    document.local_path = path.relative_to(PROJECT_ROOT).as_posix() if path else None
     document.error = error
     db.commit()
     return document, _cached_document_path(document)
@@ -346,7 +349,7 @@ def _ensure_law_version_cached(
         .first()
     )
     if owner is not None:
-        relative = str(local_path.relative_to(PROJECT_ROOT))
+        relative = local_path.relative_to(PROJECT_ROOT).as_posix()
         if owner.local_path != relative:
             owner.local_path = relative
             db.commit()
@@ -366,15 +369,27 @@ def _ensure_law_version_cached(
 
 @asynccontextmanager
 async def app_lifespan(_app: FastAPI):
+    with web_process_lease(PROJECT_ROOT / "maintenance"):
+        migration_console.console.recover()
+        async with _serving_lifespan(_app):
+            yield
+
+
+@asynccontextmanager
+async def _serving_lifespan(_app: FastAPI):
     # Before anything else: a deployment that cannot sign cookies cannot authenticate
     # anyone, and finding that out at boot beats finding it out when a tester tries to
     # sign in. Raising here fails the container rather than serving an open door.
     verify_auth_configuration()
     bootstrap_admin()
-    fail_interrupted_traces()
-    fail_interrupted_ai_jobs()
-    fail_interrupted_sync_jobs()
-    threading.Thread(target=_warm_up_search_index, daemon=True).start()
+    if not maintenance.paused:
+        fail_interrupted_traces()
+        fail_interrupted_ai_jobs()
+        from .circular_jobs import recover_jobs
+        with SessionLocal() as mirror_db:
+            recover_jobs(mirror_db)
+        fail_interrupted_sync_jobs()
+        maintenance.start_thread(_warm_up_search_index)
     # Started here rather than run here: the first scrape is a live HTTP round-trip to
     # sbp.org.pk, and doing it inside the lifespan would hold the container short of
     # ready for as long as SBP takes to answer.
@@ -390,6 +405,10 @@ async def app_lifespan(_app: FastAPI):
         # not leave a scraper running against a database the next process owns.
         _ecodata_stop.set()
         ecodata_thread.join(timeout=5)
+        if migration_console.console.worker and migration_console.console.worker.is_alive():
+            # Keep the process lease until a clean shutdown finishes migration. A
+            # forced container stop is recovered from its durable journal at boot.
+            await run_in_threadpool(migration_console.console.worker.join)
         # Last, and after the scraper has stopped: under WAL the recent commits live in a
         # `-wal` sidecar until something folds them back, and the corpus is moved between
         # machines by copying `sbpeye.db`. Without this a clean stop can still leave the
@@ -409,6 +428,7 @@ app = FastAPI(
 # project defers ``app.include_router`` behind an internal placeholder, which would
 # make literal-route shadow checks see the placeholder instead of the API routes.
 app.router.routes.extend(admin_router.routes)
+app.router.routes.extend(migration_router.routes)
 app.router.routes.extend(debug_router.routes)
 app.router.routes.extend(auth_router.routes)
 app.router._mark_routes_changed()
@@ -435,6 +455,7 @@ def _bind_dependency_overrides(routes) -> None:
 
 
 _bind_dependency_overrides(admin_router.routes)
+_bind_dependency_overrides(migration_router.routes)
 _bind_dependency_overrides(debug_router.routes)
 _bind_dependency_overrides(auth_router.routes)
 
@@ -516,6 +537,9 @@ async def require_authentication(request: Request, call_next):
     request.state.user = user
     return await call_next(request)
 
+# Outermost: count complete ASGI requests, including streaming/background cleanup.
+app.add_middleware(MaintenanceMiddleware)
+
 # Setup SPA static files
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 os.makedirs(STATIC_DIR, exist_ok=True)
@@ -567,7 +591,7 @@ if ABOUT_ASSETS_DIR.exists():
     )
 
 
-_CIRCULAR_SYNC_LOCK = threading.Lock()
+from .circular_jobs import CIRCULAR_JOB_LOCK as _CIRCULAR_SYNC_LOCK
 ACTIVE_SYNC_STATUSES = {"queued", "running"}
 REMOTE_CIRCULAR_CHECK_TTL = timedelta(minutes=30)
 _REMOTE_CIRCULAR_CHECK_LOCK = threading.Lock()
@@ -672,7 +696,8 @@ def _remote_circular_check_status() -> dict:
 
         if not _REMOTE_CIRCULAR_CHECK_RUNNING:
             _REMOTE_CIRCULAR_CHECK_RUNNING = True
-            threading.Thread(target=_run_remote_circular_check, daemon=True).start()
+            if not maintenance.start_thread(_run_remote_circular_check):
+                _REMOTE_CIRCULAR_CHECK_RUNNING = False
 
     return {
         "remote_check_status": "checking",
@@ -763,6 +788,12 @@ def _sync_options_from_payload(data: dict) -> dict:
         raise ValueError("Limit cannot be negative.")
     if workers < 1 or workers > 8:
         raise ValueError("Workers must be between 1 and 8.")
+    try:
+        delay = float(data.get("delay", 0.5))
+    except (TypeError, ValueError):
+        raise ValueError("Delay must be a number between 0 and 10 seconds.") from None
+    if not 0 <= delay <= 10:
+        raise ValueError("Delay must be between 0 and 10 seconds.")
 
     include_attachments = bool(data.get("include_attachments", not data.get("no_attachments", False)))
     llm_features = data.get("llm_features", [])
@@ -784,6 +815,7 @@ def _sync_options_from_payload(data: dict) -> dict:
         "force_download": bool(data.get("force_download", False)),
         "include_attachments": include_attachments,
         "workers": workers,
+        "delay": delay,
         "full_listing": bool(data.get("full_listing", False)),
         "llm_features": [feature for feature in SYNC_GENERATION_FEATURES if feature in llm_features],
     }
@@ -801,7 +833,7 @@ def _run_circular_sync(job_id: str, options: dict) -> None:
 
         scrape_options = dict(options)
         llm_features = scrape_options.pop("llm_features", [])
-        result = scrape_circulars(db, **scrape_options) or {}
+        result = scrape_circulars(db, run_id=job_id, **scrape_options) or {}
         # End the scraper session's read transaction before generation opens its own.
         db.rollback()
         generation = run_sync_generation(result.get("circular_ids", []), llm_features) if llm_features else None
@@ -1073,15 +1105,16 @@ def _ecodata_refresh_loop() -> None:
     if _ecodata_stop.wait(ECODATA_FIRST_REFRESH_DELAY_SECONDS):
         return
     while True:
-        session = SessionLocal()
-        try:
-            refresh_ecodata_index(session)
-        except Exception:
-            # A scrape failure must not kill the scheduler: SBP is intermittently
-            # unreachable, and the next tick is a perfectly good retry.
-            logging.exception("Scheduled EcoData refresh failed")
-        finally:
-            session.close()
+        with maintenance.background() as allowed:
+            if allowed:
+                session = SessionLocal()
+                try:
+                    refresh_ecodata_index(session)
+                except Exception:
+                    # A scrape failure must not kill the scheduler.
+                    logging.exception("Scheduled EcoData refresh failed")
+                finally:
+                    session.close()
         if _ecodata_stop.wait(interval):
             return
 
@@ -1180,11 +1213,13 @@ def start_circular_sync(data: dict | None = Body(default=None), db: Session = De
 
     job = SyncStatus(
         job_id=str(uuid.uuid4()),
+        kind="circulars",
         status="queued",
         started_at=datetime.utcnow(),
         parameters=json.dumps(options),
     )
     try:
+        mirror_jobs.preflight(db)
         db.add(job)
         db.commit()
         db.refresh(job)
@@ -1196,11 +1231,17 @@ def start_circular_sync(data: dict | None = Body(default=None), db: Session = De
         _CIRCULAR_SYNC_LOCK.release()
         return JSONResponse({"error": str(exc)}, status_code=500)
 
-    threading.Thread(
-        target=_run_circular_sync,
-        args=(job_id, options),
-        daemon=True,
-    ).start()
+    try:
+        threading.Thread(target=_run_circular_sync, args=(job_id, options), daemon=True).start()
+    except Exception as exc:
+        try:
+            with SessionLocal() as session:
+                failed = session.query(SyncStatus).filter_by(job_id=job_id).one()
+                failed.status, failed.error, failed.completed_at = "failed", str(exc), datetime.utcnow()
+                session.commit()
+        finally:
+            _CIRCULAR_SYNC_LOCK.release()
+        raise
     return JSONResponse(
         response_payload,
         status_code=202,
@@ -1212,6 +1253,123 @@ def get_ecodata(series: str = "KIBOR_6M", db: Session = Depends(get_db)):
     # Retrieve ecodata for charts
     data = db.query(EcoDataSeries).filter(EcoDataSeries.name == series).order_by(EcoDataSeries.date.asc()).all()
     return [{"date": d.date.strftime("%Y-%m-%d"), "value": d.value} for d in data]
+
+
+from . import circular_jobs as mirror_jobs
+from .mirror import now as mirror_now, dumps as mirror_dumps
+from .mirror_types import AuditRequest, BackfillRequest, SkipRequest
+from .identity_aliases import resolve_id as resolve_identity_id, resolve_ids as resolve_identity_ids
+from .mirror_models import MirrorAudit, MirrorGap
+from .mirror_reads import payload as mirror_payload
+
+
+def _mirror_busy():
+    with SessionLocal() as session:
+        job = session.query(SyncStatus).filter(SyncStatus.status.in_(["queued", "running"]), circular_sync_only()).order_by(SyncStatus.id.desc()).first()
+        audit = session.query(MirrorAudit).filter(MirrorAudit.status.in_(["queued", "running"])).order_by(MirrorAudit.started_at.desc()).first()
+        detail = {"code": "circular_job_busy", "message": "A circular job is already running.",
+                  "job_id": job.job_id if job else None, "audit_id": audit.id if audit else None}
+    return HTTPException(409, detail)
+
+
+def _mirror_dispatch(target, args, record_id, audit=False):
+    def worker():
+        try:
+            target(*args)
+        finally:
+            _CIRCULAR_SYNC_LOCK.release()
+    try:
+        threading.Thread(target=worker, daemon=True).start()
+    except Exception as exc:
+        try:
+            with SessionLocal() as session:
+                row = session.get(MirrorAudit, record_id) if audit else session.query(SyncStatus).filter_by(job_id=record_id).one()
+                row.status, row.error, row.completed_at = "failed", str(exc), mirror_now()
+                session.commit()
+        finally:
+            _CIRCULAR_SYNC_LOCK.release()
+        raise
+
+
+@app.post("/api/circulars/mirror/audit", dependencies=[Depends(require_admin)], status_code=202)
+def start_mirror_audit(data: AuditRequest, db: Session = Depends(get_db)):
+    if not _CIRCULAR_SYNC_LOCK.acquire(blocking=False):
+        raise _mirror_busy()
+    try:
+        mirror_jobs.preflight(db)
+        audit_id = str(uuid.uuid4())
+        db.add(MirrorAudit(id=audit_id, status="queued", started_at=mirror_now(), parameters=mirror_dumps(data.model_dump())))
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        _CIRCULAR_SYNC_LOCK.release()
+        raise HTTPException(409, {"code": "identity_preflight", "message": str(exc)}) from exc
+    _mirror_dispatch(mirror_jobs.run_audit, (audit_id, data, SessionLocal), audit_id, audit=True)
+    return {"audit_id": audit_id, "status": "queued"}
+
+
+@app.post("/api/circulars/mirror/backfill", dependencies=[Depends(require_admin)])
+def start_mirror_backfill(data: BackfillRequest, db: Session = Depends(get_db)):
+    if not _CIRCULAR_SYNC_LOCK.acquire(blocking=False):
+        raise _mirror_busy()
+    try:
+        job_id, count = mirror_jobs.create_backfill(db, data)
+    except Exception as exc:
+        db.rollback()
+        _CIRCULAR_SYNC_LOCK.release()
+        raise HTTPException(409, {"code": "identity_preflight", "message": str(exc)}) from exc
+    if not job_id:
+        _CIRCULAR_SYNC_LOCK.release()
+        return {"job_id": None, "status": "empty", "selected_total": 0}
+    _mirror_dispatch(mirror_jobs.run_backfill, (job_id, data, SessionLocal), job_id)
+    return JSONResponse({"job_id": job_id, "status": "queued", "selected_total": count}, status_code=202)
+
+
+@app.post("/api/circulars/mirror/backfill/{job_id}/cancel", dependencies=[Depends(require_admin)])
+def cancel_mirror_backfill(job_id: str, db: Session = Depends(get_db)):
+    from .api.admin import _mirror_job
+    row = _mirror_job(db, job_id)
+    active = row.status in {"queued", "running"}
+    if active:
+        mirror_jobs.cancel_job(job_id)
+    return JSONResponse({"job_id": job_id, "status": "cancelling" if active else row.status}, status_code=202 if active else 200)
+
+
+def _mirror_transition(db, gap_id, action, reason=None):
+    if not _CIRCULAR_SYNC_LOCK.acquire(blocking=False):
+        raise _mirror_busy()
+    try:
+        try:
+            mirror_jobs.preflight(db)
+        except ValueError as exc:
+            raise HTTPException(409, {"code": "identity_preflight", "message": str(exc)}) from exc
+        row = db.get(MirrorGap, gap_id)
+        if row is None:
+            raise HTTPException(404, "Unknown gap")
+        allowed = {"pending", "failed"} if action == "skip" else {"failed", "skipped"}
+        if row.active_attempt_id or row.status not in allowed:
+            raise HTTPException(409, {"code": "invalid_transition", "message": "Gap is claimed or not in an eligible state."})
+        if action == "skip":
+            if not reason or not reason.strip():
+                raise HTTPException(422, "A skip reason is required")
+            row.status, row.skip_reason = "skipped", reason.strip()
+        else:
+            row.status, row.failures_since_requeue = "pending", 0
+        db.commit()
+        return mirror_payload(row)
+    finally:
+        _CIRCULAR_SYNC_LOCK.release()
+
+
+@app.post("/api/circulars/mirror/gaps/{gap_id}/skip", dependencies=[Depends(require_admin)])
+def skip_mirror_gap(gap_id: str, data: SkipRequest, db: Session = Depends(get_db)):
+    return _mirror_transition(db, gap_id, "skip", data.reason)
+
+
+@app.post("/api/circulars/mirror/gaps/{gap_id}/requeue", dependencies=[Depends(require_admin)])
+def requeue_mirror_gap(gap_id: str, db: Session = Depends(get_db)):
+    return _mirror_transition(db, gap_id, "requeue")
+
 
 @app.get("/api/circulars/search")
 def search_circulars(
@@ -1396,6 +1554,7 @@ def refresh_circular(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
+    circular_id = resolve_identity_id(db, circular_id)
     circular = db.query(Circular).filter(Circular.id == circular_id).first()
     if not circular:
         return JSONResponse({"error": "Circular not found"}, status_code=404)
@@ -1425,6 +1584,7 @@ def refresh_circular(
 
 @app.get("/api/circulars/{circular_id}/source")
 def get_circular_source(circular_id: str, db: Session = Depends(get_db)):
+    circular_id = resolve_identity_id(db, circular_id)
     c = db.query(Circular).filter(Circular.id == circular_id).first()
     if not c:
         return JSONResponse({"error": "Circular not found"}, status_code=404)
@@ -1458,6 +1618,7 @@ def get_circular_source(circular_id: str, db: Session = Depends(get_db)):
 
 @app.get("/api/circulars/{circular_id}/document")
 def circular_document(circular_id: str, db: Session = Depends(get_db)):
+    circular_id = resolve_identity_id(db, circular_id)
     circular = db.query(Circular).filter(Circular.id == circular_id).first()
     if not circular or not circular.url.lower().split("?", 1)[0].endswith(".pdf"):
         return JSONResponse({"error": "Circular PDF not found."}, status_code=404)
@@ -1516,6 +1677,7 @@ def get_circular_detail(circular_id: str, db: Session = Depends(get_db)):
     # the same lazy walk the laws listing does — the text of every version of every law
     # this circular cites, to render titles and version counts. Fewer documents than a
     # listing page, but the same wasted read; preloaded on the same terms.
+    circular_id = resolve_identity_id(db, circular_id)
     c = (
         db.query(Circular)
         .options(
@@ -1605,6 +1767,7 @@ def get_circular_detail(circular_id: str, db: Session = Depends(get_db)):
 
 @app.get("/api/circulars/{circular_id}/checklist.xlsx")
 def export_circular_checklist(circular_id: str, db: Session = Depends(get_db)):
+    circular_id = resolve_identity_id(db, circular_id)
     circular = db.query(Circular).filter(Circular.id == circular_id).first()
     if not circular:
         return JSONResponse({"error": "Circular not found"}, status_code=404)
@@ -1787,6 +1950,7 @@ async def generate_circular_intelligence(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
+    circular_id = resolve_identity_id(db, circular_id)
     try:
         data = await request.json()
     except Exception:
@@ -1850,6 +2014,7 @@ def get_ai_generation_job(job_id: str, db: Session = Depends(get_db)):
 
 @app.get("/api/circulars/{circular_id}/relationships")
 def get_circular_relationships(circular_id: str, db: Session = Depends(get_db)):
+    circular_id = resolve_identity_id(db, circular_id)
     outgoing = db.query(CircularRelationship).filter(
         CircularRelationship.source_id == circular_id
     ).all()
@@ -1890,6 +2055,7 @@ def get_circular_consolidation(circular_id: str, db: Session = Depends(get_db)):
 
     Shared by every chain member: any circular connected through resolved
     `amends` relationships returns the same chain and stored consolidation."""
+    circular_id = resolve_identity_id(db, circular_id)
     from .consolidation import consolidation_payload
 
     circular = db.query(Circular).filter(Circular.id == circular_id).first()
@@ -1918,6 +2084,8 @@ def resolve_document(
     # Reading a document is open to everyone; re-ingesting one is not. `refresh=True`
     # runs the full pipeline, rewriting `content_text` and resetting `is_vectorized`
     # (3.5.2), which is a corpus write and so belongs to the admin under 1.3.
+    circular_id = resolve_identity_id(db, circular_id)
+    id = resolve_identity_id(db, id, "attachment")
     if refresh:
         actor = getattr(getattr(request, "state", None), "user", None)
         if actor is None or not actor.is_admin:
@@ -1992,6 +2160,7 @@ def resolve_document(
 
 @app.get("/api/documents/{attachment_id}/content")
 def document_content(attachment_id: str, db: Session = Depends(get_db)):
+    attachment_id = resolve_identity_id(db, attachment_id, "attachment")
     attachment = db.query(Attachment).filter(Attachment.id == attachment_id).first()
     if not attachment:
         attachment = db.query(CachedDocument).filter(CachedDocument.id == attachment_id).first()
@@ -2764,6 +2933,7 @@ async def pin_workspace_circular(
     circular_id = data.get("circular_id")
     if not isinstance(circular_id, str) or not circular_id.strip():
         return JSONResponse({"error": "circular_id is required"}, status_code=400)
+    circular_id = resolve_identity_id(db, circular_id)
 
     circular = db.query(Circular).filter(Circular.id == circular_id).first()
     if not circular:
@@ -2795,6 +2965,7 @@ def unpin_workspace_circular(
     db: Session = Depends(get_db),
     app_db: Session = Depends(get_app_db),
 ):
+    circular_id = resolve_identity_id(db, circular_id)
     workspace = app_db.query(ResearchWorkspace).filter(
         ResearchWorkspace.id == workspace_id
     ).first()
@@ -2896,7 +3067,7 @@ def get_chat_session(
                     "id": m.id,
                     "role": m.role,
                     "content": m.content,
-                    "circular_ids": _normalize_circular_ids(_safe_json_list(m.circular_ids)),
+                    "circular_ids": resolve_identity_ids(db, _normalize_circular_ids(_safe_json_list(m.circular_ids))),
                     "steps": _step_headers(m, user),
                     "created_at": _isoformat(m.created_at),
                 }
@@ -2913,7 +3084,7 @@ def get_chat_session(
     messages = app_db.query(ChatMessage).filter(
         ChatMessage.session_id == session_id
     ).order_by(ChatMessage.created_at, ChatMessage.id).all()
-    circular_ids = _normalize_circular_ids(_safe_json_list(session.circular_ids))
+    circular_ids = resolve_identity_ids(db, _normalize_circular_ids(_safe_json_list(session.circular_ids)))
     circulars = db.query(Circular).filter(Circular.id.in_(circular_ids)).all() if circular_ids else []
     circular_by_id = {circular.id: circular for circular in circulars}
     return {
@@ -2925,7 +3096,7 @@ def get_chat_session(
                 "id": m.id,
                 "role": m.role,
                 "content": m.content,
-                "circular_ids": _normalize_circular_ids(_safe_json_list(m.circular_ids)),
+                "circular_ids": resolve_identity_ids(db, _normalize_circular_ids(_safe_json_list(m.circular_ids))),
                 "steps": _step_headers(m, user),
                 "created_at": _isoformat(m.created_at),
             }
@@ -3177,6 +3348,7 @@ def _build_chat_circulars_context(
     query: str = "",
     max_context_tokens: int = 4000,
 ) -> str:
+    circular_ids = resolve_identity_ids(db, circular_ids or [])
     from .chat_retrieval import build_chat_context
 
     context, _ = build_chat_context(
@@ -3191,6 +3363,7 @@ def _chat_turn_circular_ids(
     message: str,
 ) -> list[str]:
     """Add referenced or freshness-matched circulars without pinning them."""
+    circular_ids = resolve_identity_ids(db, circular_ids or [])
     from .chat_retrieval import query_context_circular_ids
 
     inferred_ids = query_context_circular_ids(db, message)
@@ -3260,7 +3433,7 @@ async def chat_message(
 ):
     data = await request.json()
     message = data.get("message", "")
-    circular_ids = _normalize_circular_ids(data.get("circular_ids", []))
+    circular_ids = resolve_identity_ids(db, _normalize_circular_ids(data.get("circular_ids", [])))
     session_id = data.get("session_id")
     workspace = _get_workspace_for_chat_session(app_db, session_id)
 
@@ -3349,7 +3522,7 @@ async def chat_message_stream(
 ):
     data = await request.json()
     message = data.get("message", "")
-    circular_ids = _normalize_circular_ids(data.get("circular_ids", []))
+    circular_ids = resolve_identity_ids(db, _normalize_circular_ids(data.get("circular_ids", [])))
     session_id = data.get("session_id")
     replace_message_id = data.get("replace_message_id")
     workspace = _get_workspace_for_chat_session(app_db, session_id)
@@ -3554,6 +3727,7 @@ def batch_download(
     circular_ids: list[str] = Form(...),
     db: Session = Depends(get_db)
 ):
+    circular_ids = resolve_identity_ids(db, circular_ids or [])
     circulars = db.query(Circular).filter(Circular.id.in_(circular_ids)).all()
     zip_buffer = io.BytesIO()
 
@@ -3601,7 +3775,7 @@ def batch_download(
                                 f"{attachment.original_url}: {error}"
                             )
                             continue
-                        attachment.local_path = str(local_path.relative_to(PROJECT_ROOT))
+                        attachment.local_path = local_path.relative_to(PROJECT_ROOT).as_posix()
                         db.commit()
 
                     safe_name = Path(attachment.filename).name or attachment.id

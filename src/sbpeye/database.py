@@ -3,7 +3,6 @@ import logging
 import os
 from pathlib import Path
 from sqlalchemy import bindparam, create_engine, event, inspect, text
-from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
 from .embeddings import EmbeddingConfig, create_embedding_backend
@@ -98,13 +97,11 @@ app_engine = create_engine(
 _configure_sqlite(app_engine)
 AppSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=app_engine)
 
-Base = declarative_base()
+from .orm_bases import Base, AppBase, DebugBase
 # A separate metadata, so `Base.metadata.create_all(engine)` can never recreate the
 # trace tables inside the application database.
-DebugBase = declarative_base()
 # Likewise for runtime state: its own metadata keeps `create_all` on either of the
 # other two bases from resurrecting these tables in the wrong file.
-AppBase = declarative_base()
 
 def checkpoint_sqlite() -> None:
     """Fold the write-ahead logs back into the database files.
@@ -229,8 +226,18 @@ def _rebuild_table(conn, table: str, columns_sql: str, carried: str) -> None:
 
 def _ensure_columns(bind=None):
     with (bind or engine).begin() as conn:
+        from . import mirror_models
+        for model in (mirror_models.IdentityAlias, mirror_models.IdentityMigration,
+                      mirror_models.MirrorAudit, mirror_models.MirrorAuditItem,
+                      mirror_models.MirrorGap, mirror_models.MirrorAttempt):
+            model.__table__.create(conn, checkfirst=True)
         insp = inspect(conn)
         table_names = insp.get_table_names()
+        if "sync_status" in table_names:
+            sync_columns = {column["name"] for column in insp.get_columns("sync_status")}
+            for column in ("selection", "progress"):
+                if column not in sync_columns:
+                    conn.execute(text(f"ALTER TABLE sync_status ADD COLUMN {column} TEXT"))
         if "circulars" in table_names:
             existing = {c["name"] for c in insp.get_columns("circulars")}
             new_columns = [

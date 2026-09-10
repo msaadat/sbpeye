@@ -490,12 +490,16 @@ def _load_workspace_circulars(
         for link in list(workspace.pinned_circulars or [])
         if link.circular_id
     }
+    ids.update(workspace.last_circular_id for workspace in workspaces if workspace.last_circular_id)
     if not ids:
         return {}
-    return {
-        circular.id: circular
-        for circular in corpus_db.query(Circular).filter(Circular.id.in_(ids))
-    }
+    from ..mirror_models import IdentityAlias
+    aliases = dict(corpus_db.query(IdentityAlias.old_id, IdentityAlias.new_id).filter(
+        IdentityAlias.kind == "circular", IdentityAlias.old_id.in_(ids),
+    ).all())
+    canonical = set(aliases.get(identity, identity) for identity in ids)
+    loaded = {circular.id: circular for circular in corpus_db.query(Circular).filter(Circular.id.in_(canonical))}
+    return {identity: loaded[aliases.get(identity, identity)] for identity in ids if aliases.get(identity, identity) in loaded}
 
 
 def _sorted_workspace_pinned_links(
@@ -574,10 +578,8 @@ def _workspace_payload(
         "name": workspace.name,
         "is_default": bool(workspace.is_default),
         "search_state": _workspace_search_state(workspace.search_state),
-        "last_circular_id": workspace.last_circular_id,
-        "pinned_circular_ids": [
-            link.circular_id for link in pinned_links
-        ],
+        "last_circular_id": circulars[workspace.last_circular_id].id if workspace.last_circular_id in circulars else workspace.last_circular_id,
+        "pinned_circular_ids": list(dict.fromkeys(circulars[link.circular_id].id for link in pinned_links)),
         "pinned_circulars": pinned_circulars,
         "pinned_count": len(pinned_links),
         "created_at": _isoformat(workspace.created_at),
@@ -621,10 +623,10 @@ def _workspace_id_from_chat_session(session_id: str | None) -> str | None:
 def _workspace_circular_ids(
     workspace: ResearchWorkspace, circulars: dict[str, Circular]
 ) -> list[str]:
-    return [
-        link.circular_id
+    return list(dict.fromkeys(
+        circulars[link.circular_id].id
         for link in _sorted_workspace_pinned_links(workspace, circulars)
-    ]
+    ))
 
 
 def _workspace_circular_summaries(

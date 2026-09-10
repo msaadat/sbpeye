@@ -31,6 +31,11 @@ class ApplyRequest(BaseModel):
     manifest_hash: str = Field(min_length=64, max_length=64)
 
 
+class RemoveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    removal_hash: str = Field(min_length=64, max_length=64)
+
+
 def action(callback):
     try:
         callback()
@@ -75,3 +80,8 @@ def apply_identity(data: ApplyRequest):
 @router.post("/cancel")
 def cancel_identity():
     return action(migration_console.console.cancel)
+
+
+@router.post("/remove", status_code=202)
+def remove_legacy_circulars(data: RemoveRequest):
+    return action(lambda: migration_console.console.remove(data.removal_hash))

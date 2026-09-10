@@ -35,11 +35,12 @@ def write_json(path, value):
 
 
 class MigrationConsole:
-    def __init__(self, root, corpus, app, html_cache, *, gate=maintenance, repair=None):
+    def __init__(self, root, corpus, app, html_cache, *, gate=maintenance, repair=None, remove_vectors=None):
         self.root = Path(root)
         self.corpus, self.app = Path(corpus), Path(app) if app else None
         self.html_cache = Path(html_cache)
         self.gate, self.repair = gate, repair
+        self.remove_vectors = remove_vectors
         self.operation = threading.Lock()
         self.state_lock = threading.RLock()
         self.worker = None
@@ -69,9 +70,12 @@ class MigrationConsole:
         journal = self._journal()
         if journal:
             # The journal, rather than a browser/localStorage value, owns resume.
-            write_json(self.root / "manifest.json", json.loads(journal["manifest"]))
+            manifest = json.loads(journal["manifest"])
+            removal = manifest.get("operation") == "remove_legacy"
+            write_json(self.root / ("removal.json" if removal else "manifest.json"), manifest)
             self._update(status="interrupted", maintenance=True, apply_started=True,
-                         phase=journal["phase"], error="Migration was interrupted. Resume to finish the remaining phases.")
+                         operation="remove_legacy" if removal else "migrate",
+                         phase=journal["phase"], error="Maintenance was interrupted. Resume to finish the remaining phases.")
         elif self.state.get("maintenance"):
             # A crash after the final journal commit needs only verification/release.
             if self.state.get("apply_started"):
@@ -83,6 +87,9 @@ class MigrationConsole:
         with self.state_lock:
             result = dict(self.state)
         report = self._read("manifest.json", {})
+        removal = self._read("removal.json", {})
+        if result.get("operation") == "remove_legacy" and removal:
+            report = removal
         result.update(
             busy=self.operation.locked(),
             can_cancel=bool(result.get("maintenance") and not result.get("apply_started")),
@@ -91,6 +98,11 @@ class MigrationConsole:
                       for row in report.get("mappings", [])],
             conflicts=report.get("conflicts", []), drift_count=len(report.get("drift", [])),
             can_apply=result["status"] == "review" and bool(report.get("mappings")) and not report.get("conflicts"),
+            removal_hash=removal.get("manifest_hash"),
+            removal_count=len(removal.get("mappings", [])),
+            removal_attachment_count=sum(len(row["attachments"]) for row in removal.get("mappings", [])),
+            removal_conflicts=removal.get("conflicts", []),
+            can_remove=result["status"] == "review" and not result.get("apply_started") and bool(removal.get("mappings")) and not removal.get("conflicts"),
         )
         return result
 
@@ -104,22 +116,30 @@ class MigrationConsole:
         result["review"] = report.get("review_evidence", {}).get(old_id, {})
         return result
 
-    def _start(self, status, work, *, manifest_hash=None):
+    def _start(self, status, work, *, manifest_hash=None, removal_hash=None):
         if not self.operation.acquire(blocking=False):
             raise ValueError("A migration operation is already running.")
         allowed = {
             "preparing": {"idle", "cancelled", "complete", "review", "failed"},
             "reviewing": {"review"},
             "applying": {"review", "failed", "interrupted"},
+            "removing": {"review", "failed", "interrupted"},
         }
-        if self.state["status"] not in allowed[status] or (status != "applying" and self.state.get("apply_started")):
+        if self.state["status"] not in allowed[status] or (status not in {"applying", "removing"} and self.state.get("apply_started")):
             self.operation.release()
             raise ValueError("The migration state changed. Refresh before continuing.")
         if manifest_hash and self._read("manifest.json", {}).get("manifest_hash") != manifest_hash:
             self.operation.release()
             raise ValueError("The review changed. Refresh before continuing.")
+        if removal_hash and self._read("removal.json", {}).get("manifest_hash") != removal_hash:
+            self.operation.release()
+            raise ValueError("The affected list changed. Refresh before removing circulars.")
+        if self.state.get("apply_started") and (status == "removing") != (self.state.get("operation") == "remove_legacy"):
+            self.operation.release()
+            raise ValueError("Resume the operation already in progress.")
         try:
-            self._update(status=status, maintenance=True, error=None)
+            operation = "remove_legacy" if status == "removing" else "migrate" if status == "applying" else self.state.get("operation")
+            self._update(status=status, maintenance=True, error=None, operation=operation)
             def run():
                 try:
                     work()
@@ -143,7 +163,9 @@ class MigrationConsole:
             if not CIRCULAR_JOB_LOCK.acquire(timeout=300):
                 raise ValueError("A circular job is still running. Retry after it finishes.")
             try:
+                from .identity_removal import plan_removal
                 report = plan_migration(self.corpus, self.app if self.app and self.app.exists() else None)
+                removal = plan_removal(self.corpus, self.app if self.app and self.app.exists() else None)
                 records = {}
                 with closing(open_readonly(self.corpus)) as db:
                     for mapping in report["mappings"]:
@@ -162,8 +184,9 @@ class MigrationConsole:
                                         "cached_html": cache.read_text(encoding="utf-8", errors="replace") if cache.is_file() else None}
                 write_json(self.root / "records.json", records)
                 write_json(self.root / "manifest.json", report)
+                write_json(self.root / "removal.json", removal)
                 self._update(status="review", apply_started=False, phase=None,
-                             error=None, backup_directory=None)
+                             error=None, backup_directory=None, operation=None, removed_count=0)
             finally:
                 CIRCULAR_JOB_LOCK.release()
         self._start("preparing", work)
@@ -202,6 +225,8 @@ class MigrationConsole:
         self._start("reviewing", work, manifest_hash=report["manifest_hash"])
 
     def apply(self, manifest_hash):
+        if self.state.get("apply_started") and self.state.get("operation") == "remove_legacy":
+            raise ValueError("Resume the removal already in progress.")
         if self.state["status"] not in {"review", "failed", "interrupted"}:
             raise ValueError("The migration is not ready to apply or resume.")
         manifest = self._read("manifest.json", {})
@@ -251,6 +276,44 @@ class MigrationConsole:
             self._update(status="cancelled", maintenance=False, error=None)
         finally:
             self.operation.release()
+
+    def remove(self, removal_hash):
+        """Retire the server-selected legacy rows; a browser cannot choose arbitrary IDs."""
+        if self.state.get("apply_started") and self.state.get("operation") != "remove_legacy":
+            raise ValueError("Resume the identity migration already in progress.")
+        manifest = self._read("removal.json", {})
+        if not removal_hash or removal_hash != manifest.get("manifest_hash"):
+            raise ValueError("Prepare the affected list again before removing circulars.")
+        if not manifest.get("mappings") or manifest.get("conflicts"):
+            raise ValueError("The affected list has unresolved structural conflicts.")
+        def work():
+            from .circular_jobs import CIRCULAR_JOB_LOCK
+            from .identity_removal import apply_removal, remove_legacy_vectors
+            self.gate.drain()
+            if not CIRCULAR_JOB_LOCK.acquire(timeout=300):
+                raise ValueError("A circular job is still running. Retry after it finishes.")
+            try:
+                backup = self.root / "backups"
+                self._update(apply_started=True, backup_directory=str(backup), phase="backing_up")
+                try:
+                    result = apply_removal(manifest, backup,
+                                           remove_vectors=self.remove_vectors or remove_legacy_vectors,
+                                           phase_hook=lambda phase: self._update(phase=phase))
+                except Exception:
+                    with closing(open_readonly(self.corpus)) as db:
+                        journaled = "identity_migration" in _tables(db) and db.execute(
+                            "SELECT 1 FROM identity_migration WHERE id=?", (removal_hash,),
+                        ).fetchone()
+                    if not journaled:
+                        self._update(apply_started=False)
+                    raise
+                with closing(open_readonly(self.corpus)) as db:
+                    identity_preflight(db)
+                self._update(status="complete", phase="complete", maintenance=False, apply_started=False,
+                             removed_count=result["removed_count"], error=None)
+            finally:
+                CIRCULAR_JOB_LOCK.release()
+        self._start("removing", work, removal_hash=removal_hash)
 
 
 def make_console():

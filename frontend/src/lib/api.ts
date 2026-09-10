@@ -3,6 +3,9 @@ export interface IdentityMaintenance {
   status: string; maintenance: boolean; busy: boolean; can_cancel: boolean; can_apply: boolean;
   apply_started?: boolean; phase?: string; error?: string; manifest_hash?: string; backup_directory?: string;
   mappings: IdentityMapping[]; conflicts: Array<{ old_id: string; reasons: string[] }>; drift_count: number;
+  operation?: 'remove_legacy' | 'migrate' | null; removed_count?: number;
+  removal_hash?: string; removal_count: number; removal_attachment_count: number; can_remove: boolean;
+  removal_conflicts: Array<{ old_id: string; reasons: string[] }>;
 }
 export interface IdentityRecord {
   circular: Record<string, unknown>; attachments: Array<{ id: string; filename: string; original_url: string; content_text?: string }>;

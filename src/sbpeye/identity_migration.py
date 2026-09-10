@@ -340,6 +340,8 @@ def apply_migration(manifest: dict, backup_dir: Path, *, repair_indexes, phase_h
     A repair callback must verify changed sources before returning. SQLite commits are
     journalled atomically; vector repair may be replayed after interruption.
     """
+    if manifest.get("operation") == "remove_legacy":
+        raise ValueError("A removal must use the removal workflow, not identity re-keying.")
     supplied_hash = manifest.get("manifest_hash")
     if supplied_hash != fingerprint({k: v for k, v in manifest.items() if k != "manifest_hash"}):
         raise ValueError("Manifest hash mismatch")

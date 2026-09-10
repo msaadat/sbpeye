@@ -63,6 +63,7 @@ def _presence(session, descriptor, variants):
 
 def process_gap(session_factory, selected, job_id, request, pacer):
     from .scraper.circulars import process_circular
+    from .identity_removal import requires_fresh_fetch
     attempt_id = str(uuid.uuid4())
     descriptor = selected["descriptor"]
     stages, error = {}, None
@@ -92,12 +93,13 @@ def process_gap(session_factory, selected, job_id, request, pacer):
         session.commit()
     try:
         with session_factory() as session, http_job(pacer):
+            force_fetch = requires_fresh_fetch(session, selected["id"])
             variants = [descriptor, *[item for item in selected["variants"] if item["url"] != descriptor["url"]]]
             for index, item in enumerate(variants):
                 try:
                     process_circular(session, title=item["title"], url=item["url"], reference=item.get("reference", ""),
                                      department=item.get("department", "Unknown"), listing_date=item.get("date", ""), year=str(item.get("year", "")),
-                                     include_attachments=request.include_attachments, outcome=stages)
+                                     include_attachments=request.include_attachments, outcome=stages, force_fetch=force_fetch)
                     stages["successful_url"] = item["url"]
                     break
                 except Exception as exc:

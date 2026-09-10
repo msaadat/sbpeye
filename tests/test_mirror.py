@@ -43,14 +43,22 @@ def test_conflicting_url_identity_is_ambiguous():
 
 
 @pytest.mark.parametrize("status", ["partial", "failed"])
-def test_partial_publication_never_changes_queue(db_factory, status):
+def test_incomplete_publication_adds_missing_without_reconciling_queue(db_factory, status):
+    item = descriptor()
+    identity = circular_identity(item["reference"], item["url"])
     with db_factory() as db:
         gap = MirrorGap(id="old", descriptor="{}", status="skipped", eligible=True, attempts=3, last_error="keep")
         db.add_all([gap, MirrorAudit(id="audit", status="running")])
         db.commit()
-        publish_audit(db, "audit", reconcile([descriptor()], []), {"status": status, "pages_total": 1, "diagnostics": []})
-        assert db.query(MirrorGap).count() == 1
+        publish_audit(db, "audit", reconcile([item], []), {"status": status, "pages_total": 1, "diagnostics": []})
+        assert db.query(MirrorGap).count() == 2
         assert gap.status == "skipped" and gap.eligible and gap.attempts == 3 and gap.last_error == "keep"
+        observed = db.get(MirrorGap, identity)
+        assert observed.status == "pending" and observed.eligible
+        assert observed.eligibility_reason == "missing_incomplete_audit"
+        assert observed.eligibility_source == "incomplete_audit"
+        assert json.loads(observed.descriptor) == item
+        assert [row["id"] for row in circular_jobs.select_candidates(db, BackfillRequest())] == [identity]
 
 
 def test_complete_audit_preserves_skip_and_attempts(db_factory):

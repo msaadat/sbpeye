@@ -116,7 +116,7 @@ onUnmounted(() => { disposed = true; clearTimeout(timer) })
         <details><summary>Coverage by year</summary><table><thead><tr><th>Year</th><th>Matched</th><th>URL matches</th><th>Missing</th><th>Ambiguous</th></tr></thead><tbody><tr v-for="(counts, label) in baseline.coverage" :key="label"><td>{{ label }}</td><td>{{ counts.matched || 0 }}</td><td>{{ counts.drifted || 0 }}</td><td>{{ counts.missing || 0 }}</td><td>{{ counts.ambiguous || 0 }}</td></tr></tbody></table></details>
       </template>
       <p v-if="overview?.audit">Latest attempt: <AdminStatusChip :status="overview.audit.status" /> {{ overview.audit.error_code }} {{ overview.audit.error }}</p>
-      <Message v-if="overview?.audit && ['partial', 'failed'].includes(overview.audit.status)" severity="warn" :closable="false">This attempt did not update the queue. Observed gaps can be understated and unlisted local rows inflated.</Message>
+      <Message v-if="overview?.audit && ['partial', 'failed'].includes(overview.audit.status)" severity="warn" :closable="false">Observed missing listings were added to the queue and can be backfilled. This incomplete attempt did not reconcile existing gaps: observed gaps can be understated and unlisted local rows inflated.</Message>
       <details v-if="overview?.audit?.diagnostics?.length"><summary>Page diagnostics</summary><ul><li v-for="item in overview.audit.diagnostics" :key="item.page">Page {{ item.page + 1 }}: {{ item.error || `${item.yield} entries` }}</li></ul></details>
       <Button label="Run full audit" :disabled="busy" @click="act('audit', { workers: workers, delay: delay })" />
       <Button label="Refresh" text :loading="loading" @click="load" />

@@ -225,3 +225,238 @@
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+
+/* ---- Attention rows: a finding, its severity, and the one thing to do ------------- */
+
+/* A left stripe in the semantic colour so a list of findings can be triaged without
+   reading a single digit. Semantic colour only — the accent green stays for actions. */
+.admin-tab-body .attn-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.admin-tab-body .attn {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--sbp-border);
+  border-left-width: 3px;
+  border-radius: var(--sbp-radius);
+  background: var(--sbp-surface);
+  font-size: var(--sbp-fs-sm);
+}
+
+.admin-tab-body .attn.tone-ok { border-left-color: var(--sbp-success); }
+.admin-tab-body .attn.tone-warn { border-left-color: var(--sbp-warning); }
+.admin-tab-body .attn.tone-error { border-left-color: var(--sbp-danger); }
+.admin-tab-body .attn.tone-busy { border-left-color: var(--sbp-green); }
+.admin-tab-body .attn.tone-neutral { border-left-color: var(--sbp-border); }
+
+.admin-tab-body .attn-figure {
+  font-size: 1.15rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  min-width: 3.5rem;
+}
+
+.admin-tab-body .attn-body {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.admin-tab-body .attn-body small {
+  display: block;
+  color: var(--sbp-muted);
+  font-size: var(--sbp-fs-meta);
+}
+
+/* ---- Actionable statistics: a count that is also the filter for its own rows ------ */
+
+.admin-tab-body .stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.6rem;
+}
+
+.admin-tab-body .stat-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  align-items: flex-start;
+  text-align: left;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid var(--sbp-border);
+  border-radius: var(--sbp-radius);
+  background: var(--sbp-surface);
+  color: var(--sbp-text);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s var(--sbp-ease), box-shadow 0.15s var(--sbp-ease);
+}
+
+.admin-tab-body .stat-tile:hover { border-color: var(--sbp-green); }
+
+/* A figure with no filter of its own is still a figure — same card, no affordance. */
+.admin-tab-body .stat-tile.is-static {
+  cursor: default;
+}
+
+.admin-tab-body .stat-tile.is-static:hover {
+  border-color: var(--sbp-border);
+}
+
+/* The pressed tile is filtering the table below it, so it says so structurally
+   rather than only by colour. */
+.admin-tab-body .stat-tile[aria-pressed='true'] {
+  border-color: var(--sbp-green);
+  box-shadow: inset 3px 0 0 var(--sbp-green);
+}
+
+.admin-tab-body .stat-tile:focus-visible {
+  outline: 2px solid var(--sbp-green);
+  outline-offset: 1px;
+}
+
+.admin-tab-body .stat-value {
+  font-size: 1.5rem;
+  font-weight: 650;
+  line-height: 1.05;
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-tab-body .stat-value.tone-warn { color: var(--sbp-warning); }
+.admin-tab-body .stat-value.tone-error { color: var(--sbp-danger); }
+.admin-tab-body .stat-value.tone-ok { color: var(--sbp-success); }
+
+.admin-tab-body .stat-label { font-size: var(--sbp-fs-sm); }
+
+.admin-tab-body .stat-sub {
+  font-size: var(--sbp-fs-meta);
+  color: var(--sbp-muted);
+}
+
+/* ---- Workbench: filters beside the rows they filter, not above them -------------- */
+
+.admin-tab-body .workbench {
+  display: grid;
+  grid-template-columns: 13rem minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.admin-tab-body .filter-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  position: sticky;
+  top: 1rem;
+}
+
+/* Field labels only: the rail also carries inline checkbox labels, which must stay on
+   one line beside their box rather than becoming a block caption above it. */
+.admin-tab-body .filter-rail > div > label {
+  display: block;
+  font-size: var(--sbp-fs-meta);
+  color: var(--sbp-muted);
+  margin-bottom: 0.2rem;
+}
+
+.admin-tab-body .filter-rail .p-select,
+.admin-tab-body .filter-rail .p-inputtext {
+  width: 100%;
+}
+
+@media (max-width: 60rem) {
+  .admin-tab-body .workbench {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .admin-tab-body .filter-rail {
+    position: static;
+  }
+}
+
+/* ---- The action follows the rows it acts on -------------------------------------- */
+
+/* Sticky rather than in flow: selecting rows and starting work on them were a whole
+   table apart, so the batch was prepared above the evidence for preparing it. */
+.admin-tab-body .action-dock {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid var(--sbp-green);
+  border-radius: var(--sbp-radius);
+  background: var(--sbp-surface);
+  box-shadow: var(--sbp-shadow);
+}
+
+.admin-tab-body .action-dock .dock-summary {
+  flex: 1;
+  min-width: 14rem;
+  font-size: var(--sbp-fs-sm);
+}
+
+.admin-tab-body .action-dock .dock-summary b { font-variant-numeric: tabular-nums; }
+
+.admin-tab-body .action-dock .dock-summary small {
+  display: block;
+  color: var(--sbp-muted);
+  font-size: var(--sbp-fs-meta);
+}
+
+/* ---- Scope and type switches ---------------------------------------------------- */
+
+.admin-tab-body .switch-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  justify-content: space-between;
+}
+
+/* ---- Segmented switch: pick one of a small, fixed set --------------------------- */
+
+/* Used where the choice both filters the view and names what a button will do — the
+   workbench scope, the job type. A row of tabs would imply navigation; a dropdown would
+   hide the alternatives, which is the one thing this control exists to show. */
+.admin-tab-body .segmented-switch {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.15rem;
+  padding: 0.15rem;
+  background: var(--sbp-subtle);
+  border: 1px solid var(--sbp-border);
+  border-radius: var(--sbp-radius);
+}
+
+.admin-tab-body .segmented-switch button {
+  font: inherit;
+  font-size: var(--sbp-fs-sm);
+  border: 0;
+  background: transparent;
+  color: var(--sbp-muted);
+  padding: 0.3rem 0.7rem;
+  border-radius: var(--sbp-radius-sm);
+  cursor: pointer;
+}
+
+.admin-tab-body .segmented-switch button[aria-pressed='true'] {
+  background: var(--sbp-surface);
+  color: var(--sbp-text);
+  font-weight: 600;
+  box-shadow: var(--sbp-shadow-sm);
+}
+
+.admin-tab-body .segmented-switch button:focus-visible {
+  outline: 2px solid var(--sbp-green);
+  outline-offset: 1px;
+}

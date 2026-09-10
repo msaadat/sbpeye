@@ -86,10 +86,22 @@ export function statusTone(status: string): 'ok' | 'warn' | 'error' | 'busy' | '
     case 'succeeded':
     case 'indexed':
     case 'reachable':
+    // The maintenance assessment's vocabulary for "this stage is done": a keyword or
+    // vector entry is `recorded`, a body or attachment set is `ready`, a generated
+    // feature is `completed`. Without these the workbench rendered a healthy corpus as
+    // a wall of grey dots, which is the one thing the chip exists to prevent.
+    case 'recorded':
+    case 'ready':
+    case 'completed':
+    case 'present':
+    case 'resolved':
+    case 'matched':
       return 'ok'
     case 'failed':
     case 'index_error':
     case 'extraction_error':
+    case 'extraction_failed':
+    case 'missing_file':
     case 'blocked':
     case 'no-outbound-http':
       return 'error'
@@ -99,6 +111,14 @@ export function statusTone(status: string): 'ok' | 'warn' | 'error' | 'busy' | '
     case 'completed_with_gaps':
     case 'intermittent':
     case 'intermittent-client-dependent':
+    case 'missing':
+    case 'unscanned':
+    case 'needs_files':
+    case 'limited':
+    case 'pending':
+    case 'drifted':
+    case 'ambiguous':
+    case 'unlisted_local':
       return 'warn'
     case 'running':
     case 'queued':

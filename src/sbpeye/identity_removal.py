@@ -4,6 +4,7 @@ This is deliberately distinct from re-keying: unverified derived data is discard
 not blessed by a provenance override. Files and application research are retained.
 """
 
+from collections import Counter
 from contextlib import closing
 from datetime import datetime, timezone
 import json
@@ -103,6 +104,26 @@ def _delete_source(db, mapping, migration_id):
                (old, new, migration_id, datetime.now(timezone.utc).isoformat()))
 
 
+def _foreign_key_violations(db):
+    """Snapshot violations and their rows, not just the number of broken links."""
+    violations = Counter()
+    for violation in db.execute("PRAGMA foreign_key_check").fetchall():
+        table, rowid, parent, foreign_key = tuple(violation)
+        quoted = quote_identifier(table)
+        if rowid is None:
+            # WITHOUT ROWID tables have no row locator in foreign_key_check.
+            # Conservatively require their entire contents to stay unchanged.
+            rows = frozenset(tuple(row) for row in db.execute(f"SELECT * FROM {quoted}"))
+        else:
+            columns = {row[1].lower() for row in db.execute(f"PRAGMA table_info({quoted})")}
+            locator = next((name for name in ("rowid", "_rowid_", "oid") if name not in columns), None)
+            if locator is None:
+                raise ValueError(f"Cannot verify existing foreign-key violations in {table}")
+            rows = tuple(db.execute(f"SELECT * FROM {quoted} WHERE {locator}=?", (rowid,)).fetchone())
+        violations[(table, rowid, parent, foreign_key, rows)] += 1
+    return violations
+
+
 def apply_removal(manifest, backup_dir, *, remove_vectors, phase_hook=lambda phase: None):
     expected = fingerprint({key: value for key, value in manifest.items() if key != "manifest_hash"})
     if manifest.get("operation") != OPERATION or manifest.get("manifest_hash") != expected:
@@ -139,14 +160,15 @@ def apply_removal(manifest, backup_dir, *, remove_vectors, phase_hook=lambda pha
             db.execute("BEGIN IMMEDIATE")
             db.execute("PRAGMA defer_foreign_keys=ON")
             try:
+                existing_violations = _foreign_key_violations(db)
                 for mapping in manifest["mappings"]:
                     row = db.execute("SELECT * FROM circulars WHERE id=?", (mapping["old_id"],)).fetchone()
                     if row is None or fingerprint(dict(row)) != mapping["row_fingerprint"]:
                         raise ValueError("Circular changed since removal was prepared")
                 for mapping in manifest["mappings"]:
                     _delete_source(db, mapping, migration_id)
-                if db.execute("PRAGMA foreign_key_check").fetchone():
-                    raise ValueError("Removal would leave invalid foreign keys")
+                if _foreign_key_violations(db) - existing_violations:
+                    raise ValueError("Removal would create new or changed invalid foreign keys")
                 db.execute("UPDATE identity_migration SET phase='corpus_committed' WHERE id=?", (migration_id,))
                 db.commit()
             except BaseException:

@@ -248,3 +248,71 @@ def test_removal_manifest_cannot_be_used_for_rekeying(removal_data):
     report = plan_removal(manager.corpus, manager.app)
     with pytest.raises(ValueError, match="removal workflow"):
         apply_migration(report, manager.root / "backups", repair_indexes=lambda _: None)
+
+
+def test_removal_allows_existing_orphans_and_resumes_planned_journal(removal_data, monkeypatch):
+    from sbpeye import identity_removal
+    manager, factory, old, _, _, _ = removal_data
+    with factory() as db:
+        db.add(AIGenerationJob(id="orphan", circular_id="already-missing", feature="summary", status="success"))
+        db.commit()
+    state = prepare(manager)
+    original = identity_removal._delete_source
+    def fail(db, mapping, migration_id):
+        original(db, mapping, migration_id)
+        raise ValueError("Removal would leave invalid foreign keys")
+    monkeypatch.setattr(identity_removal, "_delete_source", fail)
+    manager.remove(state["removal_hash"])
+    assert finish(manager)["status"] == "failed"
+    monkeypatch.setattr(identity_removal, "_delete_source", original)
+    manager.remove(state["removal_hash"])
+    result = finish(manager)
+    assert result["status"] == "complete", result
+    with sqlite3.connect(manager.corpus) as db:
+        assert db.execute("SELECT 1 FROM circulars WHERE id=?", (old,)).fetchone() is None
+        assert db.execute("SELECT circular_id FROM ai_generation_jobs WHERE id='orphan'").fetchone()[0] == "already-missing"
+        assert len(db.execute("PRAGMA foreign_key_check").fetchall()) == 1
+    backups = list((manager.root / "backups").glob("*-corpus.db"))
+    assert len(backups) == 1
+    with sqlite3.connect(backups[0]) as db:
+        assert db.execute("SELECT 1 FROM circulars WHERE id=?", (old,)).fetchone()
+
+
+@pytest.mark.parametrize("changed_existing", [False, True])
+def test_removal_rolls_back_new_or_changed_foreign_key_violations(removal_data, monkeypatch, changed_existing):
+    from sbpeye import identity_removal
+    manager, factory, old, _, _, vectors = removal_data
+    with factory() as db:
+        db.add(AIGenerationJob(id="orphan", circular_id="already-missing", feature="summary", status="success"))
+        db.commit()
+    manifest = plan_removal(manager.corpus, manager.app)
+    original = identity_removal._delete_source
+    def break_link(db, mapping, migration_id):
+        assert db.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        original(db, mapping, migration_id)
+        db.execute("UPDATE ai_generation_jobs SET circular_id=? WHERE id=?",
+                   ("different-missing" if changed_existing else old, "orphan" if changed_existing else "job"))
+    monkeypatch.setattr(identity_removal, "_delete_source", break_link)
+    with pytest.raises(ValueError, match="new or changed invalid foreign keys"):
+        apply_removal(manifest, manager.root / "backups", remove_vectors=remove_legacy_vectors)
+    with sqlite3.connect(manager.corpus) as db:
+        assert db.execute("SELECT 1 FROM circulars WHERE id=?", (old,)).fetchone()
+        assert db.execute("SELECT circular_id FROM ai_generation_jobs WHERE id='orphan'").fetchone()[0] == "already-missing"
+        assert not db.execute("SELECT 1 FROM identity_alias").fetchone()
+        assert len(db.execute("PRAGMA foreign_key_check").fetchall()) == 1
+    assert "old-body" in vectors.records
+
+
+@pytest.mark.parametrize("storage", ["", "WITHOUT ROWID"])
+def test_violation_snapshot_detects_changed_composite_keys(storage):
+    from sbpeye.identity_removal import _foreign_key_violations
+    with closing(sqlite3.connect(":memory:")) as db:
+        db.execute("CREATE TABLE parent (a TEXT, b TEXT, PRIMARY KEY(a,b))")
+        db.execute(f"CREATE TABLE child (id INTEGER PRIMARY KEY, a TEXT, b TEXT, FOREIGN KEY(a,b) REFERENCES parent(a,b)) {storage}")
+        db.execute("INSERT INTO child VALUES (1,'missing','first')")
+        before = _foreign_key_violations(db)
+        assert before and not _foreign_key_violations(db) - before
+        db.execute("UPDATE child SET b='second'")
+        assert _foreign_key_violations(db) - before
+        db.execute("DELETE FROM child")
+        assert not _foreign_key_violations(db) - before

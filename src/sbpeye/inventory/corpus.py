@@ -173,10 +173,6 @@ def iter_law_sources(
             if scope:
                 scope.exclude(EXCLUDED_CIRCULAR_BACKED)
             continue
-        if document.is_external:
-            if scope:
-                scope.exclude(EXCLUDED_EXTERNAL)
-            continue
         if document.delisted_at is not None and not include_delisted:
             if scope:
                 scope.exclude(EXCLUDED_DELISTED)
@@ -184,8 +180,16 @@ def iter_law_sources(
 
         version = document.current_version
         if version is None:
+            # "Externally hosted" is a reason to hold no text, not a synonym for it. An
+            # uploaded version puts an external document in the corpus while leaving the
+            # flag true, so the presence of a version decides and the flag only explains
+            # (LAWS_UPLOADS_PLAN.md §1.2).
             if scope:
-                scope.exclude(EXCLUDED_NO_CURRENT_VERSION)
+                scope.exclude(
+                    EXCLUDED_EXTERNAL
+                    if document.is_external
+                    else EXCLUDED_NO_CURRENT_VERSION
+                )
             continue
         if version.file_type in NON_TEXT_LAW_FILE_TYPES:
             # A container manifest is bookkeeping, not text. Its parts are separate

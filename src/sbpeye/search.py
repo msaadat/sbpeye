@@ -1024,12 +1024,17 @@ def _law_fts_ensure_table(conn) -> None:
     conn.execute(text(_LAW_FTS_CREATE_SQL))
 
 
-def _searchable_law_version(document: RegDocument) -> RegDocumentVersion | None:
+def searchable_law_version(document: RegDocument) -> RegDocumentVersion | None:
     """The version of a document that search should see: the one in force, if it's text.
 
     Superseded versions stay in SQLite and in the archive but are not searchable — a
-    search hit on text SBP no longer publishes would be actively misleading.
+    search hit on text SBP no longer publishes would be actively misleading. A withdrawn
+    document is the same case: both search arms already filter `delisted_at` at query
+    time, and honouring it here too means the index says what the query says instead of
+    holding rows that are dropped a moment later.
     """
+    if document.delisted_at is not None:
+        return None
     version = document.current_version
     if version is None or version.file_type in NON_TEXT_LAW_FILE_TYPES:
         return None
@@ -1037,8 +1042,17 @@ def _searchable_law_version(document: RegDocument) -> RegDocumentVersion | None:
 
 
 def _law_fts_row(document: RegDocument) -> tuple[str, str, str]:
-    """The (title, part_label, body) token strings for one document's FTS row."""
-    version = _searchable_law_version(document)
+    """The (title, part_label, body) token strings for one document's FTS row.
+
+    All three empty for a withdrawn document, which is what keeps it out of the index:
+    every writer here treats "no title and no body" as "no row", so the rule lives once
+    rather than in each of `index_law_fts` and `backfill_laws_fts`. Emptying only the body
+    is not enough — a title matches lexically on its own, and the query filter would then
+    drop the hit a moment later.
+    """
+    if document.delisted_at is not None:
+        return "", "", ""
+    version = searchable_law_version(document)
     title = " ".join(tokenize(document.title or ""))
     part_label = " ".join(tokenize(document.part_label or ""))
     body = " ".join(tokenize(version.content_text or "" if version else ""))
@@ -1205,7 +1219,7 @@ def _result_sort_date(item) -> float:
     if isinstance(item, Circular):
         return item.date.timestamp() if item.date else 0.0
     if isinstance(item, RegDocument):
-        version = _searchable_law_version(item)
+        version = searchable_law_version(item)
         stamp = (version.first_seen_at if version else None) or item.first_seen_at
         return stamp.timestamp() if stamp else 0.0
     return 0.0
@@ -1741,7 +1755,7 @@ class SearchEngine:
         preview cut by term density across the full text is picking from an enormous
         field. The matched chunk narrows that to the passage retrieval actually scored.
         """
-        version = _searchable_law_version(document)
+        version = searchable_law_version(document)
         evidence_list = evidence_by_id.get(document.id) or []
         # Same rule and the same reasoning as `_circular_result`: the preview is a
         # window for a human scanning results, `passages` are whole chunks for a reader

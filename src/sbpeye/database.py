@@ -442,6 +442,10 @@ def _ensure_columns(bind=None):
                 ("tags", "TEXT"),
                 ("summary_generated_at", "DATETIME"),
                 ("tags_generated_at", "DATETIME"),
+                # Admin uploads (LAWS_UPLOADS_PLAN.md). Existing rows all came from the
+                # listing, which is exactly what the default says.
+                ("origin", "VARCHAR DEFAULT 'sbp_listing'"),
+                ("source_note", "TEXT"),
             ],
             "reg_document_versions": [
                 ("document_id", "VARCHAR"),
@@ -469,6 +473,10 @@ def _ensure_columns(bind=None):
                 ("checklist_generated_at", "DATETIME"),
                 ("entities_generated_at", "DATETIME"),
                 ("relationships_generated_at", "DATETIME"),
+                # Admin uploads (LAWS_UPLOADS_PLAN.md).
+                ("pinned", "INTEGER DEFAULT 0"),
+                ("uploaded_by", "VARCHAR"),
+                ("original_filename", "VARCHAR"),
             ],
             "reg_document_links": [
                 ("circular_id", "VARCHAR"),

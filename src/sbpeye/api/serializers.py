@@ -139,6 +139,12 @@ def _law_version_payload(version: RegDocumentVersion | None, include_text: bool 
         "first_seen_at": _isoformat(version.first_seen_at),
         "last_seen_at": _isoformat(version.last_seen_at),
         "has_file": bool(version.local_path),
+        # Uploaded-version provenance (LAWS_UPLOADS_PLAN.md). `pinned` is the admin
+        # override of the currency tiers, so a reader can say "pinned over SBP's copy"
+        # rather than leaving an unexplained edition in force.
+        "pinned": bool(version.pinned),
+        "uploaded_by": version.uploaded_by,
+        "original_filename": version.original_filename,
     }
     if include_text:
         payload["content_text"] = version.content_text
@@ -224,7 +230,12 @@ def _law_summary(document: RegDocument, snippet: str | None = None) -> dict:
             split_law_title(document.parent.title)[0] if document.parent else None
         ),
         "source_url": document.source_url,
+        # Stays true after an upload — SBP does still host it elsewhere. Readers
+        # distinguish "we hold no copy" from "we hold an uploaded copy" by
+        # `current_version`, never by this flag (LAWS_UPLOADS_PLAN.md §1.2).
         "is_external": bool(document.is_external),
+        "origin": document.origin,
+        "source_note": document.source_note,
         "circular_id": document.circular_id,
         "listed_date": _isoformat(document.listed_date),
         "delisted_at": _isoformat(document.delisted_at),

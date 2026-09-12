@@ -69,7 +69,11 @@ STRUCTURAL_GAPS = frozenset({
 # Docling reads PDFs and Markdown. A law version of any other file type has no path to a
 # parse: `_convert_document` would hand `converter.convert()` a format it never registered
 # and raise, reporting a crash where the truth is "we do not read spreadsheets".
-PARSEABLE_LAW_FILE_TYPES = frozenset({"pdf", "html"})
+#
+# `txt` and `html` qualify because neither carries a `local_path` into the corpus payload,
+# so both take `_convert_document`'s text branch and reach Docling as Markdown. `pdf` is
+# the one type handed over as a file, which is what buys real page numbers.
+PARSEABLE_LAW_FILE_TYPES = frozenset({"pdf", "html", "txt"})
 
 
 def _gap(
@@ -106,15 +110,17 @@ def law_corpus(document: RegDocument) -> tuple[list[dict[str, Any]], list[dict[s
         # The instrument is already in the circular corpus. Analysing it here would produce
         # a second, drifting copy of the same document's analysis.
         return [], [_gap(document, GAP_CIRCULAR_BACKED)]
-    if document.is_external:
-        return [], [_gap(document, GAP_EXTERNAL)]
     if document.delisted_at is not None:
         return [], [_gap(document, GAP_DELISTED)]
 
     version = document.current_version
     if version is None:
-        # A stub, or a listing row whose file SBP has never served us.
-        return [], [_gap(document, GAP_NO_CURRENT_VERSION)]
+        # Holding no text is the fact; `is_external` is only one reason for it. Asked in
+        # the other order this refused an externally-hosted Act whose text an admin had
+        # uploaded (LAWS_UPLOADS_PLAN.md §1.2) — the flag stays true after an upload,
+        # because SBP does still host it elsewhere, but the text is here now.
+        reason = GAP_EXTERNAL if document.is_external else GAP_NO_CURRENT_VERSION
+        return [], [_gap(document, reason)]
 
     file_type = (version.file_type or "").lower()
     if file_type not in PARSEABLE_LAW_FILE_TYPES:

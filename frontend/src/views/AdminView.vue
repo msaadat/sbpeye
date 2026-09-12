@@ -61,6 +61,7 @@ const sections: AdminSection[] = [
     children: [
       { label: 'Workbench', to: '/admin/documents/workbench' },
       { label: 'Corpus statistics', to: '/admin/documents/corpus' },
+      { label: 'Library', to: '/admin/documents/library' },
     ],
   },
   {

@@ -99,6 +99,15 @@ const router = createRouter({
           name: 'admin-corpus',
           component: () => import('@/views/admin/AdminCorpusTab.vue'),
         },
+        // Admin-uploaded laws (docs/LAWS_UPLOADS_PLAN.md). The plan named this
+        // `/admin/library` when the console was a flat row of tabs; under Documents is
+        // where it belongs now that the console is sectioned, beside the other two views
+        // of what the corpus holds.
+        {
+          path: 'documents/library',
+          name: 'admin-library',
+          component: () => import('@/views/admin/AdminLibraryTab.vue'),
+        },
 
         { path: 'jobs', name: 'admin-jobs', component: () => import('@/views/admin/AdminJobsTab.vue') },
 

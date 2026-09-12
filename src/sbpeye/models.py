@@ -170,6 +170,14 @@ class RegDocument(Base):
     # Dedupe path: set when the listing item is actually an already-indexed circular.
     circular_id = Column(String, ForeignKey("circulars.id"), nullable=True, index=True)
     is_external = Column(Integer, nullable=False, default=0)
+    # sbp_listing | upload. Who put this row here, and the only thing that licenses
+    # `delist_missing` to touch it: the listing says nothing about a document it never
+    # carried, so an admin-uploaded row must survive a complete listing pass.
+    origin = Column(String, nullable=False, default="sbp_listing", index=True)
+    # Admin-written citation for the text we hold, e.g. "Consolidated text from
+    # pakistancode.gov.pk, as of March 2024". There is deliberately no `issuer` column
+    # or facet yet (LAWS_UPLOADS_PLAN.md decision 1); this free text stands in for one.
+    source_note = Column(Text, nullable=True)
     # From the listing's data-date attribute; display metadata only, never a version
     # signal (old laws carry fabricated placeholder dates).
     listed_date = Column(DateTime, nullable=True)
@@ -282,8 +290,18 @@ class RegDocumentVersion(Base):
     effective_from = Column(DateTime, nullable=True)
     first_seen_at = Column(DateTime, default=datetime.utcnow)
     last_seen_at = Column(DateTime, default=datetime.utcnow)
-    # live | wayback (backfilled history)
+    # live | wayback (backfilled history) | upload (admin-supplied, see
+    # LAWS_UPLOADS_PLAN.md). Also the currency tier: `select_current_versions` prefers
+    # live over upload, and wayback never competes.
     source = Column(String, nullable=False, default="live")
+    # The admin override of that tier order: a pinned version outranks SBP's own copy,
+    # which is how an uploaded consolidated text replaces a scanned PDF as the edition
+    # in force. At most one pinned version per document, enforced at pin time.
+    pinned = Column(Integer, nullable=False, default=0)
+    # Provenance for an uploaded version. `uploaded_by` is a User.id from the runtime
+    # database, stored as a bare string because that database is a separate bind.
+    uploaded_by = Column(String, nullable=True)
+    original_filename = Column(String, nullable=True)
 
     document = relationship("RegDocument", back_populates="versions")
 

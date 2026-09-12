@@ -41,7 +41,7 @@ from .circulars import (
     fetch_page_cached,
 )
 from .clean_html import extract_sbp_text
-from ..search import NON_TEXT_LAW_FILE_TYPES, index_law_fts
+from ..search import index_law_fts, searchable_law_version
 
 LAWS_LISTING_URL = f"{BASE_URL}/laws-regulations"
 # Imported, not derived from the attachments tree: the archive is a different kind of
@@ -639,6 +639,11 @@ def upsert_document(db: Session, row: dict, now: datetime) -> RegDocument:
     document.doc_type = row["doc_type"]
     document.source_url = row["url"]
     document.is_external = 1 if row["route"] == ROUTE_EXTERNAL else 0
+    # SBP listing a document we had only as an upload makes it a listing row from now on,
+    # which is what licenses `delist_missing` to touch it again. Its uploaded versions
+    # stay as history and compete under the tier rule, and `source_note` is kept —
+    # the citation for text an admin supplied is still true (LAWS_UPLOADS_PLAN.md §4).
+    document.origin = "sbp_listing"
     document.listed_date = row["listed_date"] or document.listed_date
     document.last_seen_at = now
     # A row that reappears after being dropped from the listing is live again.
@@ -885,6 +890,9 @@ def delist_missing_children(
     query = db.query(RegDocument).filter(
         RegDocument.parent_id == parent_id,
         RegDocument.delisted_at.is_(None),
+        # Same reason as `delist_missing`: absence from SBP's page is only evidence
+        # about rows SBP's page put here.
+        RegDocument.origin == "sbp_listing",
     )
     if seen_ids:
         query = query.filter(RegDocument.id.notin_(seen_ids))
@@ -1077,13 +1085,11 @@ def vectorize_law_document(
     SQLite and archived on disk, but a semantic hit on wording SBP no longer publishes
     would be worse than no hit at all.
     """
-    version = document.current_version
-    searchable = (
-        version is not None
-        and version.file_type not in NON_TEXT_LAW_FILE_TYPES
-        and (version.content_text or "").strip()
-    )
-    if not searchable:
+    # The same helper the FTS writer uses, so the two indexes can never disagree about
+    # what is searchable — including about a withdrawn document, whose chunks have to go
+    # the way its FTS row does.
+    version = searchable_law_version(document)
+    if not (version is not None and (version.content_text or "").strip()):
         _replace_document_chunks(
             {"doc_id": document.id, "doc_type": "law", "doc_label": "", "text": "",
              "file_type": ""},
@@ -1146,10 +1152,8 @@ def index_pending_laws(
 
     indexed = 0
     for document in query.all():
-        version = document.current_version
-        if version is None or version.file_type in NON_TEXT_LAW_FILE_TYPES:
-            continue
-        if not (version.content_text or "").strip():
+        version = searchable_law_version(document)
+        if version is None or not (version.content_text or "").strip():
             continue
         if not force and version.is_vectorized == 1:
             continue
@@ -1157,6 +1161,33 @@ def index_pending_laws(
         indexed += 1
     db.commit()
     return indexed
+
+
+# The version sources that can hold `is_current`, best tier first. `wayback` is absent
+# on purpose: a backfilled edition is history, and promoting one would answer a question
+# about today's rules with wording SBP replaced years ago.
+CURRENCY_SOURCES = ("live", "upload")
+
+
+def _currency_tiers(
+    versions: list[RegDocumentVersion],
+) -> list[list[RegDocumentVersion]]:
+    """Candidate versions grouped into the tiers of LAWS_UPLOADS_PLAN.md §5, best first.
+
+    Tier 0 is the admin pin, tier 1 SBP's own copy, tier 2 everything uploaded. Empty
+    tiers are dropped so the caller can simply walk the list.
+
+    Consequences worth stating, because they are the whole point: for an external or
+    upload-origin document tier 2 is the only tier, so the newest upload is in force with
+    no pin needed; for a document SBP hosts, an upload is captured but *not* in force
+    until pinned, and unpinning hands currency straight back to SBP's copy.
+    """
+    tiers = [
+        [v for v in versions if v.pinned],
+        [v for v in versions if not v.pinned and v.source == "live"],
+        [v for v in versions if not v.pinned and v.source == "upload"],
+    ]
+    return [tier for tier in tiers if tier]
 
 
 def select_current_versions(
@@ -1169,15 +1200,22 @@ def select_current_versions(
 
     Fetch order must never decide this: the listing can carry an in-force edition and a
     future-dated one at the same time, and processing them row by row would flip
-    `is_current` back and forth. The rule (§3 of the plan):
+    `is_current` back and forth. The rule (§3 of the parent plan):
 
       * a version whose `effective_from` is still in the future is pending, never current;
       * otherwise the latest arrived `effective_from` wins;
       * with no effective dates to compare, the version this listing pass actually
         pointed at wins (latest listing row), falling back to the most recently captured.
 
-    Because a pending version becomes current merely by its date arriving, this runs on
-    every sync, not only when a new hash shows up.
+    That rule decides *within* a tier. Uploads add the tiers (LAWS_UPLOADS_PLAN.md §5):
+    a pinned version outranks SBP's own copy, which outranks an upload, and `wayback`
+    rows are history that never competes. The highest tier holding an *eligible* version
+    supplies the winner — so a pinned edition dated in the future is pending like any
+    other and the next tier decides meanwhile.
+
+    Because a pending version becomes current merely by its date arriving, and because
+    unpinning has to take effect without a recapture, this runs on every sync rather
+    than only when a new hash shows up.
     """
     now = now or datetime.utcnow()
     rows_by_document = rows_by_document or {}
@@ -1186,7 +1224,7 @@ def select_current_versions(
             db.query(RegDocumentVersion)
             .filter(
                 RegDocumentVersion.document_id == document_id,
-                RegDocumentVersion.source == "live",
+                RegDocumentVersion.source.in_(CURRENCY_SOURCES),
             )
             .all()
         )
@@ -1198,26 +1236,30 @@ def select_current_versions(
             for row in rows_by_document.get(document_id, [])
             if row.get("version_id")
         }
-        eligible = [
-            v for v in versions if v.effective_from is None or v.effective_from <= now
-        ]
-        dated = [v for v in eligible if v.effective_from is not None]
 
-        if dated:
-            winner = max(dated, key=lambda v: v.effective_from)
-        elif eligible:
-            winner = max(
-                eligible,
-                key=lambda v: (
-                    v.id in observed,
-                    (observed.get(v.id, {}).get("listed_date") or datetime.min),
-                    observed.get(v.id, {}).get("order", -1),
-                    v.first_seen_at or datetime.min,
-                ),
-            )
-        else:
-            # Everything is future-dated: nothing is in force yet.
-            winner = None
+        winner = None
+        for tier in _currency_tiers(versions):
+            eligible = [
+                v for v in tier if v.effective_from is None or v.effective_from <= now
+            ]
+            if not eligible:
+                # Every candidate in this tier is future-dated. Fall through and let the
+                # tier below hold the document until one of these dates arrives.
+                continue
+            dated = [v for v in eligible if v.effective_from is not None]
+            if dated:
+                winner = max(dated, key=lambda v: v.effective_from)
+            else:
+                winner = max(
+                    eligible,
+                    key=lambda v: (
+                        v.id in observed,
+                        (observed.get(v.id, {}).get("listed_date") or datetime.min),
+                        observed.get(v.id, {}).get("order", -1),
+                        v.first_seen_at or datetime.min,
+                    ),
+                )
+            break
 
         for version in versions:
             version.is_current = 1 if version is winner else 0
@@ -1237,6 +1279,10 @@ def delist_missing(db: Session, seen_ids: set[str], now: datetime) -> int:
         # Children come from subpages (phase 3), not from the listing, so their absence
         # here says nothing about whether they are still published.
         RegDocument.parent_id.is_(None),
+        # Neither does the listing say anything about a document it never carried. An
+        # admin-uploaded Act is absent from every pass by definition, and without this
+        # filter a single complete sync would delist it out of the list, search and chat.
+        RegDocument.origin == "sbp_listing",
     )
     if seen_ids:
         query = query.filter(RegDocument.id.notin_(seen_ids))

@@ -948,6 +948,7 @@ export interface AdminCorpusStatus {
     not_yet_in_force: number
     circular_backed: number
     external: number
+    external_held: number
     delisted: number
     stubs: number
     vectorized_versions: number
@@ -1719,6 +1720,10 @@ export interface LawVersion {
   first_seen_at?: string | null
   last_seen_at?: string | null
   has_file: boolean
+  /** Admin override of the currency tiers: this edition beats SBP's own copy. */
+  pinned?: boolean
+  uploaded_by?: string | null
+  original_filename?: string | null
 }
 
 export interface LawSummary {
@@ -1737,7 +1742,16 @@ export interface LawSummary {
   /** The container's name, when this document is a part. Never orphan a part. */
   parent_title?: string | null
   source_url?: string | null
+  /**
+   * SBP publishes this elsewhere. Stays true after an administrator uploads its text,
+   * because SBP does still host it elsewhere — so this never means "we hold no copy".
+   * Read `current_version` for that.
+   */
   is_external: boolean
+  /** `sbp_listing` | `upload` — who put this row here. */
+  origin?: string | null
+  /** An administrator's citation for the text we hold, shown in the provenance bar. */
+  source_note?: string | null
   circular_id?: string | null
   listed_date?: string | null
   delisted_at?: string | null
@@ -1892,6 +1906,119 @@ export async function downloadLawChecklistExcel(id: string, title?: string | nul
   anchor.click()
   anchor.remove()
   URL.revokeObjectURL(downloadUrl)
+}
+
+// --- Uploaded documents (docs/LAWS_UPLOADS_PLAN.md) ---
+
+export interface LawUploadTarget {
+  document_id: string
+  title: string
+  exists: boolean
+  /** One line for the form's preview: "New document." or what it would attach to. */
+  summary: string
+  doc_type?: string | null
+  origin?: string | null
+  is_external: boolean
+  is_delisted: boolean
+  held_versions: number
+  holds_text: boolean
+  is_circular_backed: boolean
+}
+
+export interface LawUploadResult {
+  document: LawSummary
+  version: LawVersion
+  created_document: boolean
+  created_version: boolean
+  extraction_status?: string | null
+  /** False for a scanned PDF with no text layer — said now, not discovered later. */
+  will_be_searchable: boolean
+  is_current: boolean
+  duplicate: boolean
+  indexing: 'queued' | 'skipped'
+  job_id?: string
+}
+
+/** A document in the Library tab, with its whole version timeline. */
+export interface LawUploadRow extends LawSummary {
+  versions: LawVersion[]
+}
+
+export interface LawUploadFields {
+  title: string
+  doc_type: string
+  document_id?: string | null
+  source_url?: string | null
+  source_note?: string | null
+  version_label?: string | null
+  effective_from?: string | null
+  pin?: boolean
+}
+
+export async function resolveLawUpload(
+  title: string,
+  documentId?: string | null,
+): Promise<LawUploadTarget> {
+  return requestJson<LawUploadTarget>('/laws/upload/resolve', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title, document_id: documentId || null }),
+  })
+}
+
+export async function uploadLaw(
+  file: File,
+  fields: LawUploadFields,
+): Promise<LawUploadResult> {
+  const body = new FormData()
+  body.append('file', file)
+  body.append('title', fields.title)
+  body.append('doc_type', fields.doc_type)
+  // Only non-empty values are sent: the server reads an empty string as a value, and an
+  // empty `effective_from` would be an unparseable date rather than an absent one.
+  for (const key of [
+    'document_id',
+    'source_url',
+    'source_note',
+    'version_label',
+    'effective_from',
+  ] as const) {
+    const value = fields[key]
+    if (value) body.append(key, value)
+  }
+  if (fields.pin) body.append('pin', 'true')
+  // No Content-Type header: the browser sets it with the multipart boundary.
+  return requestJson<LawUploadResult>('/laws/upload', { method: 'POST', body })
+}
+
+export async function getLawUploads(): Promise<LawUploadRow[]> {
+  return requestJson<LawUploadRow[]>('/laws/uploads')
+}
+
+export async function withdrawLaw(id: string): Promise<LawDetail> {
+  return requestJson<LawDetail>(`/laws/${encodeURIComponent(id)}/withdraw`, {
+    method: 'POST',
+  })
+}
+
+export async function restoreLaw(id: string): Promise<LawDetail> {
+  return requestJson<LawDetail>(`/laws/${encodeURIComponent(id)}/restore`, {
+    method: 'POST',
+  })
+}
+
+export async function pinLawVersion(id: string, versionId: string): Promise<LawDetail> {
+  return requestJson<LawDetail>(
+    `/laws/${encodeURIComponent(id)}/versions/${encodeURIComponent(versionId)}/pin`,
+    { method: 'POST' },
+  )
+}
+
+export async function unpinLawVersion(id: string, versionId: string): Promise<LawDetail> {
+  return requestJson<LawDetail>(
+    `/laws/${encodeURIComponent(id)}/versions/${encodeURIComponent(versionId)}/unpin`,
+    { method: 'POST' },
+  )
 }
 
 /** The archived file, served from our disk — never re-fetched from sbp.org.pk. */

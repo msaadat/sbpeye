@@ -21,6 +21,7 @@ Usage:
     python scripts/sync_volume.py fix-nesting [--apply]
     python scripts/sync_volume.py prune-duplicates [--apply]
     python scripts/sync_volume.py push [SUBTREE] [--apply] [--chunk-mb 64]
+    python scripts/sync_volume.py pull [SUBTREE] [--apply]
     python scripts/sync_volume.py cleanup --apply
 
 SUBTREE limits the operation to one part of the tree, so it can go up in stages --
@@ -30,12 +31,26 @@ laws first, since it is the archive that cannot be re-fetched:
     python scripts/sync_volume.py push circulars --apply
     python scripts/sync_volume.py push cache/html --apply
 
+`pull` is the other direction, and it exists for one reason: admin-uploaded law
+documents (docs/LAWS_UPLOADS_PLAN.md). Everything else on the volume came from SBP and
+can be re-fetched, but an upload's bytes exist only where the administrator put them --
+and the deployment runbook re-uploads `sbpeye.db` wholesale, which would orphan any files
+created on the volume since. So before a DB push:
+
+    python scripts/sync_volume.py pull laws --apply
+
+Pull never deletes and never overwrites a local file. A local file of a different size is
+reported as a conflict and skipped, because under `files/laws/` a filename carries its
+own content hash: same name, different size means something is wrong, not stale.
+
 Every mutating phase is a dry run unless --apply is passed.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
+import io
 import os
 import shlex
 import shutil
@@ -370,6 +385,131 @@ def split(archive: Path, work: Path, chunk_size: int, label: str) -> list[Path]:
     return chunks
 
 
+# Files per `tar` invocation. The remote side takes its file list as argv, so the batch
+# size is really an ARG_MAX budget; 200 archive paths is far inside it on any kernel.
+PULL_BATCH_FILES = 200
+
+# Refuse a pull bigger than this rather than push hundreds of MB through a base64 pipe.
+# The intended payload is a handful of uploaded documents; anything at this scale means the
+# subtree is wrong, and the operator should say which part they want.
+PULL_MAX_BYTES = 256 * 1024 * 1024
+
+
+def _safe_extract(payload: bytes, destination: Path) -> tuple[int, list[str]]:
+    """Unpack a pulled tar under `destination`, refusing to clobber anything.
+
+    Two guards, both because this writes into the archive:
+
+      * a member whose path escapes `destination` (absolute, or containing `..`) is
+        rejected outright -- the tar comes off a remote host and is not trusted to
+        address our filesystem;
+      * a member whose destination already exists is skipped. Pull is for recovering
+        files we do not have; overwriting is how a local edition gets lost.
+
+    Returns (written, skipped paths).
+    """
+    written = 0
+    skipped: list[str] = []
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as tar:
+        for member in tar.getmembers():
+            if not member.isfile():
+                continue
+            target = (destination / member.name).resolve()
+            if destination.resolve() not in target.parents:
+                skipped.append(f"{member.name} (path escapes {destination})")
+                continue
+            if target.exists():
+                skipped.append(f"{member.name} (already here)")
+                continue
+            source = tar.extractfile(member)
+            if source is None:
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source.read())
+            written += 1
+    return written, skipped
+
+
+def cmd_pull(args: argparse.Namespace) -> int:
+    """Fetch files the volume has and we do not. The reverse of push, and never destructive."""
+    local, remote, _missing, _mismatched = diff()
+    scope = args.subtree or "everything"
+
+    absent = sorted(
+        rel for rel in remote if rel not in local and in_subtree(rel, args.subtree)
+    )
+    conflicts = sorted(
+        rel
+        for rel in remote
+        if rel in local and remote[rel] != local[rel] and in_subtree(rel, args.subtree)
+    )
+
+    if conflicts:
+        print(f"{len(conflicts)} file(s) differ in size and will NOT be touched:")
+        for rel in conflicts[:10]:
+            print(f"  {rel}  volume {human(remote[rel])}, local {human(local[rel])}")
+        print("  resolve these by hand -- under files/laws a name carries its content hash,")
+        print("  so one name with two sizes is a fault rather than a stale copy.\n")
+
+    if not absent:
+        print(f"nothing to fetch under {scope} -- local already has everything the volume does")
+        return 1 if conflicts else 0
+
+    total = sum(remote[rel] for rel in absent)
+    print(f"{scope}: {len(absent)} file(s) on the volume and not here, {human(total)}")
+    for rel in absent[:10]:
+        print(f"  {rel}")
+    if len(absent) > 10:
+        print(f"  ... and {len(absent) - 10} more")
+
+    if total > PULL_MAX_BYTES:
+        print(
+            f"\nthat is more than {human(PULL_MAX_BYTES)} -- narrow the subtree "
+            "(e.g. `pull laws`) rather than pulling the whole tree this way",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not args.apply:
+        print("\ndry run -- pass --apply to fetch")
+        return 0
+
+    LOCAL_ROOT.mkdir(parents=True, exist_ok=True)
+    written = 0
+    skipped: list[str] = []
+    for start in range(0, len(absent), PULL_BATCH_FILES):
+        batch = absent[start : start + PULL_BATCH_FILES]
+        print(f"fetching {start + 1}-{start + len(batch)} of {len(absent)}")
+        # base64 because the only remote primitive here is `railway ssh`, whose stdout
+        # this script captures as text -- there is no counterpart to `volume files upload`
+        # that fetches, and raw bytes through that channel would not survive.
+        paths = " ".join(shlex.quote(rel) for rel in batch)
+        encoded = ssh(
+            f"tar czf - -C {shlex.quote(REMOTE_ROOT)} {paths} | base64",
+            timeout=1800,
+        )
+        batch_written, batch_skipped = _safe_extract(
+            base64.b64decode("".join(encoded.split())), LOCAL_ROOT
+        )
+        written += batch_written
+        skipped.extend(batch_skipped)
+
+    print(f"\nwrote {written} file(s) into {LOCAL_ROOT}")
+    if skipped:
+        print(f"skipped {len(skipped)}:")
+        for item in skipped[:10]:
+            print(f"  {item}")
+
+    _local_after, _remote_after, _m, _mm = diff()
+    still = [
+        rel
+        for rel in _remote_after
+        if rel not in _local_after and in_subtree(rel, args.subtree)
+    ]
+    print(f"after ({scope}): {len(still)} still only on the volume")
+    return 0 if not still and not conflicts else 1
+
+
 def cmd_cleanup(args: argparse.Namespace) -> int:
     if not args.apply:
         print(f"would remove {STAGE} from the volume -- pass --apply")
@@ -408,6 +548,18 @@ def main() -> int:
     # the deployment plan checks that `git status` stays clean.
     push.add_argument("--work", default=str(Path(tempfile.gettempdir()) / "sbpeye_sync"))
     push.set_defaults(func=cmd_push)
+
+    pull = sub.add_parser(
+        "pull", help="fetch files the volume has and this checkout does not"
+    )
+    pull.add_argument(
+        "subtree",
+        nargs="?",
+        help="limit to one subtree of files/. `laws` is the one that matters: it is "
+        "where admin-uploaded documents land, and they exist nowhere else.",
+    )
+    pull.add_argument("--apply", action="store_true")
+    pull.set_defaults(func=cmd_pull)
 
     clean = sub.add_parser("cleanup", help="remove the staging directory")
     clean.add_argument("--apply", action="store_true")

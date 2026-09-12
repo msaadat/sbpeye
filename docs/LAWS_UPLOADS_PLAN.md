@@ -59,9 +59,11 @@ situation is worse — nothing can re-fetch it.
 
 ### 1.3 What the existing external rows give us for free
 
-19 top-level rows are `is_external` (the `pakistancode.gov.pk` links). They already carry
-`RegDocumentLink` edges from the deterministic name pass — the Banking Companies
-Ordinance alone has 314 — and are already in the name index. Uploading their text
+Two top-level rows are `is_external` (the `pakistancode.gov.pk` links): the Banking
+Companies Ordinance 1962 and the Deposit Protection Corporation Act 2016. *(This said 19
+before implementation measured it; see §10.)* They already carry `RegDocumentLink` edges
+from the deterministic name pass — the Ordinance alone has 315 — and are already in the
+name index. Uploading their text
 attaches a version to a node that is already wired into everything. Identity makes the
 attachment automatic: `law_identity("Banking Companies Ordinance, 1962")` is the id the
 listing row already has.
@@ -351,11 +353,43 @@ duplicate returns the existing version; the response carries the searchability v
 - Merging two databases. §6 is the rule instead.
 - Non-admin uploads or a review queue.
 
-## 9. Open questions to answer during implementation
+## 9. Open questions, as answered in implementation
 
-1. Whether `RegDocument.source_url` for an upload-origin document should be required.
-   Leaning no: an Act typed in from a gazette has no URL, and `source_note` carries it.
-2. Whether a pinned upload should also suppress the live version's `refetch_requested`
-   handling. Leaning no: SBP's copy is still worth capturing as history.
-3. Whether the scoped backlink should also run the AI `relationships` pass. Leaning no:
-   that is what the existing per-document Generate button is for, and it costs LLM calls.
+All three went the way they were leaning.
+
+1. **`RegDocument.source_url` for an upload-origin document is optional.** An Act typed in
+   from a gazette has no URL, and `source_note` carries the citation. The form asks for it
+   and marks it optional.
+2. **A pinned upload does not suppress `refetch_requested`.** SBP's copy keeps being
+   captured as history; the pin decides which edition is *in force*, which is a different
+   question from which editions are worth holding.
+3. **The scoped backlink does not run the AI `relationships` pass.** `finish_upload` runs
+   `index_law_document` and a deterministic name/URL scan over the circulars, and no LLM.
+   Typing law→law edges stays on the reader's existing Generate button.
+
+## 10. Implementation notes
+
+Where the code diverged from the plan, and why.
+
+- **Two counts in the plan were wrong about the corpus.** There are **2** external
+  top-level rows, not 19 (`Banking Companies Ordinance 1962` and `Deposit Protection
+  Corporation Act 2016`), and the Ordinance carries **315** name-matched circular
+  backlinks, not 314. The design is unaffected — both are still the motivating case.
+- **The Library tab lives at `/admin/documents/library`, not `/admin/library`.** The plan
+  said "seventh tab" when the console was a flat row of them; it is now sectioned, and
+  Library belongs under Documents beside Workbench and Corpus statistics.
+- **`_law_section`'s `external` count now means "external *and* holding nothing".** The
+  console presents it under "Awaiting content", which stopped being true of an external
+  row once an upload attached text to it. A new `external_held` counts the other case.
+- **`searchable_law_version` became the single definition of what search sees**, shared by
+  `index_law_fts` and `vectorize_law_document`, and it now honours `delisted_at`. Both
+  search arms already filtered delisted documents at query time; the index holding rows
+  that the query drops a moment later is how `withdraw` left a title-only FTS row behind.
+- **`txt` joined `PARSEABLE_LAW_FILE_TYPES`.** It carries no `local_path` into the corpus
+  payload, so like `html` it reaches Docling through the Markdown-string branch.
+- **`sync_volume.py pull` fetches over `railway ssh` + base64**, because the CLI has no
+  counterpart to `volume files upload` that fetches and `ssh` is the one remote primitive
+  the script already depends on. It batches the file list (argv is an ARG_MAX budget),
+  refuses a payload over 256 MB rather than streaming it through a pipe, and never deletes
+  or overwrites — a size mismatch is reported as a conflict, since under `files/laws/` a
+  filename carries its own content hash.

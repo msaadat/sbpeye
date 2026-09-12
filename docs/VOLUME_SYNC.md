@@ -39,9 +39,44 @@ python scripts/sync_volume.py push laws --apply
 | `fix-nesting [--apply]` | Move a nested directory's contents up one level | volume |
 | `prune-duplicates [--apply]` | Remove nested leftovers whose correct copy matches | volume |
 | `push [SUBTREE] [--apply]` | Tar what is missing, chunk it, upload, extract, re-verify | volume |
+| `pull [SUBTREE] [--apply]` | Fetch files the volume has and this checkout does not | **local** |
 | `cleanup --apply` | Remove the staging directory | volume |
 
 Every mutating phase is a dry run unless `--apply` is passed.
+
+`pull` is the only command that writes locally, and it is deliberately timid: it fetches
+files this checkout does not have, never deletes, and never overwrites. A file present in
+both at a different size is reported as a conflict and left alone — under `files/laws/` a
+filename carries its own content hash, so one name with two sizes is a fault to look at
+rather than a stale copy to replace.
+
+## Two writers, one archive
+
+Admin-uploaded law documents (`docs/LAWS_UPLOADS_PLAN.md`) give this tree a second writer.
+Everything else under `files/` came from SBP and can be re-fetched; an upload's bytes
+exist only where the administrator put them, and its database row only in the database
+they put it in. There is no merge tool. So there is a rule instead:
+
+> **Production is the writer. Local is for seeding before a push.**
+
+- Routine uploads happen through the admin console on the deployment (Documents →
+  Library). They land on the volume and in the volume's `sbpeye.db`.
+- **Before anything pushes `sbpeye.db` to the volume**, run `pull laws --apply` and
+  confirm the local database already holds the volume's upload rows. The deployment
+  runbook re-uploads `sbpeye.db` wholesale; pushing one that lacks those rows orphans the
+  files and loses the documents. The files survive — nothing deletes from the archive —
+  but nothing points at them any more.
+- The local CLI (`sbpeye laws upload`) is for bulk-seeding a fresh corpus before the first
+  push, and for development. Its output goes up with the normal `push laws --apply` plus
+  the database.
+
+`pull laws` recovers the files. It cannot recover the rows — that is why the rule is about
+ordering rather than about a tool.
+
+```bash
+python scripts/sync_volume.py pull laws            # what is up there and not here
+python scripts/sync_volume.py pull laws --apply    # fetch it
+```
 
 ## The normal path
 

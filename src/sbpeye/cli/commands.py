@@ -1948,6 +1948,231 @@ def laws_backlink(limit, rescan, request_refetch, verbose):
         db.close()
 
 
+# ------------------------------------------------------------------- laws uploads
+#
+# docs/LAWS_UPLOADS_PLAN.md. Two writers share one archive and one database with no merge
+# tool between them, so §6 sets the rule: **production is the writer, local is for
+# seeding before a push.** These commands are for bulk-seeding a fresh corpus and for
+# development; routine uploads go through the admin console on the deployment.
+
+
+def _record_upload_run(db, parameters: dict):
+    """A SyncStatus row so an upload shows up in the Runs tab like any other write.
+
+    Tagged `kind="laws_upload"`, which `circular_sync_only()` already excludes — it
+    admits only NULL and "circulars", so a new kind needs no change there.
+    """
+    from sbpeye.models import SyncStatus
+
+    job = SyncStatus(
+        job_id=str(uuid.uuid4()),
+        kind="laws_upload",
+        status="running",
+        started_at=datetime.utcnow(),
+        parameters=json.dumps({"kind": "laws_upload", **parameters}),
+    )
+    db.add(job)
+    db.commit()
+    return job
+
+
+def _finish_upload_run(db, job, *, processed=0, skipped=0, errors=0, error=None):
+    job.status = "failed" if error else "success"
+    job.error = error
+    job.completed_at = datetime.utcnow()
+    job.last_sync_date = job.completed_at
+    job.processed_count = processed
+    job.skipped_count = skipped
+    job.error_count = errors
+    db.commit()
+
+
+@laws.command("upload")
+@click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--title", required=True, help="The document's title; also its identity")
+@click.option(
+    "--type", "doc_type", default="law",
+    type=click.Choice(["law", "regulation", "guideline", "gazette", "licensing"]),
+    show_default=True, help="What kind of instrument this is",
+)
+@click.option("--document-id", default=None, help="Attach to this document instead of resolving the title")
+@click.option("--source-url", default=None, help="Where the file came from, if it has a URL")
+@click.option("--note", "source_note", default=None, help="Citation for the text, e.g. 'Consolidated text from pakistancode.gov.pk, as of March 2024'")
+@click.option("--version-label", default=None, help="Edition label, e.g. 'Updated till March 2024'")
+@click.option("--effective-from", default=None, help="ISO date this edition takes force (future dates stay pending)")
+@click.option("--pin", is_flag=True, help="Make this the edition in force even over SBP's own copy")
+@click.option("--verbose", "-v", is_flag=True, help="Print per-circular backlink progress")
+def laws_upload(path, title, doc_type, document_id, source_url, source_note,
+                version_label, effective_from, pin, verbose):
+    """Add a document to the laws corpus from a local file (PDF or TXT)."""
+    from sbpeye.laws_upload import UploadRejected, finish_upload, store_upload
+
+    effective = None
+    if effective_from:
+        try:
+            effective = datetime.fromisoformat(effective_from)
+        except ValueError:
+            raise click.BadParameter(
+                f"{effective_from!r} is not an ISO date (expected e.g. 2026-01-01)",
+                param_hint="--effective-from",
+            )
+
+    db = SessionLocal()
+    try:
+        job = _record_upload_run(db, {
+            "title": title, "doc_type": doc_type, "filename": path.name, "pin": pin,
+        })
+        # One try around everything after the run row exists: a crash between storing the
+        # file and finishing the indexing would otherwise leave the row at "running"
+        # forever, which reads in the Runs tab as a job that never came back.
+        try:
+            result = store_upload(
+                db,
+                path_or_bytes=path,
+                filename=path.name,
+                title=title,
+                doc_type=doc_type,
+                source_url=source_url,
+                source_note=source_note,
+                version_label=version_label,
+                effective_from=effective,
+                document_id=document_id,
+                pin=pin,
+            )
+
+            if result.duplicate_of is not None:
+                print(
+                    f"\nAlready held: these bytes are edition {result.version.id} of "
+                    f"{result.document.title[:60]}. Nothing stored."
+                )
+                _finish_upload_run(db, job, skipped=1)
+                return
+
+            target_id = result.document.id
+            print(f"\n{'Created' if result.created_document else 'Attached to'}: "
+                  f"{result.document.title[:60]}")
+            print(f"  Document id:  {target_id}")
+            print(f"  Edition:      {result.version.id}")
+            print(f"  Archived at:  {result.version.local_path}")
+            print(f"  Extraction:   {result.extraction_status}")
+            if not result.will_be_searchable:
+                # Said now, not discovered later by someone whose search came back empty.
+                print("  NOT SEARCHABLE: no text could be read from this file.")
+            if result.is_current:
+                print("  In force:     yes")
+            else:
+                print("  In force:     no — SBP's own copy is. Use 'laws pin' to override.")
+
+            counts = finish_upload(db, target_id, verbose=verbose)
+            print(f"  Indexed, and {counts['linked']} circular(s) reference it.")
+            _finish_upload_run(db, job, processed=1)
+        except UploadRejected as exc:
+            _finish_upload_run(db, job, errors=1, error=str(exc))
+            raise click.ClickException(str(exc))
+        except Exception as exc:
+            # Rolled back first: recording the failure is itself a commit, and a session
+            # left mid-transaction by the error would fail that too, losing the reason.
+            db.rollback()
+            _finish_upload_run(db, job, errors=1, error=str(exc))
+            raise
+    finally:
+        db.close()
+
+
+def _upload_document_action(document_id: str, action, done: str):
+    """Shared plumbing for the one-document state changes below."""
+    from sbpeye.laws_upload import UploadRejected
+
+    db = SessionLocal()
+    try:
+        document = action(db, document_id)
+        print(f"\n{done}: {(document.title or document.id)[:60]}")
+    except UploadRejected as exc:
+        raise click.ClickException(str(exc))
+    finally:
+        db.close()
+
+
+@laws.command("withdraw")
+@click.argument("document_id")
+def laws_withdraw(document_id):
+    """Take a document out of the corpus, reversibly. Nothing is deleted."""
+    from sbpeye.laws_upload import withdraw
+
+    _upload_document_action(document_id, withdraw, "Withdrawn")
+
+
+@laws.command("restore")
+@click.argument("document_id")
+def laws_restore(document_id):
+    """Put a withdrawn document back."""
+    from sbpeye.laws_upload import restore
+
+    _upload_document_action(document_id, restore, "Restored")
+
+
+def _upload_version_action(version_id: str, action, done: str):
+    from sbpeye.laws_upload import UploadRejected
+
+    db = SessionLocal()
+    try:
+        version = action(db, version_id)
+        document = version.document
+        in_force = "in force" if version.is_current else "not in force"
+        print(f"\n{done}: edition {version.id} of "
+              f"{(document.title or document.id)[:50]} — now {in_force}.")
+    except UploadRejected as exc:
+        raise click.ClickException(str(exc))
+    finally:
+        db.close()
+
+
+@laws.command("pin")
+@click.argument("version_id")
+def laws_pin(version_id):
+    """Force this edition to be the one in force, over SBP's own copy."""
+    from sbpeye.laws_upload import pin_version
+
+    _upload_version_action(version_id, pin_version, "Pinned")
+
+
+@laws.command("unpin")
+@click.argument("version_id")
+def laws_unpin(version_id):
+    """Hand currency back to the tier rule — SBP's copy, where there is one."""
+    from sbpeye.laws_upload import unpin_version
+
+    _upload_version_action(version_id, unpin_version, "Unpinned")
+
+
+@laws.command("uploads")
+def laws_uploads():
+    """List uploaded documents, and the external rows worth uploading text for."""
+    from sbpeye.laws_upload import upload_targets
+
+    db = SessionLocal()
+    try:
+        documents = upload_targets(db)
+        if not documents:
+            print("\nNo uploads, and no external documents awaiting text.")
+            return
+        print(f"\n--- Uploads and upload targets ({len(documents)}) ---")
+        for document in documents:
+            current = document.current_version
+            if current is None:
+                state = "no text held"
+            else:
+                state = f"{current.source}, {current.extraction_status}"
+                if current.pinned:
+                    state += ", pinned"
+            if document.delisted_at is not None:
+                state += ", withdrawn"
+            print(f"  {document.id}  {(document.title or '')[:52]:<52s} {state}")
+        print()
+    finally:
+        db.close()
+
+
 @laws.command("reindex")
 @click.option("--force", is_flag=True, help="Re-embed every document, not just stale ones")
 @click.option("--verbose", "-v", is_flag=True, help="Print per-document progress")

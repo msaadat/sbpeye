@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, Request, BackgroundTasks, Form, Body, HTTPException
+from fastapi import FastAPI, Depends, Request, BackgroundTasks, File, Form, Body, HTTPException, UploadFile
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import (
     FileResponse,
@@ -22,6 +22,7 @@ import logging
 import os
 import json
 import uuid
+import tempfile
 import threading
 
 from .database import PROJECT_ROOT, AppSessionLocal, engine, Base, checkpoint_sqlite, get_app_db, get_db, SessionLocal, has_vector_store_data
@@ -90,6 +91,7 @@ from .auth_routes import (
     router as auth_router,
     verify_auth_configuration,
 )
+from . import laws_upload
 from .env import CIRCULAR_FILES_DIR, LAWS_ARCHIVE_DIR
 from .scraper.laws import download_law_file
 from .scraper.clean_html import clean_sbp_html, extract_sbp_text
@@ -328,6 +330,11 @@ def _ensure_law_version_cached(
     if path is not None:
         return path, None
     if not version.file_url:
+        if version.source == "upload":
+            # There is no URL to retry, and there never was: an upload's bytes are the
+            # least reproducible in the system (LAWS_UPLOADS_PLAN.md §3.4). Say that
+            # rather than implying a sync will fix it.
+            return None, "The uploaded file is missing from the archive."
         return None, "This version has no source file to download."
 
     local_path, content_hash, error = download_law_file(
@@ -921,6 +928,11 @@ async def about_page():
 # How often the scheduler re-scrapes SBP's EcoData index. `0` disables the refresh
 # entirely, which is what a deployment wants if it would rather the index stay put.
 ECODATA_REFRESH_DEFAULT_SECONDS = 3600
+
+# Upload size cap, overridable with LAWS_UPLOAD_MAX_BYTES. Sized for a consolidated Act:
+# SBP's largest law PDF is well under this, and the point of the cap is to refuse a
+# mistake, not to police legitimate statutes.
+LAWS_UPLOAD_MAX_BYTES_DEFAULT = 50 * 1024 * 1024
 # The first scrape waits this long after boot. Not zero: the container has to answer its
 # health check before spending a live HTTP round-trip to sbp.org.pk, or a slow scrape
 # looks like a slow start and the platform rolls a deploy that was fine.
@@ -2327,6 +2339,281 @@ def list_law_types(db: Session = Depends(get_db)):
         for doc_type, count in sorted(rows, key=lambda row: -row[1])
         if doc_type
     ]
+
+
+# --------------------------------------------------------------- law uploads
+#
+# docs/LAWS_UPLOADS_PLAN.md phase 3. These live here rather than in `api/admin.py`
+# because that router stays read-only by contract: `/index/audit` advertises
+# `write=False` and has to be believed (see AdminSyncTab.vue's header).
+#
+# Declared *above* `GET /api/laws/{document_id}` on purpose — FastAPI matches routes in
+# declaration order, so `/api/laws/uploads` after it would be swallowed as a document id.
+
+
+def _laws_upload_max_bytes() -> int:
+    """The upload size cap, enforced while streaming so an oversized file never lands
+    in memory. Configurable because 50 MB is a guess about SBP-sized statutes, not a
+    property of the system."""
+    raw = os.getenv("LAWS_UPLOAD_MAX_BYTES")
+    if raw is None or not raw.strip():
+        return LAWS_UPLOAD_MAX_BYTES_DEFAULT
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logging.warning(
+            "LAWS_UPLOAD_MAX_BYTES=%r is not a number; using the %d-byte default.",
+            raw, LAWS_UPLOAD_MAX_BYTES_DEFAULT,
+        )
+        return LAWS_UPLOAD_MAX_BYTES_DEFAULT
+
+
+def _upload_target_payload(target) -> dict:
+    return {
+        "document_id": target.document_id,
+        "title": target.title,
+        "exists": target.exists,
+        "summary": target.summary,
+        "doc_type": target.doc_type,
+        "origin": target.origin,
+        "is_external": target.is_external,
+        "is_delisted": target.is_delisted,
+        "held_versions": target.held_versions,
+        "holds_text": target.holds_text,
+        "is_circular_backed": target.is_circular_backed,
+    }
+
+
+@app.post("/api/laws/upload/resolve", dependencies=[Depends(require_admin)])
+async def resolve_law_upload(request: Request, db: Session = Depends(get_db)):
+    """What a title would attach to, so the form can preview it before committing.
+
+    An admin should choose to attach an Act's text to SBP's existing listing row, not
+    discover after the fact that it happened.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "A JSON request body is required."}, status_code=400)
+    if not isinstance(data, dict):
+        return JSONResponse({"error": "The request body must be a JSON object."}, status_code=400)
+    try:
+        target = laws_upload.resolve_upload_target(
+            db, str(data.get("title") or ""), data.get("document_id") or None
+        )
+    except laws_upload.UploadRejected as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return _upload_target_payload(target)
+
+
+@app.post("/api/laws/upload", status_code=202)
+async def upload_law(
+    file: UploadFile = File(...),
+    title: str = Form(...),
+    doc_type: str = Form("law"),
+    document_id: str | None = Form(None),
+    source_url: str | None = Form(None),
+    source_note: str | None = Form(None),
+    version_label: str | None = Form(None),
+    effective_from: str | None = Form(None),
+    pin: bool = Form(False),
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Put an uploaded document into the laws corpus.
+
+    Extraction is synchronous so the response can report searchability — "no text layer,
+    this will not be searchable" belongs in the reply to the upload, not in a discovery
+    weeks later. Indexing and the backlink scan are not, so they run in a daemon thread
+    under a `SyncStatus` row, the same shape the circular sync route uses.
+    """
+    effective = None
+    if effective_from and effective_from.strip():
+        try:
+            effective = datetime.fromisoformat(effective_from.strip())
+        except ValueError:
+            return JSONResponse(
+                {"error": f"{effective_from!r} is not an ISO date (expected e.g. 2026-01-01)."},
+                status_code=400,
+            )
+
+    # Streamed to a temp file rather than read whole. `UploadFile.read()` with no argument
+    # would put an oversized upload in memory before anything could refuse it; this way the
+    # cap is enforced on the way past, and the cap is then what bounds how much
+    # `store_upload` loads to hash it.
+    limit = _laws_upload_max_bytes()
+    temp = tempfile.NamedTemporaryFile(suffix=Path(file.filename or "").suffix, delete=False)
+    total = 0
+    try:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > limit:
+                temp.close()
+                Path(temp.name).unlink(missing_ok=True)
+                # Stated in whichever unit does not round to zero — a cap configured
+                # small for a test should not be reported as "the 0 MB limit".
+                readable = (
+                    f"{limit // (1024 * 1024)} MB"
+                    if limit >= 1024 * 1024
+                    else f"{limit} bytes"
+                )
+                return JSONResponse(
+                    {"error": f"The file is larger than the {readable} limit."},
+                    status_code=413,
+                )
+            temp.write(chunk)
+        temp.close()
+
+        try:
+            result = laws_upload.store_upload(
+                db,
+                path_or_bytes=Path(temp.name),
+                filename=file.filename or "document",
+                title=title,
+                doc_type=doc_type,
+                source_url=source_url or None,
+                source_note=source_note or None,
+                version_label=version_label or None,
+                effective_from=effective,
+                uploaded_by=admin.id,
+                document_id=document_id or None,
+                pin=bool(pin),
+            )
+        except laws_upload.UploadRejected as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+    finally:
+        # Closed as well as removed: a read that raises mid-stream would otherwise leak
+        # the descriptor until the object was collected.
+        if not temp.closed:
+            temp.close()
+        Path(temp.name).unlink(missing_ok=True)
+
+    payload = {
+        "document": _law_summary(result.document),
+        "version": _law_version_payload(result.version),
+        "created_document": result.created_document,
+        "created_version": result.created_version,
+        "extraction_status": result.extraction_status,
+        "will_be_searchable": result.will_be_searchable,
+        "is_current": result.is_current,
+        "duplicate": result.duplicate_of is not None,
+        "indexing": "skipped" if result.duplicate_of is not None else "queued",
+    }
+    if result.duplicate_of is not None:
+        # The same bytes are the same edition, so there is nothing new to index.
+        return JSONResponse(payload, status_code=200)
+
+    # Not reusing `document_id`: that is the caller's *request*, which may have been empty,
+    # while this is the row the upload actually landed on.
+    target_id = result.document.id
+    job = SyncStatus(
+        job_id=str(uuid.uuid4()),
+        kind="laws_upload",
+        status="queued",
+        started_at=datetime.utcnow(),
+        parameters=json.dumps({
+            "kind": "laws_upload",
+            "document_id": target_id,
+            "title": result.document.title,
+            "filename": result.version.original_filename,
+        }),
+    )
+    db.add(job)
+    db.commit()
+    payload["job_id"] = job.job_id
+    threading.Thread(
+        target=_finish_law_upload, args=(job.job_id, target_id), daemon=True
+    ).start()
+    return JSONResponse(payload, status_code=202)
+
+
+def _finish_law_upload(job_id: str, document_id: str) -> None:
+    """Index the document and scan the circulars that name it, off the request thread."""
+    with SessionLocal() as session:
+        job = session.query(SyncStatus).filter_by(job_id=job_id).first()
+        if job is not None:
+            job.status = "running"
+            session.commit()
+        try:
+            counts = laws_upload.finish_upload(session, document_id)
+        except Exception as exc:
+            logging.exception("Finishing law upload %s failed", document_id)
+            if job is not None:
+                job.status, job.error = "failed", str(exc)
+                job.error_count, job.completed_at = 1, datetime.utcnow()
+                session.commit()
+            return
+        if job is not None:
+            job.status = "success"
+            job.completed_at = datetime.utcnow()
+            job.last_sync_date = job.completed_at
+            job.processed_count = counts["indexed"]
+            session.commit()
+
+
+@app.get("/api/laws/uploads", dependencies=[Depends(require_admin)])
+def list_law_uploads(db: Session = Depends(get_db)):
+    """Uploaded documents, plus the external rows worth uploading text for.
+
+    The second group is the reason the Library tab exists, so it comes back in the same
+    list rather than having to be hunted for among 135 documents.
+    """
+    documents = laws_upload.upload_targets(db)
+    return [
+        {
+            **_law_summary(document),
+            "versions": [
+                _law_version_payload(version)
+                for version in sorted(
+                    document.versions,
+                    key=lambda v: v.first_seen_at or datetime.min,
+                    reverse=True,
+                )
+            ],
+        }
+        for document in documents
+    ]
+
+
+def _upload_state_change(db: Session, action, *args):
+    """Run one of the service's state changes and answer with the document."""
+    try:
+        subject = action(db, *args)
+    except laws_upload.UploadRejected as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    document = subject if isinstance(subject, RegDocument) else subject.document
+    return _law_detail(document)
+
+
+@app.post("/api/laws/{document_id}/withdraw", dependencies=[Depends(require_admin)])
+def withdraw_law(document_id: str, db: Session = Depends(get_db)):
+    """Take a document out of the corpus. Reversible, and deletes nothing."""
+    return _upload_state_change(db, laws_upload.withdraw, document_id)
+
+
+@app.post("/api/laws/{document_id}/restore", dependencies=[Depends(require_admin)])
+def restore_law(document_id: str, db: Session = Depends(get_db)):
+    return _upload_state_change(db, laws_upload.restore, document_id)
+
+
+@app.post(
+    "/api/laws/{document_id}/versions/{version_id}/pin",
+    dependencies=[Depends(require_admin)],
+)
+def pin_law_version(document_id: str, version_id: str, db: Session = Depends(get_db)):
+    """Make this edition the one in force, over SBP's own copy."""
+    return _upload_state_change(db, laws_upload.pin_version, version_id, document_id)
+
+
+@app.post(
+    "/api/laws/{document_id}/versions/{version_id}/unpin",
+    dependencies=[Depends(require_admin)],
+)
+def unpin_law_version(document_id: str, version_id: str, db: Session = Depends(get_db)):
+    return _upload_state_change(db, laws_upload.unpin_version, version_id, document_id)
 
 
 @app.get("/api/laws/{document_id}")

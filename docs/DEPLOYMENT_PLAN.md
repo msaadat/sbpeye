@@ -393,6 +393,23 @@ Why the tool exists, measured against CLI 5.41.2:
   short; treating existence as success leaves it truncated forever. Six such files existed
   after the timed-out run.
 
+#### Pulling before a database push
+
+Admin-uploaded law documents (`docs/LAWS_UPLOADS_PLAN.md`) make the volume a writer of
+`files/laws`, not only a reader of it. That inverts the direction for one case:
+
+```bash
+python scripts/sync_volume.py pull laws --apply
+```
+
+| Risk | Detail |
+|---|---|
+| **Uploaded law files and rows exist only on the volume until pulled** | An upload made through the console lands on the volume and in the volume's `sbpeye.db`. This runbook re-uploads `sbpeye.db` wholesale — doing that without pulling first orphans the files and loses the documents. `pull laws` recovers the bytes; nothing recovers the rows. Invariants 3.7a and 3.7b. |
+
+The operating rule, in full, is in [VOLUME_SYNC.md](VOLUME_SYNC.md) §"Two writers, one
+archive": **production is the writer, local is for seeding before a push.** `pull` never
+deletes and never overwrites, so running it when in doubt costs nothing.
+
 ### 2.6 Rebuilding the vector store
 
 If the uploaded store is ever lost or unopenable, it rebuilds from `sbpeye.db` alone — no file
@@ -523,6 +540,18 @@ no history, and **2 superseded editions already exist nowhere else**. `cache che
 `CIRCULAR_FILES_DIR` and `HTML_CACHE_DIR` into a prunable list and `LAWS_ARCHIVE_DIR` into a
 separate report-only list that `--prune` does not iterate. It nearly deleted the archive once,
 back when that safety was a matter of every version happening to be present.
+
+**3.7a The archive now holds bytes with no origin URL at all.** Admin-uploaded law
+documents (`docs/LAWS_UPLOADS_PLAN.md`) carry `file_url = NULL` on purpose, which is what
+tells `_ensure_law_version_cached` there is nothing to re-fetch. Everything 3.7 says about
+the archive applies to them more strongly: a superseded SBP edition at least once had a URL,
+while an uploaded consolidated text never did. They are the least reproducible bytes in the
+system.
+
+**3.7b An upload made on the deployment exists on the volume and nowhere else** — both its
+bytes and its database row. `scripts/sync_volume.py pull laws --apply` recovers the bytes; no
+tool recovers the row, so §2.5's runbook rule is the protection. Re-uploading `sbpeye.db`
+without pulling first orphans the files and loses the documents.
 
 **3.8 A law version is served only if the bytes hash to that version's own hash.** `file_url`
 always serves whichever edition is current, so for a superseded version those are different

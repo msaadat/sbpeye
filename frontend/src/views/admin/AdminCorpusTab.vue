@@ -201,6 +201,12 @@ onMounted(load)
                   {{ formatCount(laws?.circular_backed) }} are circulars
                 </span>
               </dd>
+              <dt v-if="laws?.external_held">External, text supplied</dt>
+              <dd v-if="laws?.external_held">
+                {{ formatCount(laws?.external_held) }}
+                <span class="muted-text">uploaded by an administrator
+                </span>
+              </dd>
               <dt>Indexed editions</dt>
               <dd>{{ formatCount(laws?.vectorized_versions) }}</dd>
             </dl>

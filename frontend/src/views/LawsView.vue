@@ -25,6 +25,7 @@ import {
   type LawGenerationFeature,
   type LawRelationship,
   type LawSummary,
+  type LawVersion,
   type LawTypeCount,
 } from '@/lib/api'
 
@@ -412,28 +413,102 @@ const fileUrl = computed(() => {
   return buildLawFileUrl(doc.id, currentVersion.value.id)
 })
 
+/**
+ * How to label the edition in force, or '' when there is nothing true to say.
+ *
+ * `version_suffix` is the phrase stripped off SBP's listing title — "(being updated)",
+ * "(Updated till July 16, 2026)". It is state rather than name, which is why it renders
+ * here instead of in the heading, but it is state *of SBP's copy*: "being updated" is SBP
+ * telling visitors their own page is mid-revision.
+ *
+ * So it can stand in for a missing `version_label` only while SBP's copy is the edition in
+ * force. Once an administrator's upload is in force, borrowing the suffix would put SBP's
+ * condition on a file SBP has never seen — a consolidated text from pakistancode.gov.pk
+ * labelled "Being updated" because of a parenthesis in a title it does not share. An
+ * upload with no explicit label has no edition label; the provenance line says where it
+ * came from instead.
+ */
+function editionLabel(
+  doc: LawSummary | LawDetail,
+  version?: LawVersion | null,
+): string {
+  if (version?.version_label) return version.version_label
+  if (version && version.source === 'upload') return ''
+  return doc.version_suffix || ''
+}
+
 const statusLine = computed(() => {
   const doc = detail.value
   if (!doc) return ''
   const parts: string[] = []
-  // The suffix we stripped off the title belongs here — it was always state, never name.
-  const edition = currentVersion.value?.version_label || doc.version_suffix
+  const edition = editionLabel(doc, currentVersion.value)
   if (edition) parts.push(capitalize(edition))
   if (doc.version_count > 1) parts.push(`${doc.version_count} editions held`)
   const captured = currentVersion.value?.first_seen_at
-  if (captured) parts.push(`captured ${formatDate(captured)}`)
+  if (captured) {
+    // "Captured" is a claim about a file we fetched. An upload was supplied, once, by a
+    // person — see `custodyLine` for the same distinction at length.
+    const verb = currentVersion.value?.source === 'upload' ? 'uploaded' : 'captured'
+    parts.push(`${verb} ${formatDate(captured)}`)
+  }
   return parts.join(' · ')
 })
 
+/**
+ * Where the text in force came from, in words that are true of it.
+ *
+ * "Captured" and "last checked" describe a file we fetched from SBP on a schedule. For an
+ * administrator's upload neither is true: there was one act of supply, on one date, from a
+ * source only the citation records — and nothing will re-check it, because there is no URL
+ * to re-check (LAWS_UPLOADS_PLAN.md §1.2).
+ */
 const custodyLine = computed(() => {
   const doc = detail.value
-  if (!doc || !currentVersion.value) return ''
-  const first = formatDate(currentVersion.value.first_seen_at)
-  const last = formatDate(currentVersion.value.last_seen_at)
+  const version = currentVersion.value
+  if (!doc || !version) return ''
+  const first = formatDate(version.first_seen_at)
+  const last = formatDate(version.last_seen_at)
+
+  if (version.source === 'upload') {
+    const parts = [`Uploaded by an administrator on ${first}.`]
+    if (doc.source_note) parts.push(doc.source_note)
+    if (version.pinned) {
+      parts.push("Pinned over SBP's own copy, which stays in the timeline below.")
+    }
+    parts.push('SBP publishes no file we can re-check this against.')
+    return parts.join(' ')
+  }
+
   if (doc.version_count > 1) {
     return `${doc.version_count} editions seen. The one in force was captured ${first}; last checked ${last}.`
   }
   return `One edition seen. First captured ${first}, and unchanged at the last check on ${last}.`
+})
+
+/** One line per edition held, said in terms of where it came from. */
+const editionLines = computed(() => {
+  const doc = detail.value
+  if (!doc) return []
+  return [...doc.versions]
+    .sort((a, b) => (b.first_seen_at || '').localeCompare(a.first_seen_at || ''))
+    .map((version) => {
+      const origin =
+        version.source === 'upload'
+          ? 'Uploaded'
+          : version.source === 'wayback'
+            ? 'Backfilled from the Wayback Machine'
+            : "SBP's own copy"
+      const parts = [origin]
+      if (version.version_label) parts.push(version.version_label)
+      parts.push(formatDate(version.first_seen_at))
+      if (version.pending) parts.push('not yet in force')
+      return {
+        id: version.id,
+        text: parts.join(' · '),
+        inForce: version.is_current,
+        pinned: Boolean(version.pinned),
+      }
+    })
 })
 
 function formatDate(value?: string | null): string {
@@ -508,10 +583,27 @@ const analysisBlocker = computed(() => {
   const doc = detail.value
   if (!doc) return ''
   if (doc.circular_id) return 'This entry is a circular — its analysis lives with the circular.'
-  if (doc.is_external) return 'Published outside SBP, so we hold no copy to analyse.'
   if (isCollection.value) return ''
-  if (!doc.current_version) return "SBP's link to this file is broken, so there is nothing to analyse."
-  if (doc.current_version.file_type === 'xls') return 'This document is a spreadsheet, which we cannot read.'
+  if (!doc.current_version) {
+    // Holding no text is the fact; being hosted off-site is only one reason for it. Asked
+    // the other way round this refused an external Act whose text an admin had uploaded,
+    // because the flag stays true after an upload (LAWS_UPLOADS_PLAN.md §1.2).
+    return doc.is_external
+      ? 'Published outside SBP, so we hold no copy to analyse.'
+      : "SBP's link to this file is broken, so there is nothing to analyse."
+  }
+  const fileType = (doc.current_version.file_type || '').toLowerCase()
+  // A manifest is bookkeeping over a container's parts, not a file we failed to read, so
+  // it gets the server's own words for it rather than the unreadable-file ones. Reached
+  // only for a container with no children yet, since `isCollection` returns above.
+  if (fileType === 'manifest') {
+    return 'This is a collection with no text of its own. Analyse its parts individually.'
+  }
+  // Mirrors laws_ai.PARSEABLE_LAW_FILE_TYPES: pdf reaches Docling as a file, html and txt
+  // as text. Anything else is a real file with no parser behind it.
+  if (!['pdf', 'html', 'txt'].includes(fileType)) {
+    return 'We cannot read this file type.'
+  }
   return ''
 })
 
@@ -788,7 +880,7 @@ function subLine(doc: LawSummary): string {
     const holding = !held.held ? 'none held' : held.held === held.parts ? 'all held' : `${held.held} held`
     return [type, count, holding].filter(Boolean).join(' · ')
   }
-  const edition = doc.current_version?.version_label || doc.version_suffix || ''
+  const edition = editionLabel(doc, doc.current_version)
   const state = doc.is_external
     ? 'hosted externally'
     : doc.circular_id
@@ -1313,13 +1405,18 @@ onMounted(() => {
 
         <div class="reader-body" :style="{ '--detail-rail-width': `${analysisRail.size.value}px` }">
 
-        <!-- The archived file, straight from our disk. -->
+        <!--
+          The archived file, straight from our disk. The frame's `title` is its accessible
+          name and so the only thing a screen reader gets about it, which is why it is the
+          display title: SBP's "(being updated)" is a claim about SBP's page, not about the
+          edition rendered inside — which may be an administrator's upload.
+        -->
         <iframe
           v-if="fileUrl"
           :key="fileUrl"
           class="reader-frame"
           :src="fileUrl"
-          :title="detail.title"
+          :title="detail.display_title"
         />
 
         <div v-else class="reader-empty">
@@ -1328,12 +1425,28 @@ onMounted(() => {
             <p>SBP lists it among the regulations, but the document behind it lives with the circulars.</p>
             <RouterLink class="sbp-ghost-button" :to="`/circulars/${detail.circular_id}`">Open the circular</RouterLink>
           </template>
+          <!--
+            Reached only when no version is held: `fileUrl` above wins the moment one is,
+            so an external Act whose text an administrator uploaded reads like any other
+            document. `is_external` stays true either way — SBP does still publish it
+            elsewhere — which is why this branch cannot be the one that tests the flag.
+          -->
           <template v-else-if="detail.is_external">
             <h2>Hosted outside SBP.</h2>
             <p>This one is published elsewhere, so we hold no copy of it — but the circulars that cite it are here.</p>
-            <a v-if="detail.source_url" class="sbp-ghost-button" :href="detail.source_url" target="_blank" rel="noreferrer">
-              Open the external page
-            </a>
+            <div class="empty-actions">
+              <a v-if="detail.source_url" class="sbp-ghost-button" :href="detail.source_url" target="_blank" rel="noreferrer">
+                Open the external page
+              </a>
+              <RouterLink
+                v-if="isAdmin"
+                class="sbp-ghost-button"
+                :to="{ path: '/admin/documents/library', query: { document_id: detail.id } }"
+              >
+                Add its text
+              </RouterLink>
+              <span v-else class="empty-hint">{{ adminOnlyHint('Adding a document\u2019s text') }}</span>
+            </div>
           </template>
           <template v-else-if="detail.children.length">
             <h2>{{ detail.children.length }} parts.</h2>
@@ -1448,6 +1561,17 @@ onMounted(() => {
             <div>
               <h3>Custody</h3>
               <p>{{ custodyLine || 'No file has been archived for this document.' }}</p>
+            </div>
+            <div v-if="editionLines.length > 1">
+              <h3>Editions held</h3>
+              <ul class="edition-list">
+                <li v-for="edition in editionLines" :key="edition.id">
+                  {{ edition.text }}
+                  <span v-if="edition.inForce" class="edition-badge">
+                    {{ edition.pinned ? 'pinned, in force' : 'in force' }}
+                  </span>
+                </li>
+              </ul>
             </div>
             <div v-if="seriesSiblings">
               <h3>{{ seriesSiblings.label }}</h3>
@@ -1728,6 +1852,33 @@ onMounted(() => {
 
 .reader-empty .sbp-ghost-button {
   margin-top: 0.5rem;
+}
+
+.empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.empty-hint {
+  margin-top: 0.5rem;
+  color: var(--sbp-muted);
+  font-size: var(--sbp-fs-small, 0.78rem);
+}
+
+.edition-list {
+  margin: 0;
+  padding-left: 1rem;
+}
+
+.edition-badge {
+  margin-left: 0.35rem;
+  font-size: 0.68rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid var(--sbp-border);
+  color: var(--sbp-muted);
 }
 
 /* ---- Provenance ---- */

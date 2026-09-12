@@ -152,6 +152,32 @@ def test_an_external_law_and_a_stub_are_distinguished():
     assert law_corpus(stub)[1][0]["reason"] == GAP_NO_CURRENT_VERSION
 
 
+def test_an_external_law_becomes_analysable_once_its_text_is_uploaded(tmp_path):
+    """`is_external` stays true after an upload — SBP does still host it elsewhere.
+
+    So holding a version, not the flag, is what decides (LAWS_UPLOADS_PLAN.md §1.2).
+    """
+    session = make_session()
+    pdf = tmp_path / "bco-1962.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    document = build(
+        session,
+        document_id="ext-1",
+        is_external=1,
+        version_overrides={
+            "source": "upload",
+            "file_type": "pdf",
+            "local_path": str(pdf),
+            "content_text": "Section 1. Short title.",
+        },
+    )
+
+    documents, gaps = law_corpus(document)
+
+    assert gaps == []
+    assert documents[0]["local_path"] == str(pdf)
+
+
 def test_a_missing_archive_file_is_a_gap_not_a_silent_text_fallback(tmp_path):
     """Falling back would produce a parse with no pages and no sign anything was wrong."""
     session = make_session()
@@ -1220,7 +1246,12 @@ def test_the_cli_reports_why_each_document_was_skipped(monkeypatch):
     from test_laws_search import add_law, make_session
 
     db, engine = make_session()
-    add_law(db, "ext", title="External law", file_type="html", is_external=1, index=False)
+    # `is_current=0` gives this the shape every real external row has: a listing entry
+    # with no version behind it. Holding text is now what decides analysability, so an
+    # external row *with* a version is analysable and would not be skipped at all — see
+    # test_an_external_law_becomes_analysable_once_its_text_is_uploaded.
+    add_law(db, "ext", title="External law", file_type="html", is_external=1,
+            is_current=0, index=False)
     add_law(db, "xls", title="Questionnaire", file_type="xls", text_body=None, index=False)
     db.commit()
 

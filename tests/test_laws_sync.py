@@ -489,6 +489,143 @@ def test_an_entirely_future_document_has_nothing_in_force():
     assert _current(db) is None
 
 
+# ------------------------------------------------- uploads: delisting and currency
+#
+# docs/LAWS_UPLOADS_PLAN.md phase 1. An upload is a version, not a new kind of document,
+# so these exercise the two rules that had to learn about it: what the listing is allowed
+# to delist, and which tier holds `is_current`.
+
+
+def test_an_uploaded_document_survives_a_complete_listing_pass(fake_site):
+    """The listing is silent about a document it never carried, and silence is not absence."""
+    db = make_session()
+    serve_all_pdfs(fake_site, listing_rows())
+    laws.sync_laws(db, delay=0, skip_subpages=True)
+
+    db.add(RegDocument(
+        id="upload-1",
+        title="Banking Companies Ordinance, 1962",
+        normalized_title="banking companies ordinance, 1962",
+        doc_type="law",
+        origin="upload",
+    ))
+    db.commit()
+
+    counts = laws.sync_laws(db, delay=0, skip_subpages=True)
+
+    assert counts["delisted"] == 0
+    assert db.query(RegDocument).filter(RegDocument.id == "upload-1").one().delisted_at is None
+
+
+def test_an_uploaded_part_survives_its_containers_page(fake_site):
+    """Same rule one level down: `delist_missing_children` scans a subpage, not the world."""
+    db = make_session()
+    db.add(RegDocument(id="parent", title="Foreign Exchange Manual"))
+    db.add(RegDocument(
+        id="uploaded-part", title="Chapter 20", parent_id="parent", origin="upload"
+    ))
+    db.add(RegDocument(id="listed-part", title="Chapter 21", parent_id="parent"))
+    db.commit()
+
+    removed = laws.delist_missing_children(db, "parent", set(), datetime(2026, 9, 1))
+    db.commit()
+
+    assert removed == 1
+    assert db.query(RegDocument).filter(RegDocument.id == "uploaded-part").one().delisted_at is None
+    assert db.query(RegDocument).filter(RegDocument.id == "listed-part").one().delisted_at is not None
+
+
+def test_an_upload_is_in_force_when_it_is_all_we_hold():
+    """The external case, and the reason the feature exists: tier 2 is the only tier."""
+    db = make_session()
+    db.add(RegDocument(
+        id="doc-1", title="Banking Companies Ordinance, 1962", is_external=1
+    ))
+    add_version(db, "doc-1", "uploaded", source="upload")
+    db.commit()
+
+    laws.select_current_versions(db, {"doc-1"})
+    assert _current(db) == "uploaded"
+
+
+def test_a_newer_upload_supersedes_an_older_one():
+    db = make_session()
+    db.add(RegDocument(id="doc-1", title="Companies Act, 2017", origin="upload"))
+    add_version(db, "doc-1", "first", source="upload", first_seen_at=datetime(2026, 1, 1))
+    add_version(db, "doc-1", "second", source="upload", first_seen_at=datetime(2026, 6, 1))
+    db.commit()
+
+    laws.select_current_versions(db, {"doc-1"})
+    assert _current(db) == "second"
+
+
+def test_an_unpinned_upload_does_not_displace_sbps_own_copy():
+    """SBP's copy is authoritative by default; an upload beside it is captured, not current."""
+    db = make_session()
+    db.add(RegDocument(id="doc-1", title="PRs for MFBs"))
+    add_version(db, "doc-1", "sbp", first_seen_at=datetime(2020, 1, 1))
+    add_version(db, "doc-1", "uploaded", source="upload", first_seen_at=datetime(2026, 1, 1))
+    db.commit()
+
+    laws.select_current_versions(db, {"doc-1"})
+    assert _current(db) == "sbp"
+
+
+def test_pinning_an_upload_overrides_sbps_copy_and_unpinning_hands_it_back():
+    """The scanned-PDF case: SBP hosts it, but their copy has no text layer."""
+    db = make_session()
+    db.add(RegDocument(id="doc-1", title="Banks Nationalization Act 1974"))
+    add_version(db, "doc-1", "sbp-scanned", first_seen_at=datetime(2020, 1, 1))
+    pinned = add_version(
+        db, "doc-1", "uploaded", source="upload", first_seen_at=datetime(2026, 1, 1)
+    )
+    pinned.pinned = 1
+    db.commit()
+
+    laws.select_current_versions(db, {"doc-1"})
+    assert _current(db) == "uploaded"
+
+    # A fresh live capture must not take the crown back while the pin stands.
+    add_version(db, "doc-1", "sbp-newer", first_seen_at=datetime(2026, 8, 1))
+    db.commit()
+    laws.select_current_versions(db, {"doc-1"})
+    assert _current(db) == "uploaded"
+
+    pinned.pinned = 0
+    db.commit()
+    laws.select_current_versions(db, {"doc-1"})
+    assert _current(db) == "sbp-newer"
+
+
+def test_a_future_dated_pin_is_pending_and_the_tier_below_decides_meanwhile():
+    db = make_session()
+    db.add(RegDocument(id="doc-1", title="PRs for SME Financing"))
+    add_version(db, "doc-1", "sbp", first_seen_at=datetime(2020, 1, 1))
+    pending = add_version(
+        db, "doc-1", "uploaded", source="upload", effective_from=datetime(2027, 1, 1)
+    )
+    pending.pinned = 1
+    db.commit()
+
+    laws.select_current_versions(db, {"doc-1"}, now=datetime(2026, 9, 1))
+    assert _current(db) == "sbp"
+
+    laws.select_current_versions(db, {"doc-1"}, now=datetime(2027, 1, 2))
+    assert _current(db) == "uploaded"
+
+
+def test_an_upload_never_promotes_backfilled_history():
+    """Tiering rearranged the query; `wayback` still has no tier to sit in."""
+    db = make_session()
+    db.add(RegDocument(id="doc-1", title="PRs for MFBs", is_external=1))
+    add_version(db, "doc-1", "wayback", source="wayback", first_seen_at=datetime(2026, 6, 1))
+    add_version(db, "doc-1", "uploaded", source="upload", first_seen_at=datetime(2020, 1, 1))
+    db.commit()
+
+    laws.select_current_versions(db, {"doc-1"})
+    assert _current(db) == "uploaded"
+
+
 # ------------------------------------------------------- sync bookkeeping isolation
 
 

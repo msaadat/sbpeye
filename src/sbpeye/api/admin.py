@@ -260,8 +260,19 @@ def _law_section(db: Session) -> dict:
         .filter(RegDocument.circular_id.isnot(None))
         .scalar()
         or 0,
+        # Externally hosted *and* holding nothing — which is what the console presents
+        # this as ("Awaiting content"). An upload attaches a version to such a row
+        # without clearing the flag, since SBP does still host it elsewhere, so the flag
+        # alone stopped describing the state it was standing in for
+        # (LAWS_UPLOADS_PLAN.md §1.2).
         "external": db.query(func.count(RegDocument.id))
-        .filter(RegDocument.is_external == 1)
+        .filter(RegDocument.is_external == 1, ~RegDocument.versions.any())
+        .scalar()
+        or 0,
+        # The same rows once an admin has supplied their text: off-site by origin, in the
+        # corpus in fact.
+        "external_held": db.query(func.count(RegDocument.id))
+        .filter(RegDocument.is_external == 1, RegDocument.versions.any())
         .scalar()
         or 0,
         "delisted": db.query(func.count(RegDocument.id))

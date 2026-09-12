@@ -25,6 +25,7 @@ circulars, attachments, reg documents, the ledger, sync rows, generation jobs â€
 from __future__ import annotations
 
 import logging
+import json
 import os
 import threading
 from datetime import datetime
@@ -768,6 +769,40 @@ def sbp_reachability(
 
 
 # Mirror reads never crawl, recover jobs, or change queue eligibility.
+@router.get("/maintenance/documents")
+def maintenance_documents(source_job_id: str | None = None, verify: bool = False,
+                          db: Session = Depends(get_db)):
+    from ..admin_maintenance import assess
+    from ..circular_jobs import CIRCULAR_JOB_LOCK
+    if verify and not CIRCULAR_JOB_LOCK.acquire(blocking=False):
+        raise HTTPException(409, "A corpus job is running. Verify indexes after it finishes.")
+    try:
+        return {"items": assess(db, source_job_id=source_job_id, verify=verify),
+                "verified": verify, "generated_at": datetime.utcnow().isoformat()}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    finally:
+        if verify:
+            CIRCULAR_JOB_LOCK.release()
+
+
+@router.get("/maintenance/jobs")
+def maintenance_jobs(db: Session = Depends(get_db)):
+    from ..mirror_reads import payload
+    rows = db.query(SyncStatus).order_by(SyncStatus.id.desc()).limit(200).all()
+    return [payload(row) for row in rows
+            if json.loads(row.parameters or "{}").get("operation") in {"maintenance", "mirror_backfill"}]
+
+
+@router.get("/maintenance/jobs/{job_id}")
+def maintenance_job(job_id: str, db: Session = Depends(get_db)):
+    from ..mirror_reads import payload
+    row = db.query(SyncStatus).filter_by(job_id=job_id).first()
+    if row is None or json.loads(row.parameters or "{}").get("operation") not in {"maintenance", "mirror_backfill"}:
+        raise HTTPException(404, "Unknown maintenance job")
+    return payload(row)
+
+
 from typing import Literal
 from fastapi import HTTPException
 from fastapi.responses import Response

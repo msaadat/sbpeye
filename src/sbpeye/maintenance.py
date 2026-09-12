@@ -74,7 +74,10 @@ def console_path(path):
     # Only these routes stay reachable. In particular no corpus GET is exempt:
     # downloads and detail handlers can populate caches or schedule index writes.
     return (path == "/api/circulars/mirror/identity" or path.startswith("/api/circulars/mirror/identity/")
-            or path in {"/healthz", "/login", "/api/auth/login", "/api/auth/logout", "/api/auth/me", "/admin", "/admin/mirror"}
+            or path in {"/healthz", "/login", "/api/auth/login", "/api/auth/logout", "/api/auth/me", "/admin"}
+            # The identity-migration panel lives on the Ingest section, which is where an
+            # operator has to be able to land while the migration holds everything else.
+            or path == "/admin/ingest" or path.startswith("/admin/ingest/")
             or path.startswith(("/spa/assets/", "/static/", "/assets/")))
 
 

@@ -324,7 +324,15 @@ def extract_pdf_text(pdf_path: Path) -> tuple[str, str, str | None]:
         raw_pages: list[str] = []
         with pdfplumber.open(str(pdf_path)) as pdf:
             for page in pdf.pages:
-                raw_pages.append(page.extract_text() or "")
+                try:
+                    raw_pages.append(page.extract_text() or "")
+                finally:
+                    # pdfplumber caches every parsed object of a page on the Page, and
+                    # `pdf.pages` holds each Page for the life of this block — so without
+                    # this the whole document's char objects stay resident. A 130-page,
+                    # 11.8 MB circular attachment cost +245 MB of RSS that way, against
+                    # +8 MB with the page released, for identical extracted text.
+                    page.close()
 
         cleaned_pages = _clean_pdf_pages(raw_pages)
         pages_text = [

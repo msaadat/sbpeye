@@ -74,42 +74,73 @@ const router = createRouter({
       path: '/admin',
       component: () => import('@/views/AdminView.vue'),
       children: [
-        { path: '', redirect: '/admin/corpus' },
+        { path: '', redirect: '/admin/overview' },
+        { path: 'overview', name: 'admin-overview', component: () => import('@/views/admin/AdminOverviewTab.vue') },
+
+        // Ingest — everything between SBP's listing and a row in our database.
+        { path: 'ingest', redirect: '/admin/ingest/audit' },
+        // Three views over the same audit/queue/backfill state, so one component holds
+        // it and reads the last path segment to decide which third to show. Splitting it
+        // three ways would mean three copies of the 2-second poll and the job it follows.
+        ...['audit', 'gaps', 'backfill'].map(view => ({
+          path: `ingest/${view}`, component: () => import('@/views/admin/AdminMirrorTab.vue'),
+        })),
+        { path: 'ingest/source', name: 'admin-ingest-source', component: () => import('@/views/admin/AdminSyncTab.vue') },
+
+        // Documents — what we hold, measured and repaired.
+        { path: 'documents', redirect: to => ({ path: '/admin/documents/workbench', query: to.query }) },
         {
-          path: 'corpus',
+          path: 'documents/workbench',
+          name: 'admin-workbench',
+          component: () => import('@/views/admin/AdminWorkbenchTab.vue'),
+        },
+        {
+          path: 'documents/corpus',
           name: 'admin-corpus',
           component: () => import('@/views/admin/AdminCorpusTab.vue'),
         },
+
+        { path: 'jobs', name: 'admin-jobs', component: () => import('@/views/admin/AdminJobsTab.vue') },
+
+        // System — the machine rather than the corpus.
+        { path: 'system', redirect: '/admin/system/search-index' },
         {
-          path: 'index',
+          path: 'system/search-index',
           name: 'admin-index',
           component: () => import('@/views/admin/AdminIndexTab.vue'),
         },
         {
-          path: 'sync',
-          name: 'admin-sync',
-          component: () => import('@/views/admin/AdminSyncTab.vue'),
-        },
-        {
-          path: 'mirror',
-          name: 'admin-mirror',
-          component: () => import('@/views/admin/AdminMirrorTab.vue'),
-        },
-        {
-          path: 'runs',
-          name: 'admin-runs',
-          component: () => import('@/views/admin/AdminRunsTab.vue'),
-        },
-        {
-          path: 'users',
-          name: 'admin-users',
-          component: () => import('@/views/admin/AdminUsersTab.vue'),
-        },
-        {
-          path: 'deployment',
+          path: 'system/storage',
           name: 'admin-deployment',
           component: () => import('@/views/admin/AdminDeploymentTab.vue'),
         },
+        {
+          path: 'system/users',
+          name: 'admin-users',
+          component: () => import('@/views/admin/AdminUsersTab.vue'),
+        },
+
+        //
+        // The pre-consolidation paths. Operators send each other links to these — a
+        // batch's follow-up link carried `?source_job_id=`, and the mirror tab was
+        // bookmarked — so they redirect rather than 404. The three that became one
+        // workbench carry their old identity through as `scope`.
+        //
+        { path: 'mirror', redirect: '/admin/ingest/audit' },
+        { path: 'sync', redirect: '/admin/ingest/source' },
+        {
+          path: 'analysis',
+          redirect: to => ({ path: '/admin/documents/workbench', query: { ...to.query, scope: 'ai' } }),
+        },
+        {
+          path: 'search-index',
+          redirect: to => ({ path: '/admin/documents/workbench', query: { ...to.query, scope: 'index' } }),
+        },
+        { path: 'corpus', redirect: '/admin/documents/corpus' },
+        { path: 'index', redirect: '/admin/system/search-index' },
+        { path: 'runs', redirect: '/admin/jobs' },
+        { path: 'users', redirect: '/admin/system/users' },
+        { path: 'deployment', redirect: '/admin/system/storage' },
       ],
     },
     {

@@ -18,6 +18,18 @@ DEFAULT_FASTEMBED_MODEL = "BAAI/bge-base-en-v1.5"
 DEFAULT_LM_STUDIO_URL = "http://localhost:1234/v1"
 QUERY_CACHE_SIZE = 128
 
+# How many documents FastEmbed encodes per ONNX Runtime call. FastEmbed's own default is
+# 256, and at this model's 512-token window that sizes one attention-score tensor at
+# 256 x 12 heads x 512 x 512 x 4B = 3.2 GB per layer. ONNX Runtime's CPU arena never
+# returns that to the OS, so a single `embed_documents` call over one large attachment
+# (~1000 chunks) took the process to 14 GB of RSS and stayed there — and the mirror
+# backfill runs up to eight of these concurrently inside the web process.
+#
+# Measured on 512 documents, same machine, same work: batch 256 plateaus at 6.8 GB in
+# 30 s/pass; batch 8 plateaus at 691 MB in 23 s/pass. Smaller batches are not a
+# throughput trade here — the arena thrash costs more than the batching saves.
+EMBED_BATCH_SIZE = max(1, int(os.getenv("EMBEDDING_BATCH_SIZE") or 8))
+
 
 def _embed_queries_with_cache(
     queries: list[str],
@@ -227,7 +239,9 @@ class FastEmbedBackend:
         return [np.asarray(item, dtype=np.float32).tolist() for item in embeddings]
 
     def embed_documents(self, documents: list[str]) -> list[list[float]]:
-        return self._as_lists(self._get_model().embed(documents))
+        return self._as_lists(
+            self._get_model().embed(documents, batch_size=EMBED_BATCH_SIZE)
+        )
 
     def embed_queries(self, queries: list[str]) -> list[list[float]]:
         def embed_missing(values: list[str]) -> list[list[float]]:

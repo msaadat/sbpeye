@@ -181,7 +181,15 @@ def crawl_listing(options, fetch, progress=lambda value: None, baseline=None):
 
 
 def publish_audit(session, audit_id, report, capture):
-    """Publish immutable findings and additive queue changes in one transaction."""
+    """Publish immutable findings and additive queue changes in one transaction.
+
+    A complete capture is authoritative: it can reconcile every existing gap.  An
+    incomplete capture is not authoritative enough to close, hold, or otherwise
+    reinterpret an existing gap, but a listing row that it did observe and cannot
+    find locally is still a useful, actionable backfill candidate.  Publish those
+    missing rows additively so an operator can recover them and run a later full
+    audit to reconcile the rest of the queue.
+    """
     from .models import Circular
     from .mirror_models import MirrorAudit, MirrorAuditItem, MirrorGap
     timestamp = now()
@@ -206,13 +214,31 @@ def publish_audit(session, audit_id, report, capture):
         session.add(MirrorAuditItem(audit_id=audit_id, **data))
         if item["bucket"] != "unlisted_local":
             findings[item["identity"]] = item
+    gaps = {row.id: row for row in session.query(MirrorGap).all()}
+    for identity, finding in findings.items():
+        if finding["bucket"] != "missing":
+            continue
+        gap = gaps.get(identity)
+        if gap is None:
+            gap = MirrorGap(id=identity, descriptor="{}", first_seen_at=timestamp, status="pending")
+            session.add(gap)
+            gaps[identity] = gap
+        if gap.active_attempt_id:
+            continue
+        gap.eligibility_checked_at = timestamp
+        gap.eligible = True
+        gap.eligibility_reason = "missing" if audit.status == "success" else "missing_incomplete_audit"
+        gap.eligibility_source = "audit" if audit.status == "success" else "incomplete_audit"
+        gap.last_seen_at, gap.last_audit_id = timestamp, audit_id
+        gap.descriptor, gap.variants = dumps(finding["descriptor"]), dumps(finding["variants"])
+        gap.department, gap.year, gap.sort_date = finding["department"], finding["year"], finding["sort_date"]
+        gap.raw_date = str(finding["descriptor"].get("date", ""))
+        # A locally absent circular cannot remain resolved.  Preserve an explicit
+        # operator skip, however; it can be requeued from the UI when wanted.
+        if gap.status == "resolved":
+            gap.status, gap.resolution_id, gap.resolved_at = "pending", None, None
+
     if audit.status == "success":
-        gaps = {row.id: row for row in session.query(MirrorGap).all()}
-        for identity, finding in findings.items():
-            if finding["bucket"] == "missing" and identity not in gaps:
-                gap = MirrorGap(id=identity, descriptor="{}", first_seen_at=timestamp, status="pending")
-                session.add(gap)
-                gaps[identity] = gap
         for identity, gap in gaps.items():
             if gap.active_attempt_id:
                 continue

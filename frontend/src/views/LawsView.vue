@@ -1045,6 +1045,7 @@ onMounted(() => {
 <template>
   <div
     class="laws-view sbp-pane-view is-resizable"
+    :class="{ 'has-detail': selectedId }"
     :style="{ '--sbp-rail-width': `${libraryPane.size.value}px` }"
   >
     <aside class="laws-library sbp-rail">
@@ -1301,6 +1302,13 @@ onMounted(() => {
     />
 
     <section class="laws-reader">
+      <!-- Phone only: the reader replaces the tree on that tier rather than sitting
+           beside it, so it needs its own way back. -->
+      <button type="button" class="detail-back reader-back" aria-label="Back to the library" @click="router.push('/laws')">
+        <i class="pi pi-arrow-left" />
+        <span>Library</span>
+      </button>
+
       <StateBlock
         v-if="detailLoading"
         state="loading"

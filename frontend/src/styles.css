@@ -329,6 +329,7 @@ a {
    else — Chat used to tint its active session gold, which read as a pin. */
 .sbp-row {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   width: 100%;
   padding: 0.4rem 0.45rem;
   border: 0;
@@ -628,6 +629,7 @@ a {
 
 .view-stack {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.65rem;
 }
 
@@ -659,6 +661,7 @@ a {
 .settings-grid,
 .detail-grid {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.65rem;
 }
 
@@ -695,6 +698,7 @@ a {
 .settings-grid label,
 .detail-grid > div {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.45rem;
 }
 
@@ -726,6 +730,7 @@ a {
 .detail-main,
 .detail-side {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 1rem;
 }
 
@@ -825,6 +830,7 @@ a {
 .document-route-page {
   min-height: calc(100vh - 5rem);
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   place-content: center;
   gap: 1rem;
   padding: 2rem;
@@ -884,6 +890,7 @@ a {
 .checklist,
 .relationship-list {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.7rem;
   margin: 0;
   padding: 0;
@@ -905,6 +912,7 @@ a {
 
 .relationship-section {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.65rem;
 }
 
@@ -949,6 +957,7 @@ a {
 
 .session-list {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 1px;
   min-height: 0;
 }
@@ -1189,6 +1198,7 @@ a.context-chip:hover {
 
 .chat-messages {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   align-content: start;
   gap: 0.65rem;
   min-height: 18rem;
@@ -1199,6 +1209,7 @@ a.context-chip:hover {
 
 .chat-message {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.35rem;
   max-width: min(46rem, 92%);
   padding: 0.7rem 0.85rem;
@@ -1265,6 +1276,7 @@ a.context-chip:hover {
 
 .message-editor {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.45rem;
 }
 
@@ -1288,6 +1300,7 @@ a.context-chip:hover {
 
 .markdown-body {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.65rem;
   line-height: 1.55;
   /* Circular references and URLs are long unbroken tokens; without this they
@@ -1366,6 +1379,7 @@ a.context-chip:hover {
    extra row of chrome above the fold. */
 .composer-shell {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.35rem;
   padding: 0.45rem 0.5rem 0.4rem;
   border: 1px solid var(--sbp-border);
@@ -1417,6 +1431,7 @@ a.context-chip:hover {
 
 .composer {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.55rem;
   margin-top: 0.4rem;
 }
@@ -1443,6 +1458,7 @@ a.context-chip:hover {
 
 .chat-key-notice-text {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.15rem;
   min-width: 0;
 }
@@ -1526,6 +1542,7 @@ a.context-chip:hover {
   margin: 0;
   padding: 0 0.6rem 0.45rem 1.6rem;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.3rem;
   color: var(--sbp-muted);
 }
@@ -1560,6 +1577,7 @@ a.context-chip:hover {
 
 .step-detail {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.35rem;
   margin: 0.3rem 0 0.5rem;
   padding: 0.45rem 0.55rem;
@@ -1600,6 +1618,7 @@ a.context-chip:hover {
 
 .step-hits {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.4rem;
   margin: 0;
   padding: 0;
@@ -1608,6 +1627,7 @@ a.context-chip:hover {
 
 .step-hits > li {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.15rem;
   padding-top: 0.35rem;
   border-top: 1px solid var(--sbp-border);
@@ -1702,6 +1722,7 @@ a.context-chip:hover {
 
 .turn-error-body {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.25rem;
   justify-items: start;
   min-width: 0;
@@ -1744,6 +1765,7 @@ a.context-chip:hover {
 
 .circular-title-cell {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.45rem;
 }
 
@@ -1796,6 +1818,7 @@ a.context-chip:hover {
 .empty-table-state,
 .preview-loading {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   justify-items: center;
   gap: 0.5rem;
   padding: 2rem;
@@ -1819,6 +1842,7 @@ a.context-chip:hover {
 
 .pdf-preview {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 1rem;
 }
 
@@ -1864,6 +1888,7 @@ a.context-chip:hover {
 
 .state-block {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   justify-items: center;
   gap: 0.8rem;
   padding: clamp(1.5rem, 4vw, 3rem);
@@ -2004,6 +2029,7 @@ a.context-chip:hover {
    instead used to shear the first result row in half. */
 .chat-context-bar {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.45rem;
   flex: 0 0 auto;
   padding: 0.5rem 0.85rem;
@@ -2107,6 +2133,7 @@ a.context-chip:hover {
 .circulars-screen {
   position: relative;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto auto minmax(0, 1fr);
   width: 100%;
   height: 100%;
@@ -2357,6 +2384,7 @@ a.context-chip:hover {
 
 .workspace-brandline div {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.08rem;
 }
 
@@ -2366,6 +2394,7 @@ a.context-chip:hover {
 
 .research-workspace-panel {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.4rem;
   padding: 0.55rem 0;
   border-bottom: 1px solid var(--sbp-border);
@@ -2404,6 +2433,7 @@ a.context-chip:hover {
 
 .filter-stack {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.45rem;
   padding: 0.55rem 0;
   overflow: auto;
@@ -2411,6 +2441,7 @@ a.context-chip:hover {
 
 .filter-stack label {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   min-width: 0;
   gap: 0.18rem;
 }
@@ -2453,6 +2484,7 @@ a.context-chip:hover {
 
 .filter-utilities {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   margin-top: auto;
   padding-top: 0.4rem;
   border-top: 1px solid var(--sbp-border);
@@ -2466,6 +2498,7 @@ a.context-chip:hover {
 .circular-results-pane,
 .circular-detail-pane {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   min-height: 0;
   overflow: hidden;
   background: var(--sbp-surface);
@@ -2564,6 +2597,7 @@ a.context-chip:hover {
 
 .pinned-results-heading div {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   min-width: 0;
   gap: 0.05rem;
 }
@@ -2626,6 +2660,7 @@ a.context-chip:hover {
 
 .result-content {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-column: 2;
   min-width: 0;
   gap: 0.3rem;
@@ -2868,6 +2903,7 @@ a.context-chip:hover {
 
 .detail-document-header {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.35rem;
   border-top: 2px solid var(--sbp-green);
   background: color-mix(in srgb, var(--sbp-green) 6%, var(--sbp-surface));
@@ -2985,6 +3021,7 @@ a.context-chip:hover {
 
 .generation-menu {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   width: 13rem;
   gap: 0.15rem;
 }
@@ -3005,6 +3042,7 @@ a.context-chip:hover {
 
 .detail-section {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.55rem;
 }
 
@@ -3070,6 +3108,7 @@ a.context-chip:hover {
 
 .pill-group {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.28rem;
 }
 
@@ -3106,6 +3145,7 @@ a.context-chip:hover {
 
 .relationship-groups {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.5rem;
 }
 
@@ -3365,6 +3405,7 @@ a.context-chip:hover {
 
 .pdf-source-compact span {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .pdf-source-compact small {
@@ -3870,5 +3911,612 @@ a.context-chip:hover {
 
   .results-pagination {
     margin-left: 0;
+  }
+}
+
+/* ============================================================
+   Phone tier
+   ------------------------------------------------------------
+   Everything below 768px. The tablet tier (<=960px) and desktop are untouched:
+   every rule here is inside a phone media query, and the two selectors outside
+   one only hide controls that exist solely for this tier.
+
+   See docs/MOBILE_LAYOUT_PLAN.md for what each block is answering.
+   ============================================================ */
+
+/* Above the phone tier the rail already lists every destination, so neither the
+   More tab nor its sheet has anything to show — and both detail panes sit beside
+   their list rather than replacing it, so neither needs a way back. */
+.sidebar-more,
+.sidebar-sheet,
+.detail-back,
+.filter-toggle {
+  display: none;
+}
+
+/* The four scoping controls are their own element only so the phone tier can collapse
+   them. Everywhere else they stay direct flex children of the bar, as before. */
+.search-filter-group {
+  display: contents;
+}
+
+/* ---- L1 · Top status bar, content, bottom tab bar ----
+   Height-guarded: a landscape phone would spend an eighth of its 375px of height
+   on a tab bar, so it keeps the rail instead. */
+@media (max-width: 768px) and (min-height: 480px) {
+  /* Column 2 is sized for the More tab alone. Leaving it `auto` let the six status
+     icons in row 1 dictate it, which squeezed the four tab labels into 111px. */
+  .app-shell {
+    grid-template-columns: minmax(0, 1fr) 4.25rem;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+  }
+
+  /* Splits the single <nav> across the top and bottom bars without touching the
+     markup — its children become grid items of .app-shell directly. */
+  .app-sidebar {
+    display: contents;
+  }
+
+  /* Brand and tools share one full-width cell: the tools strip carries the bar's
+     background and right-aligns its icons, and the brand sits on top at the left
+     end so only the mark itself is a link, not the whole bar. */
+  .sidebar-brand,
+  .sidebar-tools {
+    grid-row: 1;
+    grid-column: 1 / -1;
+  }
+
+  .sidebar-brand {
+    position: relative;
+    z-index: 1;
+    justify-content: flex-start;
+    justify-self: start;
+    margin-bottom: 0;
+    padding: 0.15rem 0.65rem;
+  }
+
+  .sidebar-tools {
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.1rem;
+    padding: 0.15rem 0.4rem;
+    border-bottom: 1px solid var(--sbp-border);
+    background: color-mix(in srgb, var(--sbp-surface) 94%, var(--sbp-bg));
+  }
+
+  .app-body {
+    grid-row: 2;
+    grid-column: 1 / -1;
+  }
+
+  .sidebar-nav,
+  .sidebar-more {
+    grid-row: 3;
+    padding-bottom: env(safe-area-inset-bottom, 0);
+    border-top: 1px solid var(--sbp-border);
+    background: color-mix(in srgb, var(--sbp-surface) 94%, var(--sbp-bg));
+  }
+
+  .sidebar-nav {
+    grid-column: 1;
+    flex: 0 0 auto;
+    flex-direction: row;
+    gap: 0;
+  }
+
+  /* The overflow destinations live in the sheet on this tier. */
+  .sidebar-nav-item[data-primary='false'] {
+    display: none;
+  }
+
+  .sidebar-nav-item {
+    flex: 1 1 0;
+    justify-content: center;
+    width: auto;
+    min-width: 0;
+    min-height: 3.25rem;
+    border-radius: 0;
+    padding: 0.4rem 0.15rem;
+  }
+
+  .sidebar-nav-label {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .sidebar-more {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.22rem;
+    grid-column: 2;
+    width: 100%;
+    min-height: 3.25rem;
+    padding: 0.4rem 0.15rem;
+    border-right: 0;
+    border-bottom: 0;
+    border-left: 0;
+    color: var(--sbp-muted);
+    background: color-mix(in srgb, var(--sbp-surface) 94%, var(--sbp-bg));
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .sidebar-more .pi {
+    font-size: var(--sbp-fs-title);
+  }
+
+  .sidebar-more.is-active,
+  .sidebar-more.is-open {
+    color: var(--sbp-green);
+    background: color-mix(in srgb, var(--sbp-green) 11%, var(--sbp-surface));
+  }
+
+  /* ---- The More sheet ---- */
+  .sidebar-sheet {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 1200;
+  }
+
+  .sidebar-sheet-scrim {
+    position: absolute;
+    inset: 0 0 calc(3.25rem + 1px + env(safe-area-inset-bottom, 0px)) 0;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    padding: 0;
+    background: rgba(20, 33, 27, 0.38);
+    cursor: pointer;
+  }
+
+  .sidebar-sheet-panel {
+    position: absolute;
+    right: 0;
+    left: 0;
+    /* Stops above the tab bar rather than covering it, so More stays visible and
+       tapping it again closes the sheet. */
+    bottom: calc(3.25rem + 1px + env(safe-area-inset-bottom, 0px));
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.15rem;
+    padding: 0.5rem;
+    border-top: 1px solid var(--sbp-border);
+    border-radius: var(--sbp-radius-lg) var(--sbp-radius-lg) 0 0;
+    background: var(--sbp-surface);
+    box-shadow: var(--sbp-shadow-md);
+    animation: sbp-sheet-in 0.18s var(--sbp-ease) both;
+  }
+
+  .sidebar-sheet-item {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    min-height: 2.75rem;
+    padding: 0.5rem 0.65rem;
+    border-radius: var(--sbp-radius);
+    color: var(--sbp-text);
+    font-size: var(--sbp-fs-body);
+    font-weight: 500;
+  }
+
+  .sidebar-sheet-item .pi {
+    color: var(--sbp-muted);
+    font-size: var(--sbp-fs-title);
+  }
+
+  .sidebar-sheet-item.is-active {
+    color: var(--sbp-green-text);
+    background: color-mix(in srgb, var(--sbp-green) 11%, var(--sbp-surface));
+  }
+
+  .sidebar-sheet-item.is-active .pi {
+    color: var(--sbp-green-text);
+  }
+
+  /* ---- L2 · One pane at a time ----
+     The <=960px tier stacks rail over pane, which on a phone pays each pane's full
+     desktop chrome twice and left the circular body 63px tall. Here the list IS the
+     screen and the detail replaces it, with .detail-back to get out. Chat already
+     works this way with its own drawer and is left alone. */
+  .laws-view.sbp-pane-view,
+  .laws-view.sbp-pane-view.is-resizable {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .laws-view > .pane-resizer {
+    display: none;
+  }
+
+  .laws-view.has-detail > .laws-library,
+  .laws-view:not(.has-detail) > .laws-reader {
+    display: none;
+  }
+
+  .laws-view .sbp-rail {
+    border-right: 0;
+    border-bottom: 0;
+  }
+
+  .circular-workspace,
+  .circular-workspace.has-detail,
+  .circular-workspace:not(.has-detail) {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .circular-workspace.has-detail .circular-results-pane {
+    display: none;
+  }
+
+  .circular-workspace .circular-results-pane,
+  .circular-workspace .circular-detail-pane {
+    border-right: 0;
+    border-bottom: 0;
+  }
+
+  /* The back control. Hidden everywhere else — see the base rule below. */
+  .detail-back {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex: 0 0 auto;
+    align-self: flex-start;
+    min-height: 2.75rem;
+    margin-right: auto;
+    padding: 0.35rem 0.6rem 0.35rem 0;
+    border: 0;
+    color: var(--sbp-green-text);
+    background: none;
+    font: inherit;
+    font-size: var(--sbp-fs-sm);
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .reader-back {
+    margin: 0.35rem 0.85rem -0.2rem;
+  }
+
+  /* Redundant next to the back control, and the two together read as two ways out.
+     Two classes deep so it outranks PrimeVue's own .p-button, injected after this
+     sheet — the same reason .chat-view .rail-toggle is written that way. */
+  .detail-header-topline .detail-close {
+    display: none;
+  }
+
+  /* Back, the reference and the chips were three stacked rows. One row, with the
+     chips scrolling sideways if they run long — nothing is dropped. */
+  .detail-header-topline {
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 0.5rem;
+    min-height: 2.75rem;
+  }
+
+  .detail-header-topline .detail-badges {
+    flex: 1 1 auto;
+    flex-wrap: nowrap;
+    min-width: 0;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+
+  .detail-header-topline .detail-badges::-webkit-scrollbar {
+    display: none;
+  }
+
+  .detail-header-topline .detail-badges > * {
+    flex: 0 0 auto;
+  }
+
+  /* ---- Less detail on a phone ----
+     The tag chips come off the result rows: they are classification, not identity,
+     and dropping them takes a row from ~120px to 94px, so seven results fit where
+     five did. They are NOT hidden in the detail header — nothing else renders them,
+     so that strip is the only place they can be read, and it costs no height there
+     because they share the scrolling row with the reference. Delete this rule to
+     bring them back to the list. */
+  .circular-result-item .result-tags {
+    display: none;
+  }
+
+  /* The header is the only chrome left between the tab bars and the document, so it
+     is worth the trim: a tighter title, and the meta and actions on one row. */
+  .detail-document-header {
+    gap: 0.2rem;
+  }
+
+  .detail-document-header h1 {
+    font-size: 1.05rem;
+  }
+
+  .detail-meta-actions {
+    align-items: flex-start;
+    gap: 0.35rem;
+  }
+
+  .detail-inline-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.6rem;
+  }
+
+  .detail-actions {
+    flex-wrap: nowrap;
+    gap: 0;
+  }
+
+  .detail-back {
+    flex: 0 0 auto;
+    align-self: center;
+    min-height: 2.75rem;
+    margin-right: 0;
+    padding-right: 0.15rem;
+  }
+
+  /* Both bars belong to the results list: the filters scope it, and the workspace
+     strip switches, pins, exports and deletes it. With a circular open that list is
+     not on screen, so between them they were taking 160px from the document for
+     controls that act on something the reader cannot see. Back is one tap. */
+  .circulars-screen:has(.circular-workspace.has-detail) .search-controls-bar,
+  .circulars-screen:has(.circular-workspace.has-detail) .workspace-tabs-bar {
+    display: none;
+  }
+
+  /* ---- L4 · EcoData rows become cards ----
+     Six fixed-width columns and a 50rem min-width made .app-main 836px wide inside a
+     319px column, so the toolbar and the section headings scrolled off with the table.
+     Each row becomes a stacked card instead, labelled from the column classes since
+     the header row is hidden. */
+  .eco-data-view .p-datatable-table {
+    min-width: 0 !important;
+  }
+
+  .eco-data-view .p-datatable-thead {
+    display: none;
+  }
+
+  .eco-data-view .p-datatable-tbody > tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.2rem;
+    padding: 0.6rem 0.15rem;
+    border-bottom: 1px solid var(--sbp-border);
+  }
+
+  .eco-data-view .p-datatable-tbody > tr > td {
+    display: flex;
+    align-items: baseline;
+    justify-content: flex-start;
+    gap: 0.5rem;
+    width: auto !important;
+    padding: 0.1rem 0.4rem;
+    border: 0;
+    text-align: left !important;
+  }
+
+  .eco-data-view .p-datatable-tbody > tr > td.eco-col::before {
+    flex: 0 0 5.25rem;
+    color: var(--sbp-muted);
+    font-size: var(--sbp-fs-eyebrow);
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .eco-data-view .eco-col-frequency::before { content: 'Frequency'; }
+  .eco-data-view .eco-col-format::before { content: 'Format'; }
+  .eco-data-view .eco-col-update::before { content: 'Updated'; }
+  .eco-data-view .eco-col-archive::before { content: 'Archive'; }
+  .eco-data-view .eco-col-actions::before { content: 'Actions'; }
+
+  /* The description is the card's title, so it gets the full width and no label. */
+  .eco-data-view .eco-col-description {
+    display: block;
+    padding-bottom: 0.25rem;
+    font-size: var(--sbp-fs-sm);
+    font-weight: 600;
+  }
+
+  .eco-data-view .eco-col-description .record-title {
+    color: var(--sbp-green-text);
+  }
+
+  /* A row whose only content is an em dash is noise once it has a label beside it. */
+  .eco-data-view .p-datatable-tbody > tr > td.eco-col:has(> .muted-text:only-child) {
+    display: none;
+  }
+
+  .eco-data-view .eco-data-toolbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.6rem;
+  }
+
+  .eco-data-view .row-actions {
+    justify-content: flex-start;
+  }
+}
+
+@keyframes sbp-sheet-in {
+  from {
+    transform: translateY(0.75rem);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-sheet-panel {
+    animation: none;
+  }
+}
+
+/* ---- Fix 2 · 16px form text ----
+   Mobile Safari zooms the viewport whenever a focused field is under 16px and does
+   not zoom back out, so every field on this tier reads at 1rem. Height-agnostic:
+   a landscape phone has the same Safari. */
+@media (max-width: 768px) {
+  :root {
+    --sbp-control-h: 2.75rem;
+  }
+
+  /* PrimeVue's field sizes come from --p-* tokens it re-declares in a `:root, :host`
+     block injected after this sheet, so neither a token override here nor a plain
+     `.p-inputtext` rule outranks it. Each class is doubled to win on specificity
+     rather than source order — the same trick as `.chat-view .rail-toggle`. The
+     hand-rolled fields are matched at (0,1,1) for the same reason. */
+  input,
+  textarea,
+  select,
+  .p-inputtext.p-inputtext,
+  .p-select.p-select .p-select-label,
+  .p-password-input.p-password-input,
+  .p-textarea.p-textarea,
+  .p-inputnumber-input.p-inputnumber-input,
+  .p-autocomplete-input.p-autocomplete-input,
+  .sbp-search-field input,
+  .eco-data-search input {
+    font-size: 1rem;
+  }
+
+  /* ---- L3 · Filters behind a toggle ----
+     Five stacked rows of desktop-sized controls made this bar 212px — a quarter of
+     the screen before the first result. Search and submit stay inline; the rest
+     collapse. Not height-guarded: a landscape phone has width to spare and 420px of
+     height, so it needs the row back more than a portrait one does. */
+  .filter-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex: 0 0 auto;
+    min-height: var(--sbp-control-h);
+    padding: 0 0.7rem;
+    border: 1px solid var(--sbp-border);
+    border-radius: var(--sbp-radius);
+    color: var(--sbp-text);
+    background: var(--sbp-surface);
+    font: inherit;
+    font-size: var(--sbp-fs-sm);
+    cursor: pointer;
+  }
+
+  .filter-toggle.is-open {
+    color: var(--sbp-green-text);
+    border-color: color-mix(in srgb, var(--sbp-green) 40%, var(--sbp-border));
+    background: color-mix(in srgb, var(--sbp-green) 8%, var(--sbp-surface));
+  }
+
+  .filter-toggle-count {
+    display: inline-grid;
+    place-items: center;
+    min-width: 1.25rem;
+    height: 1.25rem;
+    padding: 0 0.3rem;
+    border-radius: var(--sbp-radius-pill);
+    color: #fff;
+    background: var(--sbp-green);
+    font-size: var(--sbp-fs-eyebrow);
+    font-weight: 700;
+  }
+
+  /* The bar sat the form and the Select/CSV pair side by side with no wrapping, which
+     squeezed the form to 229px and orphaned the submit button on a line of its own.
+     The form takes a full row here; the bulk actions take the next one. */
+  .search-controls-bar {
+    flex-wrap: wrap;
+    gap: 0.35rem 0.5rem;
+  }
+
+  .search-controls-form {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+  }
+
+  .search-utilities {
+    flex: 1 1 100%;
+    justify-content: flex-end;
+  }
+
+  .search-input-wrap {
+    flex: 1 1 8rem;
+    min-width: 0;
+  }
+
+  .search-filter-group {
+    display: none;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.45rem;
+    order: 10;
+    width: 100%;
+  }
+
+  .search-controls-form.filters-open .search-filter-group {
+    display: grid;
+  }
+
+  .search-filter-group .search-select,
+  .search-filter-group .search-select-sm,
+  .search-filter-group .year-range {
+    width: 100%;
+    max-width: none;
+  }
+
+  .search-filter-group .year-range {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  .search-filter-group .year-input {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  /* ---- Fix 3 · 44px tap targets ----
+     The glyphs keep their size; the hit area grows around them. */
+  .p-button,
+  .sidebar-status,
+  .sync-status-button {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
+
+  .p-button.p-button-icon-only,
+  .sidebar-status,
+  .sync-status-button {
+    width: 2.75rem;
+    height: 2.75rem;
+  }
+
+  .result-select .p-button {
+    width: 2.25rem;
+    height: 2.25rem;
+  }
+
+  /* The remaining sub-44px controls: chips, tabs and section headers that size to
+     their text, and the inline links inside the EcoData cards. The links need a box
+     before a height means anything to them. */
+  .sbp-filter-pill,
+  .workspace-tab,
+  .p-accordionheader {
+    min-height: 2.75rem;
+  }
+
+  .eco-data-view .record-title,
+  .eco-data-view .easydata-link,
+  .eco-data-view .archive-link,
+  .eco-data-view .toolbar-quick-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 2.75rem;
   }
 }

@@ -406,4 +406,16 @@ function sourceFlag(entity: CircularEntity): string {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+/* Two columns on a phone left each field ~124px, which clipped every placeholder
+   ("MFB, ban…", "BPRD, Excha…") and truncated the Source select to "All so…". */
+@media (max-width: 768px) {
+  .values-filters {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .filter-actions {
+    flex-wrap: wrap;
+  }
+}
 </style>

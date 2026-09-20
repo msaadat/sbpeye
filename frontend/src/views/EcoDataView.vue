@@ -322,7 +322,7 @@ onMounted(() => {
               <!-- Direct Entries Table -->
               <div v-if="section.entries.length" class="table-shell mb-4">
                 <DataTable :value="section.entries" striped-rows table-style="min-width: 50rem">
-                  <Column field="description" header="Description">
+                  <Column field="description" header="Description" class="eco-col eco-col-description">
                     <template #body="{ data }">
                       <a
                         v-if="data.url"
@@ -337,7 +337,7 @@ onMounted(() => {
                     </template>
                   </Column>
 
-                  <Column field="frequency" header="Frequency" style="width: 10rem" class="text-center">
+                  <Column field="frequency" header="Frequency" style="width: 10rem" class="text-center eco-col eco-col-frequency">
                     <template #body="{ data }">
                       <Tag
                         v-if="data.frequency"
@@ -348,7 +348,7 @@ onMounted(() => {
                     </template>
                   </Column>
 
-                  <Column field="format_type" header="Format" style="width: 6rem" class="text-center">
+                  <Column field="format_type" header="Format" style="width: 6rem" class="text-center eco-col eco-col-format">
                     <template #body="{ data }">
                       <Button
                         v-if="data.format_type === 'xlsx' || data.format_type === 'xls'"
@@ -378,7 +378,7 @@ onMounted(() => {
                     </template>
                   </Column>
 
-                  <Column field="last_update" header="Last Update" style="width: 10rem" class="text-center">
+                  <Column field="last_update" header="Last Update" style="width: 10rem" class="text-center eco-col eco-col-update">
                     <template #body="{ data }">
                       <a
                         v-if="data.last_update?.toLowerCase().includes('easydata')"
@@ -394,7 +394,7 @@ onMounted(() => {
                     </template>
                   </Column>
 
-                  <Column field="archive_url" header="Archive" style="width: 8rem" class="text-center">
+                  <Column field="archive_url" header="Archive" style="width: 8rem" class="text-center eco-col eco-col-archive">
                     <template #body="{ data }">
                       <a
                         v-if="data.archive_url"
@@ -409,7 +409,7 @@ onMounted(() => {
                     </template>
                   </Column>
 
-                  <Column header="Actions" style="width: 10rem" class="text-center">
+                  <Column header="Actions" style="width: 10rem" class="text-center eco-col eco-col-actions">
                     <template #body="{ data }">
                       <div class="row-actions justify-center">
                         <Button
@@ -458,7 +458,7 @@ onMounted(() => {
                     <AccordionContent>
                       <div class="table-shell">
                         <DataTable :value="subEntries" striped-rows table-style="min-width: 50rem">
-                          <Column field="description" header="Description">
+                          <Column field="description" header="Description" class="eco-col eco-col-description">
                             <template #body="{ data }">
                               <a
                                 v-if="data.url"
@@ -473,7 +473,7 @@ onMounted(() => {
                             </template>
                           </Column>
 
-                          <Column field="frequency" header="Frequency" style="width: 10rem" class="text-center">
+                          <Column field="frequency" header="Frequency" style="width: 10rem" class="text-center eco-col eco-col-frequency">
                             <template #body="{ data }">
                               <Tag
                                 v-if="data.frequency"
@@ -484,7 +484,7 @@ onMounted(() => {
                             </template>
                           </Column>
 
-                          <Column field="format_type" header="Format" style="width: 6rem" class="text-center">
+                          <Column field="format_type" header="Format" style="width: 6rem" class="text-center eco-col eco-col-format">
                             <template #body="{ data }">
                               <Button
                                 v-if="data.format_type === 'xlsx' || data.format_type === 'xls'"
@@ -514,7 +514,7 @@ onMounted(() => {
                             </template>
                           </Column>
 
-                          <Column field="last_update" header="Last Update" style="width: 10rem" class="text-center">
+                          <Column field="last_update" header="Last Update" style="width: 10rem" class="text-center eco-col eco-col-update">
                             <template #body="{ data }">
                               <a
                                 v-if="data.last_update?.toLowerCase().includes('easydata')"
@@ -530,7 +530,7 @@ onMounted(() => {
                             </template>
                           </Column>
 
-                          <Column field="archive_url" header="Archive" style="width: 8rem" class="text-center">
+                          <Column field="archive_url" header="Archive" style="width: 8rem" class="text-center eco-col eco-col-archive">
                             <template #body="{ data }">
                               <a
                                 v-if="data.archive_url"
@@ -545,7 +545,7 @@ onMounted(() => {
                             </template>
                           </Column>
 
-                          <Column header="Actions" style="width: 10rem" class="text-center">
+                          <Column header="Actions" style="width: 10rem" class="text-center eco-col eco-col-actions">
                             <template #body="{ data }">
                               <div class="row-actions justify-center">
                                 <Button
@@ -719,6 +719,7 @@ onMounted(() => {
 
 .eco-data-content {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.5rem;
 }
 
@@ -768,6 +769,7 @@ onMounted(() => {
 
 .eco-data-view .subsection-container {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.35rem;
 }
 

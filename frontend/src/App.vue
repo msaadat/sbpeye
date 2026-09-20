@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import Button from 'primevue/button'
 import ConfirmDialog from 'primevue/confirmdialog'
@@ -32,6 +32,10 @@ const {
 } = useLlmStatus()
 const syncStarting = ref(false)
 let statusPollId: ReturnType<typeof setInterval> | null = null
+
+// The phone tab bar holds four destinations plus More; everything else moves into
+// the More sheet. Desktop renders the same list in one column and ignores this.
+const PHONE_PRIMARY_ROUTES = new Set(['/circulars', '/laws', '/chat', '/values'])
 
 const navItems = computed(() => [
   {
@@ -82,7 +86,17 @@ const navItems = computed(() => [
     route: '/debug',
     active: route.path.startsWith('/debug'),
   }] : []),
-])
+].map((item) => ({ ...item, primary: PHONE_PRIMARY_ROUTES.has(item.route) })))
+
+// Only ever rendered by the phone sheet — on desktop every item is already in the rail.
+const overflowNavItems = computed(() => navItems.value.filter((item) => !item.primary))
+const moreOpen = ref(false)
+const moreActive = computed(() => overflowNavItems.value.some((item) => item.active))
+
+// A destination was chosen, or the route changed under us: the sheet has done its job.
+watch(() => route.path, () => {
+  moreOpen.value = false
+})
 
 async function signOut(): Promise<void> {
   try {
@@ -399,6 +413,7 @@ onBeforeUnmount(() => {
           :to="item.route"
           class="sidebar-nav-item"
           :class="{ 'is-active': item.active }"
+          :data-primary="item.primary ? 'true' : 'false'"
           :title="item.label"
           :aria-label="item.label"
           :aria-current="item.active ? 'page' : undefined"
@@ -406,6 +421,44 @@ onBeforeUnmount(() => {
           <span :class="item.icon" />
           <span class="sidebar-nav-label">{{ item.label }}</span>
         </RouterLink>
+      </div>
+
+      <button
+        type="button"
+        class="sidebar-more"
+        :class="{ 'is-active': moreActive, 'is-open': moreOpen }"
+        :aria-expanded="moreOpen"
+        aria-haspopup="menu"
+        aria-label="More destinations"
+        @click="moreOpen = !moreOpen"
+      >
+        <span class="pi pi-ellipsis-h" />
+        <span class="sidebar-nav-label">More</span>
+      </button>
+
+      <!-- Phone only: the destinations that do not fit the tab bar. Desktop already
+           lists every one of them in the rail, so this is hidden there outright. -->
+      <div v-if="moreOpen" class="sidebar-sheet" role="menu">
+        <button
+          type="button"
+          class="sidebar-sheet-scrim"
+          aria-label="Close menu"
+          @click="moreOpen = false"
+        />
+        <div class="sidebar-sheet-panel">
+          <RouterLink
+            v-for="item in overflowNavItems"
+            :key="`sheet-${item.route}`"
+            :to="item.route"
+            class="sidebar-sheet-item"
+            :class="{ 'is-active': item.active }"
+            role="menuitem"
+            :aria-current="item.active ? 'page' : undefined"
+          >
+            <span :class="item.icon" />
+            <span>{{ item.label }}</span>
+          </RouterLink>
+        </div>
       </div>
 
       <div class="sidebar-tools">

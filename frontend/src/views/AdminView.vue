@@ -240,4 +240,32 @@ onMounted(loadCurrentUser)
   background: var(--sbp-subtle, #eef2ed);
   font-weight: 600;
 }
+
+/* ---- L5 · Phone tier ----
+   Eight sections wrapped to three stacked lines on a phone, which read as a block of
+   links rather than a tab strip. One scrolling row keeps it a strip; the active tab is
+   scrolled into view by the browser on load. Scoped here because the rules above are
+   scoped too, and a global sheet would lose to them on specificity. */
+@media (max-width: 768px) {
+  .admin-tabs,
+  .admin-subtabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .admin-tabs::-webkit-scrollbar,
+  .admin-subtabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .admin-tab,
+  .admin-subtab {
+    flex: 0 0 auto;
+    min-height: 2.75rem;
+    white-space: nowrap;
+  }
+}
 </style>

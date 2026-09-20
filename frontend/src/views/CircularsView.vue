@@ -72,6 +72,11 @@ const selectedCircularId = computed(() => typeof route.params.id === 'string' ? 
 const resultsPane = useResizablePane('sbp:resultsPaneWidth', 320, 224, 640)
 const totalPages = computed(() => Math.max(1, Math.ceil(totalRecords.value / perPage.value)))
 const hasFilters = computed(() => Boolean(query.value.trim() || department.value || tag.value || startYear.value || endYear.value))
+// Phone only: the four scoping controls collapse behind a Filters button, which
+// carries this count so a narrowed search is never silently hidden. The search box
+// stays inline, so the query itself is not counted.
+const activeFilterCount = computed(() => [department.value, tag.value, startYear.value, endYear.value].filter(Boolean).length)
+const filtersOpen = ref(false)
 const activeWorkspace = computed(() => workspaces.value.find((workspace) => workspace.id === activeWorkspaceId.value) || null)
 const defaultWorkspace = computed(() => workspaces.value.find((workspace) => workspace.is_default) || workspaces.value[0] || null)
 const pinnedCirculars = computed(() => activeWorkspace.value?.pinned_circulars || [])
@@ -554,7 +559,11 @@ onBeforeUnmount(() => searchController?.abort())
     </header>
 
     <section class="search-controls-bar" aria-label="Search controls">
-      <form class="search-controls-form" @submit.prevent="loadCirculars(true)">
+      <form
+        class="search-controls-form"
+        :class="{ 'filters-open': filtersOpen }"
+        @submit.prevent="loadCirculars(true)"
+      >
         <span class="sbp-search-field search-input-wrap">
           <i class="pi pi-search" />
           <input
@@ -573,61 +582,80 @@ onBeforeUnmount(() => searchController?.abort())
           ><i class="pi pi-times" /></button>
         </span>
 
-        <Select
-          v-model="department"
-          :options="departmentOptions"
-          option-label="label"
-          option-value="value"
-          size="small"
-          placeholder="Department"
-          :loading="optionsLoading"
-          class="search-select"
-          @change="loadCirculars(true)"
-        />
+        <!-- Phone only: opens the group below. display:none above the phone tier,
+             where the same controls are already inline. -->
+        <button
+          type="button"
+          class="filter-toggle"
+          :class="{ 'is-open': filtersOpen }"
+          :aria-expanded="filtersOpen"
+          aria-label="Filters"
+          @click="filtersOpen = !filtersOpen"
+        >
+          <i class="pi pi-sliders-h" />
+          <span>Filters</span>
+          <span v-if="activeFilterCount" class="filter-toggle-count">{{ activeFilterCount }}</span>
+        </button>
 
-        <Select
-          v-model="tag"
-          :options="tagOptions"
-          option-label="label"
-          option-value="value"
-          size="small"
-          placeholder="Tag"
-          :loading="optionsLoading"
-          class="search-select search-select-sm"
-          @change="loadCirculars(true)"
-        />
-
-        <span class="year-range">
-          <InputNumber
-            v-model="startYear"
+        <!-- display:contents above the phone tier, so the bar stays the single inline
+             row it has always been; a real box that collapses only on phones. -->
+        <div class="search-filter-group">
+          <Select
+            v-model="department"
+            :options="departmentOptions"
+            option-label="label"
+            option-value="value"
             size="small"
-            :use-grouping="false"
-            :min="1900"
-            :max="2100"
-            placeholder="From"
-            class="year-input"
+            placeholder="Department"
+            :loading="optionsLoading"
+            class="search-select"
+            @change="loadCirculars(true)"
           />
-          <span class="year-sep">–</span>
-          <InputNumber
-            v-model="endYear"
-            size="small"
-            :use-grouping="false"
-            :min="1900"
-            :max="2100"
-            placeholder="To"
-            class="year-input"
-          />
-        </span>
 
-        <Select
-          v-model="sortBy"
-          :options="sortOptions"
-          option-label="label"
-          option-value="value"
-          size="small"
-          class="search-select"
-          @change="loadCirculars(true)"
-        />
+          <Select
+            v-model="tag"
+            :options="tagOptions"
+            option-label="label"
+            option-value="value"
+            size="small"
+            placeholder="Tag"
+            :loading="optionsLoading"
+            class="search-select search-select-sm"
+            @change="loadCirculars(true)"
+          />
+
+          <span class="year-range">
+            <InputNumber
+              v-model="startYear"
+              size="small"
+              :use-grouping="false"
+              :min="1900"
+              :max="2100"
+              placeholder="From"
+              class="year-input"
+            />
+            <span class="year-sep">–</span>
+            <InputNumber
+              v-model="endYear"
+              size="small"
+              :use-grouping="false"
+              :min="1900"
+              :max="2100"
+              placeholder="To"
+              class="year-input"
+            />
+          </span>
+
+          <Select
+            v-model="sortBy"
+            :options="sortOptions"
+            option-label="label"
+            option-value="value"
+            size="small"
+            class="search-select"
+            @change="loadCirculars(true)"
+          />
+        </div>
 
         <Button
           type="submit"

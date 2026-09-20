@@ -206,6 +206,7 @@ h1, h2, h3, h4, h5, h6 {
 
 .chat-empty-state {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   align-content: center;
   justify-items: center;
   gap: 0.5rem;
@@ -244,6 +245,7 @@ h1, h2, h3, h4, h5, h6 {
 
 .chat-empty-prompts {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.45rem;
   width: 100%;
   margin-top: 0.6rem;

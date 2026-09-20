@@ -369,6 +369,13 @@ watch(() => props.id, loadCircular)
     <div v-else-if="circular" class="detail-pane-layout">
       <header class="detail-document-header">
         <div class="detail-header-topline">
+          <!-- Phone only: on that tier the detail replaces the results list rather
+               than sitting under it, so leaving is "back", not "close". The X is
+               hidden there and this takes its place; both clear the selection. -->
+          <button type="button" class="detail-back" aria-label="Back to results" @click="emit('close')">
+            <i class="pi pi-arrow-left" />
+            <span>Results</span>
+          </button>
           <div class="detail-badges">
             <span v-if="circular.reference" class="detail-eyebrow">{{ circular.reference }}</span>
             <span
@@ -380,7 +387,7 @@ watch(() => props.id, loadCircular)
             </span>
             <span v-for="item in circular.tags" :key="item" class="intelligence-pill tag-pill header-tag-pill">{{ item }}</span>
           </div>
-          <Button icon="pi pi-times" text rounded aria-label="Close circular" title="Close" @click="emit('close')" />
+          <Button icon="pi pi-times" text rounded class="detail-close" aria-label="Close circular" title="Close" @click="emit('close')" />
         </div>
         <h1>{{ circular.title }}</h1>
         <div class="detail-meta-actions">

@@ -44,6 +44,11 @@ HANDLE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# A handle as it arrives in a tool argument, without the brackets: ``c:BPRD-CL-01-2021``.
+_BARE_HANDLE_PATTERN = re.compile(r"\s*([cal])\s*:\s*(\S+?)\s*", re.IGNORECASE)
+# What `slugify` can produce. Anything else — a space, a full stop — is not a slug.
+_SLUG_PATTERN = re.compile(r"[A-Za-z0-9-]+")
+
 UUID_PATTERN = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
 )
@@ -208,6 +213,32 @@ class CitationHandles:
             pieces.append(replacement)
         pieces.append(strip_bare_uuids(text[cursor:]))
         return "".join(pieces)
+
+    # -- tool arguments --------------------------------------------------------
+
+    def lookup(self, text: str | None) -> tuple[str, str, str] | None:
+        """The document a handle in a *tool argument* names, or ``None``.
+
+        The model is shown handles and cites with them, so it also passes them back: in
+        the 2026-09-26 benchmark round it called ``get_circular_details("BPRD-CL-01-2021")``.
+        Nothing on the tool side knew what a handle was, so the reference parser missed,
+        full-text search took the nearest title, and the call returned BPRD Circular
+        Letter No. 24 of 2006 as if it had been asked for. A handle minted this turn is an
+        exact address; resolving it here, before any parsing, is what makes it one.
+
+        Accepts ``[[c:slug]]``, ``c:slug`` and the bare ``slug``, case-insensitively. Returns
+        ``(kind, identifier, label)`` — the caller decides what a wrong kind means. A miss is
+        not recorded in `dropped`: that list counts citations a *reader* lost, and a tool
+        argument that is simply not a handle ("BPRD Circular No. 05 of 2020") is not one.
+        """
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return None
+        match = HANDLE_PATTERN.fullmatch(cleaned) or _BARE_HANDLE_PATTERN.fullmatch(cleaned)
+        slug = match.group(2) if match else cleaned
+        if not _SLUG_PATTERN.fullmatch(slug):
+            return None
+        return self._entry_by_slug.get(slug.lower())
 
     def _resolve_handle(self, prefix: str, slug: str) -> str:
         entry = self._entry_by_slug.get(slug.lower())

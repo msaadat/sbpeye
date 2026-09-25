@@ -206,8 +206,9 @@ def test_matched_chunks_travel_whole_so_a_table_cannot_be_misquoted():
 def test_cover_letter_declares_the_annexure_text_it_omits():
     """`full_circular_text` on a cover letter is complete and answers nothing.
 
-    `attachment_text_chars` is what separates it from a circular that really does
-    state its own terms, so it has to be present on one and absent on the other.
+    `annexures` is what separates it from a circular that really does state its own
+    terms, so it has to be present on one and absent on the other — and it has to say
+    that this result does not carry the annexure, not merely that one exists.
     """
     cover = make_circular("cl-09-2026", content_text="Details of amendments are at Annexure.")
     cover.attachments = [
@@ -225,9 +226,13 @@ def test_cover_letter_declares_the_annexure_text_it_omits():
             results[0], AIClient._inline_body_texts(results)
         )
         if circular is cover:
-            assert payload["attachment_text_chars"] == len(ASAAN_TABLE_CHUNK)
+            assert payload["annexures"] == [{
+                "citation": "[[attachment:att-1|CL9-Framework.pdf]]",
+                "chars": len(ASAAN_TABLE_CHUNK),
+                "in_this_result": "no",
+            }]
         else:
-            assert "attachment_text_chars" not in payload
+            assert "annexures" not in payload
 
 
 def test_body_chunks_are_dropped_when_the_letter_already_travels_whole():

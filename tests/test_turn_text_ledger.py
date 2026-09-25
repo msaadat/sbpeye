@@ -188,7 +188,7 @@ def test_the_first_occurrence_is_untouched():
 
     assert first[0]["full_circular_text"] == LETTER
     assert "duplicate_of_earlier_entry" not in first[0]
-    assert first[0]["url"] == circular.url
+    assert next(iter(first[0])) == "citation"  # the card leads with its identity
 
 
 def test_without_a_ledger_nothing_is_withheld():

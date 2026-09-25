@@ -7,7 +7,13 @@ from functools import lru_cache
 from sqlalchemy import text
 from sqlalchemy.orm import Session, joinedload, selectinload
 
-from .models import Circular, CircularRelationship, RegDocument, RegDocumentVersion
+from .models import (
+    Circular,
+    CircularRelationship,
+    RegDocument,
+    RegDocumentLink,
+    RegDocumentVersion,
+)
 from .database import collection, embedding_backend
 
 logger = logging.getLogger(__name__)
@@ -2049,6 +2055,9 @@ class SearchEngine:
                 # Eager, because the annotation below touches it on every row and a
                 # lazy load here is one query per result.
                 selectinload(Circular.amended_by).joinedload(CircularRelationship.source),
+                # The evidence card's REFERENCES line reads these on every row, for the
+                # same reason.
+                selectinload(Circular.reg_links).joinedload(RegDocumentLink.document),
             )
             .filter(Circular.id.in_(candidate_ids))
             .all()

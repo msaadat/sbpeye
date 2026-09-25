@@ -18,8 +18,18 @@ Two assumptions, chosen deliberately:
 - **The loop is hybrid.** Deterministic retrieval handles the common case; the model
   escalates to tools only when the fixed pass is not enough.
 
-**Status:** design only, nothing built. §9 is the migration path; it assumes
-`CHAT_CONTEXT_PLAN.md` C11 has landed first.
+**Status (2026-09-26):** the prerequisite has landed — `CHAT_CONTEXT_PLAN.md` **C11**
+(status-aware ranking, amender annotation), along with **C1a** (a document's text once per
+turn) and **C12** (passage-keyed ledger, `read_attachment`). **R1 is built** and pinned by
+`tests/test_evidence_card.py`, and has had one chat round (2026-09-26, §5). R2–R6 are not
+started. §9 is the migration path.
+
+**What moved since this was written.** The measurements in §1–§2 and the "Today" column in
+§8 were taken *before* C11, C1a and C12, and describe that code — they are the baseline this
+design argues from, not the current behaviour. They need re-taking with
+`benchmarks/chat_context_audit.py` before R4 is judged against them. The tool schema has
+grown rather than shrunk: C12 added `read_attachment`, taking it to nine tools (see §6).
+Line anchors drift; trust the symbol name, not the number.
 
 ---
 
@@ -27,17 +37,18 @@ Two assumptions, chosen deliberately:
 
 | # | Step | Where | Effect | Effort | State |
 |---|---|---|---|---|---|
-| **R1** | Evidence card replaces the result payload | `ai.py:3500` `_search_result_payload` | fixed cost per document | M | ☐ |
+| **R1** | Evidence card replaces the result payload | `ai.py:3882` `_search_result_payload`, `ai.py:1187` `_card_annexures`, `ai.py:1245` `_card_referenced_laws` | fixed shape; annexures and referenced laws named; lossless | M | ☑ built, one chat round (§5) |
 | **R2** | Chain collapse: one card per amendment chain | `consolidation.py:61` `resolve_chain` | removes duplicate lineage members | S | ☐ |
 | **R3** | Stage 1 plan call replaces iteration 1 | new | −1 round trip, checkable output | M | ☐ |
 | **R4** | Stage 2 intent dispatch | new | retrieval becomes deterministic | L | ☐ |
-| **R5** | Collapse the tool schema to three verbs | `ai.py:134` `TOOLS` | 11,415 ch → ~1,200 ch | M | ☐ |
+| **R5** | Collapse the tool schema to three verbs | `ai.py:136` `TOOLS` | ~15,900 ch (9 tools) → ~1,200 ch | M | ☐ |
 | **R6** | Stage 4 verification | new | citation grounding, supersession check | M | ☐ |
 
-**Prerequisite.** Status-aware ranking and amender annotation is **C11** in
-`CHAT_CONTEXT_PLAN.md`. It belongs in the current design, needs nothing from this one, and every
-step below assumes it has landed — a card built over a candidate set that still contains
-withdrawn text inherits the problem.
+**Prerequisite — landed.** Status-aware ranking and amender annotation is **C11** in
+`CHAT_CONTEXT_PLAN.md`, pinned by `tests/test_search_currency.py`. Withdrawn circulars are
+demoted to `withdrawn_matches` pointers, and every changed circular carries `amended_by` /
+`replaced_by` naming what changed it. A card built over a candidate set that still contained
+withdrawn text would have inherited the problem; that is no longer the candidate set.
 
 **Order.** R1 and R2 first: they change what a result *is* without changing the loop. Then R3
 and R4, which change the loop. R5 follows R4 (the tools can only shrink once the deterministic
@@ -63,9 +74,16 @@ Everything in §7 marked *target* is derived from the card sizing in §5, not me
 
 ## 2. The finding that reframes the problem
 
-**`status` appears nowhere in `search.py`.** Not in ranking, not in filtering, not in scoring.
-`_apply_circular_filters` (`search.py:1093`) filters on year, department and tag — and that is
-the complete list.
+> **Historical — fixed by C11.** This section describes retrieval as it was when the design
+> was written. `dual_arm_search` now demotes superseded and cancelled circulars to
+> `withdrawn_matches` and annotates amended ones via `_relationship_annotation`
+> (`search.py`). The finding is kept because its *shape* — the database knows, retrieval does
+> not ask — is the argument for everything below, and lineage, routing and currency beyond
+> status are still unread.
+
+**`status` appeared nowhere in `search.py`.** Not in ranking, not in filtering, not in scoring.
+`_apply_circular_filters` filtered on year, department and tag — and that was the complete
+list.
 
 Of 3,655 circulars, 273 are `superseded` or `cancelled` and 757 more are `amended`. Retrieval
 sees none of it. Measured over 1,399 result entries in the traced turns, **13.2% of what
@@ -78,7 +96,7 @@ This document assumes it rather than restating it.
 
 What matters *here* is the shape of the finding, because it generalises. The asymmetry is stark
 inside one file: the **law arm is version-aware** — `_law_arm` filters
-`RegDocument.delisted_at.is_(None)` (`search.py:1347`) and reads `current_version`, and
+`RegDocument.delisted_at.is_(None)` (`search.py:1625`) and reads `current_version`, and
 `RegDocumentVersion.is_current` is maintained per sync. The corpus that has a currency concept
 uses it. The corpus that also has one ignores it.
 
@@ -92,9 +110,16 @@ circular_relationships   3,172 edges
 reg_document_links         814   (circular ↔ law)
 ```
 
-Nothing in the retrieval path reads any of it. Status is one instance; lineage, corpus routing
-and currency are the others. A design that keeps asking the model to notice what the database
-already knows will keep producing this class of bug, in a new place each time.
+Before C11, nothing in the retrieval path read any of it; C11 now reads the
+`circular_relationships` edges that set status. Status was one instance; lineage, corpus
+routing and currency are the others, and they remain unread. A design that keeps asking the
+model to notice what the database already knows will keep producing this class of bug, in a
+new place each time.
+
+A caution on `reg_document_links` that the headline count hides: **791 of the 814 edges are
+`references` found by name matching** (`laws_links.py`), 10 by URL scan, and only 8 were typed
+by the AI pass — 1 `implements`, 1 `amends`. The graph says *this circular names that Act*, not
+*this circular implements it*, and anything built on it must say "references".
 
 ---
 
@@ -137,7 +162,7 @@ Two provider calls for the common case, against four to six today.
 ### Stage 0 — Frame
 
 Resolve the selection (workspace or pinned circulars), the session history, the corpus
-version. Then run `SearchEngine._search_by_reference` (`search.py:1526`) over the question: if
+version. Then run `SearchEngine._search_by_reference` (`search.py:1810`) over the question: if
 it names an instrument, that document resolves **deterministically** and never enters a
 similarity search. A question about "BPRD Circular No. 07 of 2019" is a lookup, not a
 retrieval problem.
@@ -171,7 +196,7 @@ Why a schema rather than a tool call:
 - `intent` selects a retrieval strategy, and **the strategy is code**. This is the hinge on
   which "deterministic retrieval, agentic only when needed" turns.
 
-The existing `focused_retrieval_query` (`chat_retrieval.py:88`) is the seed of the `queries`
+The existing `focused_retrieval_query` (`chat_retrieval.py:121`) is the seed of the `queries`
 field and can serve as the no-LLM fallback if the plan call fails.
 
 ### Stage 2 — Retrieve, rank, assemble
@@ -188,15 +213,16 @@ Intent-dispatched over the existing engine. No LLM.
 
 Three deterministic changes to ranking:
 
-1. **Status-aware ordering — C11, already specified in `CHAT_CONTEXT_PLAN.md`.** Assumed here,
-   not restated. What the card needs from it is the `amended_by` annotation, which §5 renders
+1. **Status-aware ordering — C11, landed** (`CHAT_CONTEXT_PLAN.md` §5.11). Assumed here, not
+   restated. What the card needs from it is the `amended_by` annotation, which §5 renders
    as a line on the card rather than a JSON field among thirty.
 2. **Chain collapse (R2).** When several members of one amendment chain hit, return the
    *chain* — one card, current text, lineage attached — not the members competing with each
    other for rank. `consolidation.resolve_chain` (`consolidation.py:61`) already computes the
    closure.
 3. **Corpus routing from the link graph (R4).** 814 `reg_document_links` edges make "which Act
-   does this circular implement" a join rather than an inference. The prompt currently spends
+   does this circular refer to" a join rather than an inference — *refer to*, not *implement*:
+   the edges are name matches (§2). The prompt currently spends
    a paragraph warning that `get_circular_details` cannot fetch an Act; the graph makes the
    warning unnecessary.
 
@@ -219,7 +245,7 @@ that already exists.
   "Enhanced Due Diligence Requirements for High Risk Customers"
   BPRD · 2019-05-14 · status: amended
   AMENDED BY  [[c:BPRD-C-03-2021]] (2021-02-11) — read this for current text
-  IMPLEMENTS  [[l:AML-CFT-CPF-Regs]]
+  REFERENCES  [[l:AML-CFT-CPF-Regs]]
   ANNEXURES   A (14,200 ch) · B (3,100 ch) — NOT INCLUDED, use open_document
   RETRIEVED   lexical #2, semantic #1  (both arms agree)
   ── letter, para 4 ──────────────────────────────────
@@ -246,27 +272,111 @@ What each line buys:
 - **`RETRIEVED` lets a bad hit be discounted cheaply.** Rank agreement is the strongest signal
   the dual-arm design produces, and it currently has to be reconstructed by matching citations
   across two parallel lists.
-- **Both ranks on one row** removes the 14.0% dual-arm duplication measured in
-  `CHAT_CONTEXT_PLAN.md` §3.2 as a side effect, and preserves the agreement signal better than
-  two independent lists do — agreement becomes a property of one row.
+- **`REFERENCES` routes to the laws corpus.** The Acts this circular names, from
+  `reg_document_links`, as handles `get_law_details` can open. Named *references* because
+  that is what 97% of the edges are (§2); a card that said IMPLEMENTS would be asserting a
+  judgement nobody made.
+- ~~**Both ranks on one row** removes the 14.0% dual-arm duplication~~ — **withdrawn.** This
+  is `CHAT_CONTEXT_PLAN.md` C4, which was retired (§5.4 there) for a reason that applies
+  here unchanged: one list must be ordered by *something*, and that ordering is a fusion
+  decision `dual_arm_search` exists to decline. Both ranks are already on every row. The
+  duplication itself is gone since C1a: a document's card is written once, at its first
+  appearance, and every later row is a ~260-character pointer carrying its rank.
 - **Passages are whole chunks, never windows.** The reasoning in `_inline_body_texts`
-  (`ai.py:3405`) about term-density windows landing on the addressee block, and in
-  `_passage_sets` (`ai.py:3441`) about windows lying on tables, is right and is preserved.
+  (`ai.py:3692`) about term-density windows landing on the addressee block, and in
+  `_passage_sets` (`ai.py:3738`) about windows lying on tables, is right and is preserved.
   What changes is that it applies to 8 documents rather than 20 under a shared budget.
 
-The card replaces `_search_result_payload` (`ai.py:3500`) and `_law_search_payloads`
-(`ai.py:3572`) with one serializer. A law card is the same shape with `IN FORCE` /
-`full_text_chars` in place of the annexure line.
+The card replaces `_search_result_payload` and `_law_search_payloads` (`ai.py`). A law card is
+the same shape with `IN FORCE` / `full_text_chars` in place of the annexure line.
 
 **Note on `summary`.** The current payload sends `circular.summary[:500]`. Six circulars of
 3,655 have one (§8). The card should not carry a field that is null 99.8% of the time.
+
+### R1 — the card as built
+
+**Rendered as JSON, not as the text block above.** The block is the card's *content*; its
+encoding stays a JSON row inside the existing envelope (`reference_matches`,
+`lexical_results`, `semantic_results`, `law_results`, `withdrawn_matches`). Four readers parse
+that envelope and would all break on a text payload: `chat_steps.build_step` (the persisted
+research steps a reader opens under an answer), `_tool_result_synthesis_messages`,
+`benchmarks/chat_context_audit.py`, and C1a's repeat-row pointer. Handles are minted by regex
+over the tool result, so they work the same inside a JSON string. The saving the text form
+promised was key names — small beside the passages and letters, which are ~65% of the payload
+and unchanged in either encoding.
+
+**What R1 changes on a circular row:**
+
+| | Field | Why |
+|---|---|---|
+| **added** | `annexures` — one entry per attachment: citation, `chars`, and `in_this_result` (`passages` / `no`) | replaces the single `attachment_text_chars` total. The model can see *which* annexure is unread and open it by handle with `read_attachment` |
+| **added** | `references_laws` — up to 3 Acts/regulations from `reg_document_links`, as `[[law:…]]` citations | the `REFERENCES` line; corpus routing from data the model otherwise has to infer |
+| removed | `summary` | null for 3,649 of 3,655 circulars |
+| removed | `url` | the citation handle is what the model cites with; never used (C4 measurement: 64 ch/row) |
+| removed | `tags` | 56 ch/row; nothing in an answer depends on it |
+| removed | `match_source`, top-level `attachment_citation` | restated by the passages, each of which carries its own source and attachment citation |
+
+Kept unchanged: identity (`citation`, `title`, `reference`, `department`, `date`, `status`),
+C11's `amended_by` / `replaced_by`, both ranks, `full_circular_text`, `matching_passages`, and
+C1a/C12's ledger behaviour — a repeat row is still a pointer.
+
+A law row drops `source_url` for the same reason as `url`, and keeps `full_text_chars`.
+
+**Deliberately not in R1:**
+
+- **The document budget (6–8 cards).** That is a *selection* decision and belongs to Stage 2
+  (R4). `CHAT_CONTEXT_PLAN.md` §5.2 measured rank-tiering of the letters at close to 1:1
+  against recall, so cutting the card count before R4 makes the selection better would be
+  the lossy trade that plan declined. R1 keeps the existing character allocators
+  (`_inline_body_texts`, `_passage_sets`); per-card cost is already bounded by
+  `SEARCH_INLINE_BODY_MAX_CHARS` plus `SEARCH_PASSAGES_PER_RESULT_CHARS`.
+- **A `RETRIEVED` agreement line.** Both ranks are on every row already; a sentence restating
+  them costs more than the two integers.
+
+**Measured.** Five questions from the traced set, `search_corpus` against a copy of the
+corpus, the committed serializer against R1 on identical retrieval:
+
+| Question | Before | R1 | Cards with `annexures` | with `references_laws` |
+|---|---|---|---|---|
+| Enhanced Due Diligence — when | 65,222 ch | 63,503 ch | 11 | 4 |
+| Asaan account credit balance limit | 59,928 ch | 58,314 ch | 7 | 1 |
+| Stable retail deposits, LCR run-off | 75,778 ch | 73,552 ch | 9 | 3 |
+| Card cross-border annual limit | 71,995 ch | 69,467 ch | 12 | 4 |
+| MFB minimum capital requirement | 61,748 ch | 60,562 ch | 5 | 6 |
+
+**Evidence was byte-identical in all five** — every letter, passage, excerpt, rank and
+amender annotation — so R1 is lossless by construction and 2–3.5% smaller. Size was never
+the point of it: the letters and passages dominate and R1 does not touch them (that is R4's
+selection). What it buys is the two lines. Of 24 distinct referenced-law edges surfaced, the
+one that looked wrong — the AML/CFT Regulations circular "referencing" a biometric FAQ —
+was right: the circular encloses those FAQs as Annex B, and they are also in the laws corpus.
+
+**Chat round, 2026-09-26** (`benchmarks/results/2026-09-26-sbpeye/assessment.md`, same model
+as 2026-08-26; C12 also landed between the rounds, so cost deltas are not R1's alone):
+
+- **Annexures: the handles are used.** Every document-opening call went to an annexure the
+  card marked `excerpt` or `passages` — P01 called `read_attachment` with the card's own
+  `[[a:…]]` handle. None went to an annexure marked `no` (101 offered), which is correct: `no`
+  means retrieval found nothing there. "Opens a `no` annexure" was the wrong success metric;
+  the real test is an item whose answer sits in an unmatched annexure, which the pilot set
+  does not have.
+- **`references_laws`: no measurable effect.** 53 laws were named only by a card; none of
+  them was opened. The 5 laws opened were all in `law_results` too.
+- **Found on the way, not caused by R1:** a handle slug passed as `circular_reference`
+  (`get_circular_details("BPRD-CL-01-2021")`) silently resolved to BPRD CL 24 of 2006 — the
+  §6 failure, live today — and repeated `get_law_details` on one Act (7 calls in P14) is
+  `CHAT_CONTEXT_PLAN.md` C5.
+
+Verdict: keep. Lossless, slightly smaller, and its annexure addressing is used; the law line
+is cheap and may earn its place once R4 routes on the same edges.
 
 ---
 
 ## 6. Stage 3 — compose, and the tool schema
 
 System prompt + evidence cards + question, streamed. Tools are available but should rarely be
-needed. The schema is **three verbs, ~1,200 characters**, against eight tools at 11,415:
+needed. The schema is **three verbs, ~1,200 characters**, against eight tools at 11,415 when
+this was written — nine at ~15,900 since C12 added `read_attachment`:
 
 ```
 open_document(handle, query?, section?)
@@ -281,8 +391,9 @@ insufficient(missing, searched_for)
 
 Three deliberate choices:
 
-- **`open_document` unifies `get_circular_details` and `get_law_details`.** The handle already
-  encodes the kind (`c` / `l` / `a`). Today's split is precisely why the prompt has to warn
+- **`open_document` unifies `get_circular_details`, `read_attachment` and `get_law_details`.**
+  The handle already encodes the kind (`c` / `l` / `a`); `read_attachment`'s `page` /
+  `section` / `query` modes become `open_document`'s on an `a` handle. Today's split is precisely why the prompt has to warn
   that one of them "CANNOT retrieve an Act — it searches circulars only, and asking it for one
   returns an unrelated circular that happens to mention the Act by name."
 - **Handle-only addressing.** `get_circular_details` currently does reference-parse → exact
@@ -304,7 +415,7 @@ The prompt-cache measurement (94–97% hits on late iterations, `CHAT_CONTEXT_PL
 the reason, and it does not stop applying because the loop got shorter.
 
 **The SSE contract is unchanged.** `meta` → `status` → `token`* → `done` / `error`, as
-`main.py:3348`–`3387` emits today. Stage 1 and Stage 2 report through `status` events, which
+`/api/chat/stream` in `main.py` emits today. Stage 1 and Stage 2 report through `status` events, which
 is what the existing tool-activity UI already renders.
 
 ---
@@ -316,7 +427,7 @@ four of them pure SQL:
 
 | # | Check | Mechanism | Today |
 |---|---|---|---|
-| 1 | **Resolution** — every handle resolves | `CitationHandles.expand` | partly, `_report_dropped_citations` (`ai.py:1166`) |
+| 1 | **Resolution** — every handle resolves | `CitationHandles.expand` | partly, `_report_dropped_citations` (`ai.py`) |
 | 2 | **Grounding** — every cited handle was in the evidence set | set membership | **none** |
 | 3 | **Quotation** — quoted strings appear in the evidence | `consolidation.value_supported` (`consolidation.py:84`) has this shape | none |
 | 4 | **Supersession** — nothing cited is `cancelled`/`superseded`, or `amended_by` later than `as_of`, without saying so | one join | **none** |
@@ -345,8 +456,8 @@ amended in 2021" as a footer rather than not at all. Failures annotate; only che
 | Peak single request | 49,889 tok median, 243,584 max | **~8–10k tok** |
 | Tool schema | 11,415 ch | ~1,200 ch |
 | Documents shown per turn | median 29 | 6–8 |
-| Withdrawn/replaced documents shown | **13.2%** | ~0% — *via C11, not this design* |
-| Amended documents shown without their amender named | **64.8%** | ~0% — *via C11* |
+| Withdrawn/replaced documents shown | **13.2%** | ~0% — *via C11, landed; re-measure* |
+| Amended documents shown without their amender named | **64.8%** | ~0% — *via C11, landed; re-measure* |
 | Turn latency | 37.8 s on the worked example | ~10–14 s |
 
 The right-hand column is derived from the card sizing in §5. It is a design target, not a
@@ -360,9 +471,9 @@ effectively empty:
 | Table | Rows | Verdict |
 |---|---|---|
 | `circular_relationships` | 3,172 | **Strong** — C11 and R2 work today |
-| `reg_document_links` | 814 | **Strong** — corpus routing works today |
-| `tags` | 3,009 of 3,655 | Strong |
-| `attachments` | 1,471 | Strong |
+| `reg_document_links` | 814 | **Strong, but name-matched** — 791 are `references`; route on it, do not claim `implements` |
+| `tags` | 2,635 of 3,655 | Strong |
+| `attachments` | 1,469 (1,328 with text) | Strong |
 | `circular_entities` | **57 rows, 7 circulars** | **Unusable** — the `value` intent is aspirational |
 | `compliance_checklist` | **4 circulars** | Unusable |
 | `summary` | **6 circulars** | Unusable — and the payload sends it anyway |
@@ -394,9 +505,10 @@ from seven circulars' worth of data.
 
 Each step is independently shippable and independently measurable.
 
-1. **R1 — the evidence card**, behind the existing tools. Same loop, better payload. This is
-   where `CHAT_CONTEXT_PLAN.md` C1a (suppress the second copy) lands, since one card per document
-   makes duplication structurally impossible.
+1. **R1 — the evidence card**, behind the existing tools. Same loop, better payload. C1a
+   (suppress the second copy) has already landed and is what keeps a card to one per document
+   per turn; R1 changes what that first copy carries. Scope as built: §5, *R1 — the card as
+   built*.
 2. **R2 — chain collapse.** Small, and it depends only on R1 being in place to have somewhere
    to put the lineage.
 3. **R3 — the plan call**, replacing iteration 1.
@@ -405,7 +517,8 @@ Each step is independently shippable and independently measurable.
 5. **R5 — collapse the tool schema** once R4 carries the common case.
 6. **R6 — verification.** Checks 1, 2 and 4 first; they need no LLM and no new data.
 
-C11 comes before all of them and is tracked in `CHAT_CONTEXT_PLAN.md`, not here.
+C11 comes before all of them and is tracked in `CHAT_CONTEXT_PLAN.md`, not here. **It has
+landed.**
 
 ### Relationship to `CHAT_CONTEXT_PLAN.md`
 
@@ -414,7 +527,7 @@ The incremental plan and this design are not alternatives — most of the plan s
 | Plan item | Fate |
 |---|---|
 | C0 turn share | Stays, as the backstop for the escalation path. Matters less once the peak is 10k tokens |
-| C1a suppress the second copy | **Survives** — becomes the card registry's write path |
+| C1a suppress the second copy | **Landed.** Survives — becomes the card registry's write path |
 | C1 document ledger | **Survives unchanged** — becomes the card registry |
 | C2 tiered full text | Subsumed by the card |
 | C3 supersession in synthesis | Subsumed — Stage 2 dedupes before the model ever sees it |
@@ -425,7 +538,8 @@ The incremental plan and this design are not alternatives — most of the plan s
 | C8 measure before sending | Survives as the backstop |
 | C9 pre-warmed first search | Superseded by Stage 1 + Stage 2, which do the same thing better |
 | C10 answer cache | Orthogonal — still worth building, keyed the same way |
-| C11 status-aware ranking | **Prerequisite.** Do it in the current design; every step here assumes it |
+| C11 status-aware ranking | **Prerequisite — landed.** Every step here assumes it |
+| C12 passage ledger, `read_attachment` | **Landed.** The ledger survives as the card registry's passage half; `read_attachment` folds into `open_document` (R5) |
 
-The sensible reading is that C1a, C1, C6 and C7 are worth doing now under either plan, and C11
-is worth doing now regardless of both.
+The sensible reading is that C1, C6 and C7 are worth doing now under either plan. C1a, C11 and
+C12 were, and have been done.

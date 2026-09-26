@@ -176,7 +176,8 @@ TOOLS = [
                 "fetching it again. A repeat entry that carries `matching_passages` with "
                 "`passages_not_provided_earlier` is bringing you passages of that document "
                 "no earlier entry did — a sharper query reached a different part of its "
-                "annexure — so read them. Pay particular attention to a circular ranked highly by "
+                "annexure — so read them; one with `letter_not_provided_earlier` carries "
+                "the full letter for the first time. Pay particular attention to a circular ranked highly by "
                 "`semantic_results` whose title looks unrelated — that usually means the answer "
                 "sits in an attachment rather than the covering letter, and consolidated "
                 "frameworks that revise earlier limits often look like this. Call "
@@ -3865,7 +3866,11 @@ SOURCE BLOCKS:
                 # again. Charging would spend the ceiling on a letter that gets stripped
                 # and starve the letters after it, which is the one way this change could
                 # make an answer worse.
-                if sent is not None and circular.id in sent:
+                #
+                # Held means the *letter* went out, not merely that the circular did: a
+                # circular first seen as an excerpt, or as annexure passages, is owed its
+                # letter when a later search can grant it (C1's fidelity ladder).
+                if sent is not None and "full_circular_text" in (sent.get(circular.id) or ()):
                     texts[circular.id] = body
                     continue
                 if len(body) > remaining:
@@ -3986,11 +3991,11 @@ SOURCE BLOCKS:
         `get_circular_details` round recovering what is already in its context — which
         would cost more than the duplicate did.
 
-        Scope is the turn: `docs/CHAT_CONTEXT_PLAN.md` C1a. The known limit is that a later
-        row cannot *upgrade* an earlier one — a circular first seen with only an excerpt
-        keeps the excerpt even if a later search would have matched real passages. Deciding
-        when a second copy is an upgrade is C1's fidelity ladder, and this is deliberately
-        the part that needs no such judgement.
+        Scope is the turn: `docs/CHAT_CONTEXT_PLAN.md` C1a. A later row *can* upgrade an
+        earlier one, through `fresh_keys`: text of the document no earlier row carried —
+        new passages (C12), or the letter itself when the first row had only an excerpt
+        or annexure passages (C1) — travels on the pointer and is marked as new, and the
+        ledger records it.
         """
         if sent is None:
             return payload
@@ -4013,9 +4018,12 @@ SOURCE BLOCKS:
         for key in fresh_keys:
             if key in payload:
                 reduced[key] = payload[key]
-                reduced["passages_not_provided_earlier"] = True
-                if key not in previous:
-                    sent[document_id] = [*previous, key]
+                reduced[
+                    "letter_not_provided_earlier" if key == "full_circular_text"
+                    else "passages_not_provided_earlier"
+                ] = True
+                if key not in sent[document_id]:
+                    sent[document_id] = [*sent[document_id], key]
         return reduced
 
     @staticmethod
@@ -4118,9 +4126,15 @@ SOURCE BLOCKS:
         body = (body_texts or {}).get(circular.id)
         if body:
             payload["full_circular_text"] = body
+        fresh: list[str] = []
+        if sent_passages is not None and passages:
+            fresh.append("matching_passages")
+        # C1's ladder: a repeat row that can carry the letter, when no earlier row did, is
+        # an upgrade and carries it. `_inline_body_texts` charged it for exactly this case.
+        if body and sent is not None and "full_circular_text" not in (sent.get(circular.id) or ()):
+            fresh.append("full_circular_text")
         return AIClient._dedupe_repeat_row(
-            payload, circular.id, _REPEAT_ROW_KEYS, sent,
-            fresh_keys=("matching_passages",) if sent_passages is not None and passages else (),
+            payload, circular.id, _REPEAT_ROW_KEYS, sent, fresh_keys=tuple(fresh),
         )
 
     @staticmethod
@@ -4800,35 +4814,58 @@ SOURCE BLOCKS:
 
         query = str(arguments.get("query", "") or "").strip() or user_query or ref
         sent = self._sent_passages.setdefault(c.id, set())
+        # C1: the turn's text ledger says whether `search_corpus` already handed this
+        # letter over whole. Measured on the 2026-08-26 and 2026-09-26 rounds, five of
+        # eleven calls re-sent a letter the same turn's search had inlined.
+        text_keys = self._sent_text_keys.get(c.id) or []
+        held = {c.id} if "full_circular_text" in text_keys else set()
         document_context, retriever = build_chat_context(
             db,
             [c.id],
             query,
             self.config.max_context_tokens,
             sent_chunk_ids=sent,
+            held_document_ids=held,
         )
         sent.update(retriever.last_sent_chunk_ids)
+        # Written back, so a later search or read points here instead of re-sending: a
+        # document handed over whole counts as every one of its chunks, and the letter
+        # counts as `full_circular_text` — the same key a search row would have carried.
+        sent.update(retriever.chunk_ids_of(retriever.last_direct_ids))
+        letter_here = c.id in retriever.last_direct_ids
+        if letter_here or retriever.last_sent_chunk_ids:
+            record = self._sent_text_keys.setdefault(c.id, [])
+            for key, carried in (
+                ("full_circular_text", letter_here),
+                ("matching_passages", bool(retriever.last_sent_chunk_ids)),
+            ):
+                if carried and key not in record:
+                    record.append(key)
+        letter_held = letter_here or c.id in retriever.held_document_ids
         # C11 rule 1: this path never filters on status — a circular the asker
         # named is returned whatever became of it — so the withdrawal has to be
         # *stated* here instead. Handing over a superseded circular's full text
         # with nothing but a `status` field to mark it is how a withdrawn rule
         # gets quoted as current.
         changed = _relationship_annotation(c) or {}
+        checklist = compact_required_checklist(c.compliance_checklist)
+        # The same card discipline as `_search_result_payload` (R1): `url`, `tags` and
+        # `summary` are gone for the reasons given there, and `content_preview` — the
+        # first 2,000 characters of the letter — travels only when the letter is neither
+        # in `document_context` nor already held. Measured on the two rounds above, it
+        # duplicated text inside `document_context` in all eleven calls.
         return json.dumps({
             **({"resolution_note": resolution_note} if resolution_note else {}),
-            **changed,
+            "citation": f"[[circular:{c.id}|{c.display_name}]]",
             "title": c.title,
             "reference": c.reference,
             "department": c.department,
             "date": c.date.strftime("%Y-%m-%d") if c.date else None,
-            "url": c.url,
-            "summary": c.summary,
-            "tags": json.loads(c.tags) if c.tags else [],
-            "compliance_checklist": compact_required_checklist(c.compliance_checklist),
             "status": c.status or "active",
-            "content_preview": (c.content_text or "")[:2000],
+            **changed,
+            **({"compliance_checklist": checklist} if checklist else {}),
+            **({} if letter_held else {"content_preview": (c.content_text or "")[:2000]}),
             "document_context": document_context,
-            "citation": f"[[circular:{c.id}|{c.display_name}]]",
             "attachment_citations": [
                 f"[[attachment:{item.id}|{item.filename}]]"
                 for item in c.attachments

@@ -348,23 +348,54 @@ class ScopedChatRetriever:
             sections.append("\n".join(lines))
         return "\n\n".join(sections) or "No circulars selected for context."
 
-    def direct_documents(self, token_budget: int) -> tuple[list[str], set[str]]:
+    def direct_documents(
+        self,
+        token_budget: int,
+        *,
+        held_document_ids: set[str] | frozenset = frozenset(),
+        sent_chunk_ids: set[str] | frozenset = frozenset(),
+    ) -> tuple[list[str], set[str]]:
+        """Short documents handed over whole, under `token_budget`.
+
+        A document the model already holds is not handed over again (C1): one named in
+        `held_document_ids` — a covering letter `search_corpus` already sent whole as
+        `full_circular_text` — or one every chunk of which the passage ledger
+        `sent_chunk_ids` already records. Those are listed on `held_documents` as
+        citations, for the caller to point at rather than repeat, and they do not spend
+        the budget.
+        """
         included: list[str] = []
         included_ids: set[str] = set()
+        self.held_documents: list[str] = []
+        self.held_document_ids: set[str] = set()
         remaining = max(0, token_budget)
+        chunks_by_document: dict[str, set[str]] = {}
+        for chunk in self._chunks:
+            chunks_by_document.setdefault(chunk.document_id, set()).add(chunk.chunk_id)
         for circular in self.circulars:
             for document in build_corpus(circular):
+                kind = document["doc_type"]
+                citation = f"[[{kind}:{document['doc_id']}|{document['doc_label']}]]"
+                chunk_ids = chunks_by_document.get(document["doc_id"]) or set()
+                if document["doc_id"] in held_document_ids or (
+                    chunk_ids and chunk_ids <= sent_chunk_ids
+                ):
+                    self.held_documents.append(citation)
+                    self.held_document_ids.add(document["doc_id"])
+                    continue
                 token_count = estimate_tokens(document["text"])
                 if token_count > remaining:
                     continue
-                kind = document["doc_type"]
-                citation = f"[[{kind}:{document['doc_id']}|{document['doc_label']}]]"
                 included.append(
                     f"Source: {citation}\nFull extracted text:\n{document['text']}"
                 )
                 included_ids.add(document["doc_id"])
                 remaining -= token_count
         return included, included_ids
+
+    def chunk_ids_of(self, document_ids: set[str]) -> list[str]:
+        """Every chunk id of the given documents — what handing one over whole sent."""
+        return [chunk.chunk_id for chunk in self._chunks if chunk.document_id in document_ids]
 
     def search(
         self,
@@ -846,29 +877,45 @@ def build_chat_context(
     max_context_tokens: int,
     *,
     sent_chunk_ids: set[str] | None = None,
+    held_document_ids: set[str] | None = None,
 ) -> tuple[str, ScopedChatRetriever]:
     """The selected circulars as the model reads them: manifest, short texts, passages.
 
     `sent_chunk_ids` is the turn's passage ledger (see `ScopedChatRetriever.search`).
-    What went out is left on `retriever.last_sent_chunk_ids` for the caller to record.
+    `held_document_ids` names documents the turn already sent whole by other means (a
+    letter `search_corpus` inlined). Neither kind is repeated: a held document is listed
+    as already provided, and kept out of the passage search too, since the model has all
+    of it. What went out is left on `retriever.last_sent_chunk_ids` (passages) and
+    `retriever.last_direct_ids` (whole documents) for the caller to record.
     """
     retriever = ScopedChatRetriever(db, circular_ids)
+    retriever.last_direct_ids = set()
     if not retriever.circulars:
         return "No circulars selected for context.", retriever
 
     grounding_budget = max(1, max_context_tokens // 4)
-    direct, direct_ids = retriever.direct_documents(grounding_budget)
+    direct, direct_ids = retriever.direct_documents(
+        grounding_budget,
+        held_document_ids=held_document_ids or frozenset(),
+        sent_chunk_ids=sent_chunk_ids or frozenset(),
+    )
+    retriever.last_direct_ids = direct_ids
     retrieved = retriever.search(
         focused_retrieval_query(query),
         limit=DEFAULT_RESULT_LIMIT,
         token_budget=grounding_budget,
-        excluded_document_ids=direct_ids,
+        excluded_document_ids=direct_ids | retriever.held_document_ids,
         sent_chunk_ids=sent_chunk_ids,
     )
 
     sections = ["Selected circular and attachment manifest:", retriever.attachment_manifest()]
     if direct:
         sections.extend(["Small documents included in full:", "\n\n".join(direct)])
+    if retriever.held_documents:
+        sections.extend([
+            "Documents already provided in full earlier in this conversation (not repeated):",
+            "\n".join(f"- {citation}" for citation in retriever.held_documents),
+        ])
     passages = [item for item in retrieved if not item.get("provided_earlier")]
     pointers = [item for item in retrieved if item.get("provided_earlier")]
     if passages:

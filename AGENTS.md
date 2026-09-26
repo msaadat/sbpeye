@@ -141,6 +141,10 @@ chunk). A repeat search row carries only passages no earlier row did, marked
 `IndexedDocumentRetriever` as `exclude`, withhold them, and name them in `provided_earlier`;
 law chunks are keyed `{version_id}__chunk_N` and shared with the law arm of `search_corpus`.
 A held hit's un-held neighbours still go out. Pinned by `tests/test_repeat_reads.py`.
+`get_circular_details` joins in (C1): a letter search already inlined, or a document whose
+every chunk is held, is listed as already provided rather than re-sent, and what it hands over
+whole is written back to both ledgers; a repeat search row can *upgrade* to the letter
+(`letter_not_provided_earlier`). Pinned by `tests/test_document_ledger.py`.
 
 **Turn budget.** A chat turn is assembled from the selected-circular context plus one
 tool result per round, and the loop keeps every one of them, so the request grows

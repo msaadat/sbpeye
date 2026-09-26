@@ -37,7 +37,7 @@ for the evidence budget, and every changed circular now names what changed it: a
 | **C0b** | Search payload ceilings scale with the share | `ai.py:1441` `_search_payload_budgets` | 72k ch → 13k ch on a 32k model | — | ☑ landed |
 | **C0c** | Chat sized by the model, window probed once | `ai.py:4916` `get_ai_client_for_user` | replaces the 4,000 default | — | ☑ landed |
 | **C1a** | Suppress the second copy of a document — lossless core of C1, absorbs C4 | `ai.py:3592` `_dedupe_repeat_row` | **19.8% of search output, lossless** | XS | ☑ landed |
-| **C1** | Fidelity ladder + enrol the document tools — extends C1a | `ai.py:3592` `_dedupe_repeat_row`, `_execute_tool` branches | **21.4% of tool output is a repeat** | M | ☐ |
+| **C1** | Fidelity ladder + enrol the document tools — extends C1a | `ai.py` `_circular_details_tool`, `_dedupe_repeat_row`; `chat_retrieval.py` `build_chat_context` | `get_circular_details` −34%; **−1.2% of all tool output** — C1a/C12/C5 had taken the rest, see §5.1 | M | ☑ landed |
 | **C2** | ~~Tier `full_circular_text` by rank~~ — **measured 1:1 against recall, do not ship as written** | `ai.py:3479` `_inline_body_texts` | see §5.2 | S | ⚠ blocked |
 | **C3** | Supersession pass before `_fair_shares` | `ai.py:1930` `_tool_result_synthesis_messages` | the one request never cached | S | ☐ |
 | **C4** | ~~One merged result list carrying both ranks~~ — **retired into C1a**, see §5.4 | — | — | — | ✗ retired |
@@ -443,6 +443,35 @@ after this lands.
 **On C5:** the law-chunk half of gap 2 is C5's key —
 `(tool, resolved_document_id, returned_chunk_indices)`. The two items converge on one ledger
 rather than maintaining two.
+
+### C1 as built
+
+**☑ Landed** (2026-09-26), pinned by `tests/test_document_ledger.py`.
+
+*Gap 2* — `get_circular_details` now reads and writes both ledgers. A letter `search_corpus`
+inlined whole (`full_circular_text` in `_sent_text_keys`), or a document every chunk of which
+`_sent_passages` holds, is listed under "already provided in full earlier" and kept out of
+that call's passage search; what the call hands over whole is written back as its chunks and
+as `full_circular_text`, so a later search row is a pointer. Measured on its eleven calls in
+the 2026-08-26 and 2026-09-26 rounds, it had also sent the letter's first 2,000 characters
+twice in *every* payload — `content_preview` beside the same text in `document_context` — so
+`content_preview` now travels only when the letter is neither included nor held. `url`,
+`summary` and `tags` went, as they did from the search card (R1). (The law half of gap 2 was
+C5.)
+
+*Gap 1* — the ladder is two rungs, not the five sketched above: a repeat search row carries
+the **letter** when no earlier row did (`letter_not_provided_earlier`), beside the new
+**passages** C12 already let through. `_inline_body_texts` charges the letter unless the
+ledger says *the letter* went out, not merely that the circular did. `DOCUMENT_CONTEXT` as a
+rung turned out to be unnecessary: what `get_circular_details` sends is recorded as the letter
+and passages it is made of.
+
+*Measured.* Every tool call of both rounds (30 turns, 116 calls) replayed in order against the
+corpus, `fb56b15` (everything through C6 and the law-resolution fixes) against the same plus C1, so the delta is C1's alone: `get_circular_details` **75,855 → 49,991
+characters (−34%)**; all tool output **3,999,211 → 3,951,852 (−1.2%)**. The "21.4% of tool
+output is a repeat" this item was sized on is pre-C1a: C1a took the search half, C12 the
+passages, C5 the drill-in readers, and `search_corpus` — 85% of all tool output — was already
+deduplicated. What remains of C1's value is that no tool now re-sends what another sent.
 
 ### 5.2 — C2. Tier `full_circular_text` by rank
 

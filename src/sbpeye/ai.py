@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from .chat_steps import build_step, failed_step
 from .checklist import compact_required_checklist
-from .citation_handles import CitationHandles, StreamExpander
+from .citation_handles import TOKEN_PATTERN, CitationHandles, StreamExpander
 from .database import AppSessionLocal
 from .env import load_app_env, resolve_env_value
 from .llm_debug import (
@@ -333,9 +333,9 @@ TOOLS = [
                 "instead when you already know the provision number — semantic search "
                 "cannot find 'section 9D' by meaning.\n"
                 "The result names the document it actually resolved to in "
-                "`resolved_title`. Check it against what you asked for: a mismatch means "
-                "the corpus does not hold the instrument you wanted, and you should say "
-                "so rather than answer from whatever came back. Chunks already returned in "
+                "`resolved_title`, and when that is a different instrument a "
+                "`resolution_note` says the one you asked for is not in the corpus. Then "
+                "say so rather than answer from whatever came back. Chunks already returned in "
                 "this conversation are not repeated — `provided_earlier` names them; they "
                 "are above, and asking again returns nothing new."
             ),
@@ -1289,6 +1289,90 @@ def _card_referenced_laws(circular) -> dict:
         section["references_laws_not_listed"] = len(ordered) - MAX_CARD_REFERENCED_LAWS
     return section
 
+def _title_words(text: str | None) -> list[str]:
+    """A law title as a comparable word sequence: case, punctuation and brackets ignored.
+
+    "(AML/CFT/CPF) Regulations" and "AML/CFT/CPF Regulations" are the same four words,
+    and "&" is "and" — a model writes titles the way a person says them.
+    """
+    return re.findall(r"[a-z0-9]+", (text or "").casefold().replace("&", " and "))
+
+
+def _word_run_at(words: list[str], run: list[str]) -> int | None:
+    """Where `run` occurs in `words` as consecutive whole words, or None."""
+    width = len(run)
+    for start in range(len(words) - width + 1):
+        if words[start:start + width] == run:
+            return start
+    return None
+
+
+# "<parent> - <subtitle>": the listing's convention for a document that accompanies
+# another rather than being it — "AML/CFT/CPF Regulations - Guidelines on Targeted
+# Financial Sanctions", "FAQs - Prudential Regulations for SME Financing".
+_TITLE_SEGMENT_SPLIT = re.compile(r"\s+[-–—]\s+")
+
+
+def _law_title_names(document: Any) -> list[list[str]]:
+    """The word sequences a request may use to name `document`.
+
+    Its title, version suffix stripped — and, for a part, the name a reader gives it:
+    the FE Manual's chapters are titled with their subject alone ("EXPORTS", with
+    "Chapter 12" in `part_label`), so "Foreign Exchange Manual Chapter 12" appeared in no
+    title and resolved by search to the whole Manual.
+    """
+    names = [_title_words(document.normalized_title or document.title)]
+    if document.parent is not None:
+        names.append(_title_words(
+            f"{document.parent.title} {document.part_label or ''} {document.title}"
+        ))
+        names.append(_title_words(f"{document.parent.title} {document.title}"))
+    return names
+
+
+def _law_title_rank(document: Any, wanted: list[str]) -> tuple | None:
+    """How well `document` answers a request for `wanted` — lower is better — or None
+    when none of its names contains the requested words.
+
+    The substring cascade this replaces took the first row whose title contained the
+    request, so "AML/CFT/CPF Regulations" resolved to *AML/CFT/CPF Regulations -
+    Guidelines on Targeted Financial Sanctions*: the Regulations themselves are titled
+    "… (AML/CFT/CPF) Regulations", which the bracket kept the substring from matching,
+    and the companion document's title begins with the phrase. A model asking for the
+    Regulations read the sanctions guidelines as them, with no note — it was a title
+    match. In order:
+
+    1. the title, version suffix stripped (`normalized_title`), *is* the request;
+    2. not a companion — a "<parent> - <subtitle>" title whose match lies wholly inside
+       one segment is a document *about* what was asked for, not the thing itself;
+    3. a top-level document over a part (the FE Manual over its chapters);
+    4. the request names the title — it starts or ends it — rather than being mentioned
+       inside it ("… under Section 17G of the State Bank of Pakistan Act, 1956");
+    5. the shorter title, then the title, for a stable order.
+
+    A part is ranked by the best of its names (`_law_title_names`).
+    """
+    segments = _TITLE_SEGMENT_SPLIT.split(document.title or "")
+    companion = len(segments) > 1 and any(
+        _word_run_at(_title_words(segment), wanted) is not None for segment in segments
+    )
+    ranks = []
+    for words in _law_title_names(document):
+        at = _word_run_at(words, wanted)
+        if at is None:
+            continue
+        names_it = at == 0 or at + len(wanted) == len(words)
+        ranks.append((
+            words != wanted,
+            companion,
+            document.parent_id is not None,
+            not names_it,
+            len(words),
+            document.title or "",
+        ))
+    return min(ranks) if ranks else None
+
+
 def _chunk_ranges(indexes: list[int]) -> str:
     """``[45, 46, 47, 49]`` → ``"45-47, 49"`` — chunk indexes as a reader would write them."""
     runs: list[list[int]] = []
@@ -1580,6 +1664,11 @@ class AIClient:
         # cites with them and passes them as arguments too — resolves it exactly rather
         # than parsing it as a reference. Set by the chat loops; `None` outside a turn.
         self._turn_handles: CitationHandles | None = None
+        # C6's two inputs beside the ledgers above: the documents cited by results of
+        # tools that write neither ledger, and whether the round in progress had a call
+        # fail. Turn-scoped and round-scoped respectively; see `_round_added_nothing`.
+        self._result_documents: set[tuple[str, str]] = set()
+        self._round_failed = False
         # One digested record per tool call this turn makes, in execution order, for
         # the route to persist beside the answer. Turn-scoped for the same reason as
         # the ledger above.
@@ -4482,33 +4571,76 @@ SOURCE BLOCKS:
             return json.dumps({"error": str(e)})
 
     @staticmethod
-    def _resolve_law(db: Session, title: str):
-        """Find the law a title names, or nothing.
+    def _resolve_law(db: Session, title: str) -> tuple[Any, bool]:
+        """Find the law a title names: ``(document, by_title)``, or ``(None, False)``.
 
-        Exact, then prefix, then substring, then the law-only search arm. The cascade
+        Exact title, then the title tier (`_law_title_rank`), then the law-only search arm.
+        The cascade
         stops at the search arm's *first* result the way `get_circular_details` does,
         with one difference that matters: this reports what it resolved rather than
         presenting it as what was asked for. Handing back a near-match silently is how
         `get_circular_details("State Bank of Pakistan Act, 1956")` answered with a 1999
         cash-reserve circular whose title merely mentions the Act.
+
+        `by_title` is False only for the search arm — the one step that can land on a
+        different instrument — so the caller can say so (`_law_resolution_note`).
         """
         from .models import RegDocument
         from .search import search_engine
 
         cleaned = title.strip()
         if not cleaned:
-            return None
+            return None, False
         live = db.query(RegDocument).filter(RegDocument.delisted_at.is_(None))
-        for condition in (
-            RegDocument.title.ilike(cleaned),
-            RegDocument.title.ilike(f"{cleaned}%"),
-            RegDocument.title.ilike(f"%{cleaned}%"),
-        ):
-            match = live.filter(condition).first()
-            if match is not None:
-                return match
+        match = live.filter(RegDocument.title.ilike(cleaned)).first()
+        if match is not None:
+            return match, True
+        wanted = _title_words(cleaned)
+        if wanted:
+            ranked = [
+                (rank, document)
+                for document in live.all()
+                if (rank := _law_title_rank(document, wanted)) is not None
+            ]
+            if ranked:
+                return min(ranked, key=lambda item: item[0])[1], True
         results, _ = search_engine.search(cleaned, db, limit=1, source="laws")
-        return results[0]["law"] if results else None
+        return (results[0]["law"], False) if results else (None, False)
+
+    @staticmethod
+    def _law_resolution_note(requested: str, document: Any) -> str | None:
+        """Say plainly when a law request resolved to a different instrument.
+
+        `resolved_title` alone was not enough. In the 2026-09-26 round P01 and P02 asked
+        three times for the *Anti-Money Laundering Act, 2010*, which the corpus does not
+        hold; the search arm returned the AML/CFT/CPF Regulations each time, the payload
+        named them in `resolved_title`, and the model asked again — once with the comma
+        dropped — rather than conclude the Act was missing.
+
+        A spelling variant is not a different instrument: P14 wrote "Electronic Fund
+        Transfer Act" for "… Transfers Act" and got the right one. So the titles are
+        compared as word sets, plural-folded, and a note is written only when the request
+        names something the resolved title does not — a different year, or words it
+        lacks ("Act, 2010" against "… Regulations").
+        """
+        def words(text: str) -> set[str]:
+            tokens = re.findall(r"[a-z0-9]+", (text or "").casefold())
+            return {
+                token[:-1] if len(token) > 3 and token.endswith("s") else token
+                for token in tokens
+                if token not in {"of", "the", "and", "for", "on", "in", "a", "an"}
+            }
+
+        asked, found = words(requested), words(document.title)
+        if asked and asked <= found:
+            return None
+        return (
+            f"The corpus does not hold a document titled {requested!r}. The closest match "
+            f"is {document.title!r}, a different instrument — its passages are below. Use "
+            "them only for what they say themselves; do not present them as the text of "
+            f"{requested!r}. If the answer needs that instrument, say it is not in the "
+            "corpus. Asking for it again will resolve here again."
+        )
 
     @staticmethod
     def _resolve_circular(
@@ -4903,7 +5035,7 @@ SOURCE BLOCKS:
         if not requested:
             return json.dumps({"error": "No law title provided"})
 
-        document = self._resolve_law(db, requested)
+        document, by_title = self._resolve_law(db, requested)
         if document is None:
             return json.dumps({
                 "error": f"No law, Act or regulation found matching: {requested}",
@@ -4912,10 +5044,14 @@ SOURCE BLOCKS:
                     "answering from a circular that mentions it."
                 ),
             })
+        resolution_note = None if by_title else self._law_resolution_note(requested, document)
+        # First in every payload below: it changes how everything after it must be read.
+        noted = {"resolution_note": resolution_note} if resolution_note else {}
 
         version = document.current_version
         if version is None or not (version.content_text or "").strip():
             return json.dumps({
+                **noted,
                 "error": f"No readable text in force for: {document.title}",
                 "resolved_title": document.title,
                 "citation": f"[[law:{document.id}|{document.title}]]",
@@ -4940,6 +5076,7 @@ SOURCE BLOCKS:
         passages, withheld = self._read_with_ledger(retriever, document.id, attempts)
 
         payload = {
+            **noted,
             "requested": requested,
             "resolved_title": document.title,
             "law_type": document.doc_type,
@@ -5175,6 +5312,83 @@ circular on an adjacent topic for a statute you could not retrieve.
         )
         return [{"role": "system", "content": system_prompt}] + messages
 
+    def _note_round_result(self, name: str, result: str) -> None:
+        """Record what one tool result contributes to C6's evidence state.
+
+        Read from the result as the tool built it — real citation tokens, before the
+        rewrite to handles. `search_corpus` and the drill-in tools are accounted by the
+        ledgers they write; every other tool (values, latest, tags, inventory, circular
+        details) writes none, so the documents its result cites stand in. Search is left
+        out of that on purpose: its rows name amenders, withdrawn matches and referenced
+        laws as pointers, which would read as new evidence on every call.
+        """
+        try:
+            payload = json.loads(result)
+        except (TypeError, ValueError):
+            payload = None
+        if isinstance(payload, dict) and payload.get("error"):
+            self._round_failed = True
+        if name != "search_corpus":
+            self._result_documents.update(
+                (match.group(1), match.group(2).strip())
+                for match in TOKEN_PATTERN.finditer(result or "")
+            )
+
+    def _evidence_state(self) -> frozenset:
+        """Everything the turn has put in front of the model, as one comparable value.
+
+        Documents and the text keys they carried (`_sent_text_keys`, C1a), passages by
+        index id (`_sent_passages`, C12/C5), and the documents cited by tools that keep
+        no ledger. Taken before a round (`_begin_round`) and compared after it.
+        """
+        return frozenset(
+            [("doc", doc) for doc in self._sent_text_keys]
+            + [("text", doc, key) for doc, keys in self._sent_text_keys.items() for key in keys]
+            + [("chunk", key) for keys in self._sent_passages.values() for key in keys]
+            + [("cited", *doc) for doc in self._result_documents]
+        )
+
+    def _round_added_nothing(self, before: frozenset, iteration: int) -> bool:
+        """C6: end the tool loop when a round put nothing new in front of the model.
+
+        `CHAT_CONTEXT_PLAN.md` §5.6. Measured before it: 15% of tool calls returned only
+        documents already seen, and two thirds of turns ran four or five rounds; on the
+        worked example iterations 3, 4 and 5 produced nothing new. With C1a/C12/C5 a
+        repeat now *costs* little, but it still costs a round trip, and a model that got
+        nothing from a round tends to try again. In the 2026-09-26 round P01 and P02 hit
+        the ceiling after repeated reads of one regulation.
+
+        Three conditions keep it from ending a turn that is still going somewhere:
+
+        - **Something has been found.** A turn whose searches have all come back empty is
+          still looking, and rephrasing is exactly what it should do next.
+        - **No call in the round failed.** A failed call — an ambiguous reference, a
+          circular not found — is the model's cue to correct an argument, as P02 did
+          after its handle was misread; stopping there would answer from the mistake.
+        - **It is not the last round anyway.** The loop's own ceiling already ends there,
+          and recording that as an early stop would count it twice.
+
+        Ending means the existing final synthesis, not a tool-less continuation of the
+        conversation: that was the design before `29386e5`, and models kept calling
+        tools with `tool_choice="none"` until the provider refused the request.
+        """
+        after = self._evidence_state()
+        if after != before or not after or self._round_failed:
+            return False
+        if iteration + 1 >= _MAX_TOOL_ITERATIONS:
+            return False
+        emit_event("early_stop", {
+            "reason": "no_new_evidence",
+            "iteration": iteration + 1,
+            "evidence_items": len(after),
+        }, stage="chat.tools")
+        return True
+
+    def _begin_round(self) -> frozenset:
+        """Start a tool round: clear its failure flag, return the evidence state before it."""
+        self._round_failed = False
+        return self._evidence_state()
+
     def _apply_tool_calls(
         self,
         full_messages: list[dict],
@@ -5230,6 +5444,7 @@ circular on an adjacent topic for a statute you could not retrieve.
                     label=tool_activity_label(tc["function"]["name"]),
                     elapsed_ms=round((time.monotonic() - tool_started) * 1000),
                 ))
+                self._note_round_result(tc["function"]["name"], result)
                 if handles is not None:
                     # Recorded post-rewrite so the trace shows what the model was
                     # actually handed, handles and all.
@@ -5286,6 +5501,7 @@ circular on an adjacent topic for a statute you could not retrieve.
         self._sent_text_keys = {}
         self._sent_passages = {}
         self._turn_handles = handles
+        self._result_documents = set()
         self._turn_steps = []
         full_messages = self._chat_full_messages(
             messages, circulars_context, selected_circular_ids, handles
@@ -5314,6 +5530,7 @@ circular on an adjacent topic for a statute you could not retrieve.
             if not msg.tool_calls:
                 return _expanded_answer(msg.content or "", handles)
 
+            before = self._begin_round()
             self._apply_tool_calls(
                 full_messages,
                 msg.content or "",
@@ -5332,8 +5549,10 @@ circular on an adjacent topic for a statute you could not retrieve.
                 selected_circular_ids,
                 handles,
             )
+            if self._round_added_nothing(before, iteration):
+                break
 
-        # Fallback if max iterations reached. Use a fresh synthesis prompt so
+        # Fallback if max iterations reached, or C6 ended the loop early. Use a fresh synthesis prompt so
         # models that keep requesting tools do not see prior tool-call messages.
         synthesis_messages = self._tool_result_synthesis_messages(
             _messages_with_handles(messages, handles),
@@ -5402,6 +5621,7 @@ circular on an adjacent topic for a statute you could not retrieve.
         self._sent_text_keys = {}
         self._sent_passages = {}
         self._turn_handles = handles
+        self._result_documents = set()
         self._turn_steps = []
         full_messages = self._chat_full_messages(
             messages, circulars_context, selected_circular_ids, handles
@@ -5488,6 +5708,7 @@ circular on an adjacent topic for a statute you could not retrieve.
                 "step_offset": len(self._turn_steps),
             }
 
+            before = self._begin_round()
             self._apply_tool_calls(
                 full_messages,
                 "".join(content_parts),
@@ -5496,6 +5717,8 @@ circular on an adjacent topic for a statute you could not retrieve.
                 selected_circular_ids,
                 handles,
             )
+            if self._round_added_nothing(before, iteration):
+                break
 
         yield {"phase": "thinking"}
         synthesis_messages = self._tool_result_synthesis_messages(

@@ -105,7 +105,7 @@ on them before it reads a description, which is why the discovery tool is not ca
 | `search_corpus` | circulars **and** laws | Default search. Returns `lexical_results` / `semantic_results` (circulars, unfused, both ranks visible), `reference_matches`, and `law_results` (laws, RRF-fused, ranked separately — a rank among laws is not comparable with a rank among circulars). Department/tag filters are circular-only and drop the law arm. |
 | `get_circular_details` | one circular + attachments | Letter, manifest, and annexure passages for `query` (default: the user's question). Cannot fetch a law. Passages the turn already sent are listed as pointers, not repeated. `circular_reference` takes a handle (`[[c:…]]`, resolved exactly through the turn's `CitationHandles` map, or by slug), a reference, or a title; a result found only by full-text search carries `resolution_note` saying it is the closest match. `read_attachment` resolves the same way. |
 | `read_attachment` | inside one attachment | The annexure analogue of `get_law_details`: `page`, `section` (a paragraph number, "4.11") or `query`; hits come back with `ATTACHMENT_NEIGHBOUR_CHUNKS` either side. Names the attachment by filename or `[[a:…]]` handle; optional when the circular has one. |
-| `get_law_details` | inside one law | `query` or `section`; matched chunks come back with `LAW_NEIGHBOUR_CHUNKS` either side, because a statute's sub-sections split across chunk boundaries. Reports `resolved_title` rather than passing a near-match off as the requested document. |
+| `get_law_details` | inside one law | `query` or `section`; matched chunks come back with `LAW_NEIGHBOUR_CHUNKS` either side, because a statute's sub-sections split across chunk boundaries. Reports `resolved_title` rather than passing a near-match off as the requested document; when only the search arm matched and the titles name different instruments (not a spelling variant), a leading `resolution_note` says the requested one is not in the corpus (`_law_resolution_note`). Title matching is whole-word over `normalized_title`, ranked by `_law_title_rank` so a "<parent> - <subtitle>" companion never stands in for its parent; parts also answer to "<parent> <part_label>". |
 | `search_selected_documents` | pinned circulars | Scoped; errors when nothing is pinned. |
 | `search_regulatory_inventory` | every document | Exhaustive "list all" sweeps only. Rows are pointers with one short excerpt — drill in with the two `get_*_details` tools. |
 | `get_latest_circulars`, `get_circulars_by_tag`, `query_regulatory_values` | circulars | Recency, tag browse, structured values. |
@@ -157,7 +157,8 @@ default of 4,000 — a number belonging to no model. Windows are probed once per
 (provider, base URL, model) per `_WINDOW_CACHE_TTL_SECONDS`, since a chat request builds
 its own `AIClient`. Pinned by `tests/test_chat_turn_budget.py`.
 
-**Final synthesis.** A turn that exhausts `_MAX_TOOL_ITERATIONS` (5) falls through to a
+**Final synthesis.** A turn that exhausts `_MAX_TOOL_ITERATIONS` (5) — or whose last round
+added no new evidence (C6, `_round_added_nothing`, `tests/test_early_stop.py`) — falls through to a
 tool-free synthesis call that rebuilds the conversation from the tool results gathered so
 far (`_tool_result_synthesis_messages`, shared by the blocking and streaming paths). The
 evidence budget comes from `resolve_context_budget()`, i.e. the model's own window — not

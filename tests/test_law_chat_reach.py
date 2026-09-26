@@ -375,3 +375,150 @@ def test_a_law_that_matches_nothing_says_so(db, no_vectors, monkeypatch):
 
     assert payload["passages"] == []
     assert "note" in payload
+
+
+# -------------------------------------------------------- an instrument the corpus lacks
+
+AML_REGS = (
+    "Anti-Money Laundering, Combating the Financing of Terrorism & Countering "
+    "Proliferation Financing (AML/CFT/CPF) Regulations"
+)
+
+
+def _search_returns(monkeypatch, document):
+    monkeypatch.setattr(
+        "sbpeye.search.search_engine.search",
+        lambda *args, **kwargs: ([{"law": document}], 1),
+    )
+
+
+def test_a_missing_act_is_named_as_missing(db, no_vectors, monkeypatch, act_chunks):
+    """2026-09-26, P01/P02: three requests for the AML Act, 2010, which the corpus does not
+    hold. Each resolved to the Regulations; `resolved_title` said so and the model asked
+    again. The payload now says it in words, first."""
+    regs = add_law(db, document_id="aml-regs", title=AML_REGS, doc_type="regulation")
+    _search_returns(monkeypatch, regs)
+    monkeypatch.setattr(
+        "sbpeye.chat_retrieval.collection", StubCollection(act_chunks, "aml-regs")
+    )
+    monkeypatch.setattr(
+        "sbpeye.chat_retrieval.embedding_backend.embed_queries", lambda queries: [[0.0]]
+    )
+
+    payload = json.loads(_client()._law_details_tool(
+        {"law_title": "Anti-Money Laundering Act, 2010", "query": "enhanced due diligence"}, db
+    ))
+
+    assert next(iter(payload)) == "resolution_note"
+    assert "does not hold a document titled 'Anti-Money Laundering Act, 2010'" in (
+        payload["resolution_note"]
+    )
+    assert payload["resolved_title"] == AML_REGS
+
+
+@pytest.mark.parametrize("requested, held", [
+    # P14: "Transfer" for "Transfers" — the same Act, reached by the search arm.
+    ("Payment Systems and Electronic Fund Transfer Act, 2007",
+     "Payment Systems and Electronic Fund Transfers Act, 2007"),
+    ("Foreign Exchange Regulation Act 1947", "FOREIGN EXCHANGE REGULATION ACT, 1947 (VII OF 1947)"),
+    ("Banking Companies Ordinance, 1962", "Banking Companies Ordinance 1962 (being updated)"),
+])
+def test_a_spelling_variant_is_not_called_a_different_instrument(requested, held):
+    from sbpeye.ai import AIClient
+
+    assert AIClient._law_resolution_note(requested, RegDocument(title=held)) is None
+
+
+@pytest.mark.parametrize("requested, held", [
+    ("Anti-Money Laundering Act, 2010", AML_REGS),
+    ("Companies Act, 2017", "Banks Nationalization Act 1974 (as modified up to June 1997)"),
+    # Same words, different year: a different enactment.
+    ("Foreign Exchange Regulation Act, 1972", "Foreign Exchange Regulation Act, 1947"),
+])
+def test_a_different_instrument_is_called_one(requested, held):
+    from sbpeye.ai import AIClient
+
+    assert AIClient._law_resolution_note(requested, RegDocument(title=held))
+
+
+def test_a_title_match_carries_no_note(db, no_vectors, monkeypatch, act_chunks):
+    add_law(db)
+    monkeypatch.setattr(
+        "sbpeye.chat_retrieval.collection", StubCollection(act_chunks, "sbp-act")
+    )
+    monkeypatch.setattr(
+        "sbpeye.chat_retrieval.embedding_backend.embed_queries", lambda queries: [[0.0]]
+    )
+
+    payload = json.loads(_client()._law_details_tool(
+        {"law_title": "State Bank of Pakistan Act", "query": "quorum"}, db
+    ))
+
+    assert "resolution_note" not in payload
+
+
+# ------------------------------------------------------ which document a title names
+
+def _listed(db, document_id, title, *, normalized=None, parent_id=None, part_label=None):
+    document = RegDocument(
+        id=document_id, title=title, normalized_title=normalized or title.casefold(),
+        doc_type="regulation", parent_id=parent_id, part_label=part_label,
+        first_seen_at=datetime(2026, 8, 1), last_seen_at=datetime(2026, 8, 1),
+    )
+    db.add(document)
+    db.commit()
+    return document
+
+
+def _resolved(db, title):
+    from sbpeye.ai import AIClient
+
+    document, by_title = AIClient._resolve_law(db, title)
+    assert by_title, f"{title!r} fell through to search"
+    return document.id
+
+
+def test_the_regulations_win_over_their_companion_documents(db):
+    """The substring cascade resolved "AML/CFT/CPF Regulations" to the sanctions
+    guidelines: the Regulations' own title brackets "(AML/CFT/CPF)", and the companion's
+    title begins with the phrase. A model asking for the Regulations read the guidelines
+    as them, and a title match carried no note to say otherwise."""
+    _listed(db, "tfs", "AML/CFT/CPF Regulations - Guidelines on Targeted Financial "
+                       "Sanctions (TFS) under UNSC Resolutions")
+    _listed(db, "faqs", "AML/CFT/CPF Regulations - Frequently Asked Questions (FAQs) on "
+                        "Targeted Financial Sanctions (TFS) Obligations")
+    _listed(db, "regs", AML_REGS)
+
+    assert _resolved(db, "AML/CFT/CPF Regulations") == "regs"
+    assert _resolved(db, "AML CFT CPF Regulations") == "regs"
+    # Named for what they are, the companions are still reachable.
+    assert _resolved(db, "Guidelines on Targeted Financial Sanctions") == "tfs"
+    assert _resolved(db, "AML/CFT/CPF Regulations - Frequently Asked Questions") == "faqs"
+
+
+def test_a_version_suffix_does_not_lose_to_a_companion(db):
+    _listed(db, "faq", "FAQs - Prudential Regulations for SME Financing")
+    _listed(db, "sme", "Prudential Regulations for SME Financing (Updated till July 16, 2026)",
+            normalized="prudential regulations for sme financing")
+
+    assert _resolved(db, "Prudential Regulations for SME Financing") == "sme"
+
+
+def test_the_act_named_beats_the_regulation_that_mentions_it(db):
+    _listed(db, "lolr", "Regulations for Lender of Last Resort (LOLR) Facility under "
+                        "Section 17G of the State Bank of Pakistan Act, 1956")
+    _listed(db, "act", "State Bank of Pakistan Act, 1956")
+
+    assert _resolved(db, "State Bank of Pakistan Act") == "act"
+
+
+def test_a_chapter_is_reached_by_the_name_a_reader_gives_it(db):
+    """FE Manual chapters are titled by subject alone ("EXPORTS"), "Chapter 12" in
+    `part_label` — so "Foreign Exchange Manual Chapter 12" was in no title at all."""
+    _listed(db, "fem", "Foreign Exchange Manual")
+    _listed(db, "ch12", "EXPORTS", parent_id="fem", part_label="Chapter 12")
+    _listed(db, "ch13", "IMPORTS", parent_id="fem", part_label="Chapter 13")
+
+    assert _resolved(db, "Foreign Exchange Manual") == "fem"
+    assert _resolved(db, "Foreign Exchange Manual Chapter 12") == "ch12"
+    assert _resolved(db, "Foreign Exchange Manual - Imports") == "ch13"

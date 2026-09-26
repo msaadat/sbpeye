@@ -9,10 +9,12 @@ reports the things a rater cannot see:
     Whenever a round is not run serially the runner's elapsed time is the batch total, not
     the item's: in the 2026-08-23 round three items each reported 279.1 s, which was the
     span of all three. This is the per-item number that column should have held.
-  * **Tool calls, and whether the turn hit the iteration ceiling.** The `_MAX_TOOL_ITERATIONS`
-    fallback rebuilds the turn from the tool results gathered so far, and has historically
-    been where evidence went missing — in the 2026-08-23 round the three turns that fell
-    through were exactly the three worst answers.
+  * **Tool calls, and how the loop ended.** `fallback` is `CEIL` when the turn used every
+    iteration and `early` when C6 ended it because a round added no new evidence (an
+    `early_stop` event) — both go through the final synthesis, so the synthesis stage
+    alone cannot tell them apart. The synthesis rebuilds the turn from the tool results
+    gathered so far, and has historically been where evidence went missing — in the
+    2026-08-23 round the three turns that fell through were exactly the three worst answers.
   * **Dropped citations** — `citation_drop` events, one per handle the renderer refused.
     A per-round count says whether a prompt change broke citation compliance without
     grading a single answer. The 2026-08-23 baseline is 8 handles across 15 items and 3
@@ -50,11 +52,14 @@ def turn_trace(db: sqlite3.Connection, session_id: str) -> dict | None:
     dropped: list[str] = []
     iterations = 0
     synthesis = False
+    early = False
     for kind, stage, payload_json in events:
         if kind == "tool_request":
             payload = json.loads(payload_json)
             name = payload.get("name") or payload.get("tool") or "?"
             tools[name] += 1
+        if kind == "early_stop":
+            early = True
         if kind == "citation_drop":
             # Each entry is {"reason": …, "handle": …}; the handle is the readable half.
             for entry in json.loads(payload_json).get("dropped", []):
@@ -76,7 +81,8 @@ def turn_trace(db: sqlite3.Connection, session_id: str) -> dict | None:
         "tool_calls": sum(tools.values()),
         "tools": dict(tools),
         "iterations": iterations,
-        "hit_ceiling": synthesis,
+        "hit_ceiling": synthesis and not early,
+        "stopped_early": early,
         "dropped": dropped,
     }
 
@@ -115,13 +121,14 @@ def main() -> None:
         seconds = (trace["duration_ms"] or 0) / 1000
         totals["tool_calls"] += trace["tool_calls"]
         totals["ceilings"] += trace["hit_ceiling"]
+        totals["early"] += trace["stopped_early"]
         totals["drops"] += len(trace["dropped"])
         totals["in"] += trace["prompt_tokens"] or 0
         totals["out"] += trace["completion_tokens"] or 0
         print(
             f"{item:<5}{trace['trace_id']:<10}{wall or 0:>7.1f}{seconds:>8.1f}"
             f"{trace['tool_calls']:>7}{trace['iterations']:>7}"
-            f"{'YES' if trace['hit_ceiling'] else '-':>10}"
+            f"{'CEIL' if trace['hit_ceiling'] else 'early' if trace['stopped_early'] else '-':>10}"
             f"{trace['prompt_tokens'] or 0:>9}{trace['completion_tokens'] or 0:>9}"
             f"  {', '.join(trace['dropped'])}"
         )
@@ -133,7 +140,8 @@ def main() -> None:
 
     print(
         f"\n  {totals['tool_calls']} tool calls · {totals['ceilings']} turns hit the "
-        f"iteration ceiling · {totals['drops']} dropped citation handles\n"
+        f"iteration ceiling · {totals['early']} ended early (C6) · "
+        f"{totals['drops']} dropped citation handles\n"
         f"  tokens: {totals['in']:,} in, {totals['out']:,} out\n"
     )
     print("  tool usage across the round:")

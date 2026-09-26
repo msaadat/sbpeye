@@ -42,7 +42,7 @@ for the evidence budget, and every changed circular now names what changed it: a
 | **C3** | Supersession pass before `_fair_shares` | `ai.py:1930` `_tool_result_synthesis_messages` | the one request never cached | S | ☐ |
 | **C4** | ~~One merged result list carrying both ranks~~ — **retired into C1a**, see §5.4 | — | — | — | ✗ retired |
 | **C5** | Repeat-call guard keyed on what was resolved | `ai.py` `_read_with_ledger`, `chat_retrieval.py` `IndexedDocumentRetriever._expand` | **28.9% of drill-in output on the 2026-09-26 replay; 45% on P14** | S | ☑ landed |
-| **C6** | Stop when an iteration adds no new document | `ai.py:4692` `_stream_chat_impl` | removes 1–3 requests | S | ☐ |
+| **C6** | Stop when an iteration adds no new document | `ai.py` `_round_added_nothing`, both chat loops | **backstop — fires on 0 of 15 turns in the 2026-09-26 replay**, see §5.6 | S | ☑ landed |
 | **C7** | Charge conversation history to the turn budget | `main.py:3351` | the remaining unbounded input | S | ☐ |
 | **C8** | Express the synthesis budget as a share, and measure before sending | `ai.py:1850`, `ai.py:1647` | **the guarantee** | M | ☐ |
 | **C9** | Pre-warm the first search, skip iteration 1 | `main.py:3351` | −1 request, ~4.5 s | M | ☐ |
@@ -594,9 +594,17 @@ made in the 2026-09-26 round, re-run against the corpus with and without the led
 
 Found on the way, not C5's: P01/P02 asked three times for the *Anti-Money Laundering Act,
 2010*, which the corpus does not hold. `_resolve_law`'s search fallback returned the AML/CFT/CPF
-Regulations each time; `resolved_title` said so and the model did not act on it. The
-circular path now carries an explicit `resolution_note` for a closest-match resolution
-(`_resolve_circular`); the law path should say "not held" as plainly.
+Regulations each time; `resolved_title` said so and the model did not act on it. **Fixed
+since:** a search-arm resolution whose title names a different instrument — not a spelling
+variant like P14's "Transfer"/"Transfers" — now leads its payload with a `resolution_note`
+saying the requested instrument is not in the corpus (`_law_resolution_note`, pinned in
+`tests/test_law_chat_reach.py`). And the *by-title* tier no longer lands on a companion: it
+was a first-row substring match, so "AML/CFT/CPF Regulations" resolved to the TFS guidelines
+filed under that name (the main title brackets "(AML/CFT/CPF)"), with no note because it was
+a title match. It is now a whole-word match over `normalized_title`, brackets and punctuation
+ignored, ranked by `_law_title_rank` — equal title, then not a "<parent> - <subtitle>"
+companion, then top-level over part, then named over merely mentioned — and FE Manual
+chapters answer to "Foreign Exchange Manual Chapter 12" as well as their subject titles.
 
 ### 5.6 — C6. Stop when an iteration adds no new document
 
@@ -615,6 +623,41 @@ would have carried the peak.
 
 Twenty percent of turns currently exhaust the loop and pay for a `chat.final_synthesis` on
 top. C6 makes most of those unnecessary.
+
+**☑ Landed** (2026-09-26), pinned by `tests/test_early_stop.py` — and measured to do much less
+than the paragraph above predicted. Read this before counting on it.
+
+*As built.* After each round, `_round_added_nothing` compares an evidence fingerprint taken
+before it: documents and text keys (`_sent_text_keys`), passages by index id
+(`_sent_passages`), and — for tools that write neither ledger (values, latest, tags,
+inventory, circular details) — the documents their results cite. Search results are kept out
+of that last set, because their `amended_by` / `references_laws` / withdrawn pointers would
+read as new evidence on every call. It ends the loop only if nothing grew, something has been
+found this turn (an all-empty turn is still looking, and should rephrase), no call in the round
+failed (P02's misread handle was followed by the correcting retry), and it is not already the
+last round. Ending means the existing final synthesis — not `tool_choice="none"` on the live
+conversation, which is what `29386e5` removed after models kept calling tools through it. An
+`early_stop` trace event records it; `trace_readout.py` now reports `early` apart from `CEIL`.
+
+*Measured.* The 2026-09-26 round replayed round by round through the current code (C5
+included), same calls, predicate evaluated after each round: **0 of 15 turns would have
+stopped early.** Every round of P01, P02, P10 and P14 — the four long turns — added new chunks
+or a new document, even where one of its two parallel calls came back as a C5 pointer (P14
+round 2: one pointer, six new chunks). The 15% above was measured *per call*, before C1a, C12
+and C5, when a repeat returned its bytes again; a *round* with nothing new at all is rare once
+the model makes two calls per round and repeats are pointers.
+
+*Not done, deliberately:* tightening the predicate to "no new **document**" — the literal
+reading of the heading. A round that reads further into a document already held is how
+answers are found: C12's motivating failure was the definition on page 15 of an annexure search
+had already surfaced, and P14's third round found the BC&FRF by digging. Stopping there saves a
+round trip and loses the answer. The ceiling hits that remain (P01, P02, P10) are exploration
+with real yield each round; the lever for them is the retrieval the model is compensating for —
+`CHAT_REDESIGN.md` R3/R4 — not a stricter stop.
+
+So C6 is a correct, cheap backstop for the loop that genuinely spins — pointer after pointer,
+which C5's "asking again will not return anything new" makes the likely shape of a stuck turn —
+and not the 1–3 requests per turn this section estimated.
 
 ### 5.7 — C7. Charge conversation history to the turn budget
 

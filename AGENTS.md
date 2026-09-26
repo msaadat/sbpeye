@@ -179,7 +179,9 @@ read circular's `amended_by` — is exempt), *supersession* flags a withdrawn ci
 changed by an `amends` edge, cited without saying so. Warnings never alter the answer; they are
 stored in `chat_messages.verification_json`, returned on the session payload and the stream's
 `done` event, recorded as a `verification` trace event, and rendered under the answer — all
-behind the same admin gate as research steps. Pinned by `tests/test_answer_checks.py`.
+behind the same admin gate as research steps. **Only `_CHAT_VISIBLE_CHECKS` (main.py) reach the
+chat: supersession is turned off there** (stored and traced, not shown). Pinned by
+`tests/test_answer_checks.py`.
 
 ## CLI Commands
 

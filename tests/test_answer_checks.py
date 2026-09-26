@@ -205,7 +205,7 @@ def test_warnings_reach_admins_only_while_they_are_being_measured():
     from sbpeye.main import _message_verification
     from sbpeye.models import ChatMessage
 
-    warning = {"check": "supersession", "severity": "high", "citation": token("old")}
+    warning = {"check": "grounding", "severity": "low", "citation": token("old")}
     stored = ChatMessage(id="m", session_id="s", role="assistant", content="a",
                          verification_json=json.dumps([warning]))
     clean = ChatMessage(id="n", session_id="s", role="assistant", content="a")
@@ -215,6 +215,25 @@ def test_warnings_reach_admins_only_while_they_are_being_measured():
     }
     assert _message_verification(stored, SimpleNamespace(is_admin=False)) == {}
     assert _message_verification(clean, SimpleNamespace(is_admin=True)) == {}
+
+
+def test_supersession_warnings_are_stored_but_not_shown_in_the_chat():
+    """Turned off in the chat: they still run, are stored and traced, and are not shown."""
+    from types import SimpleNamespace
+
+    from sbpeye.main import _message_verification
+    from sbpeye.models import ChatMessage
+
+    supersession = {"check": "supersession", "severity": "high", "citation": token("old")}
+    grounding = {"check": "grounding", "severity": "low", "citation": token("new")}
+    message = ChatMessage(id="m", session_id="s", role="assistant", content="a",
+                          verification_json=json.dumps([supersession, grounding]))
+    admin = SimpleNamespace(is_admin=True)
+
+    assert _message_verification(message, admin) == {"verification": [grounding]}
+    only_supersession = ChatMessage(id="n", session_id="s", role="assistant", content="a",
+                                    verification_json=json.dumps([supersession]))
+    assert _message_verification(only_supersession, admin) == {}
 
 
 # ------------------------------------------------------------ refinements from replay

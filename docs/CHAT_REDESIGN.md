@@ -458,7 +458,10 @@ the "only check 2 withholds" above. Warnings are stored on the message
 (`chat_messages.verification_json`), returned on the session payload and the stream's `done`
 event, recorded as a `verification` trace event (`trace_readout.py` counts them per round), and
 shown under the answer as a collapsible "citation checks flagged" block — open by default only
-for a high-severity one. Behind the same admin gate as the research steps while the rate is
+for a high-severity one. **Supersession warnings are no longer shown in the chat**
+(`_CHAT_VISIBLE_CHECKS`, 2026-09-27): after its false positives on live answers (P06's
+reference spelling, P20's cancelled amender) and the coarse-`amends` noise, it runs, is stored
+and is traced for benchmark measurement, but a reader sees only grounding warnings. Behind the same admin gate as the research steps while the rate is
 measured; a false positive shown to every reader costs trust before the rate is known.
 
 *Grounding (check 2)* is set membership over the turn's ledgers: a cited document is grounded

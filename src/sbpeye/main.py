@@ -3645,16 +3645,31 @@ def _step_headers(message: ChatMessage, user: User) -> list[dict]:
     return [{"label": step.get("label") or "Research step"} for step in _message_steps(message)]
 
 
+# Which R6 checks the chat shows. Every check still runs, is stored on the message and is
+# recorded in the trace, so benchmark rounds keep measuring it; this only decides what a
+# reader sees. Supersession is off: its false positives (reference spellings, coarse
+# `amends` edges) cost more trust in the chat than its hits earn, and warnings are stored
+# when an answer is written, so ones raised before a fix stay on old answers.
+_CHAT_VISIBLE_CHECKS = frozenset({"grounding"})
+
+
+def _chat_visible_warnings(warnings: list | None) -> list[dict]:
+    return [
+        item for item in warnings or []
+        if isinstance(item, dict) and item.get("check") in _CHAT_VISIBLE_CHECKS
+    ]
+
+
 def _message_verification(message: ChatMessage, user: User) -> dict:
     """R6's warnings on one answer, as a payload fragment — empty when there are none.
 
     Behind the same gate as the research steps while warn-only checks are being measured:
     a false positive shown to every reader would cost more trust than the check earns
-    until the rate is known. Lifting the gate exposes every warning recorded meanwhile.
+    until the rate is known. Only `_CHAT_VISIBLE_CHECKS` are shown.
     """
     if not _steps_visible_to(user):
         return {}
-    warnings = [item for item in _safe_json_list(message.verification_json) if isinstance(item, dict)]
+    warnings = _chat_visible_warnings(_safe_json_list(message.verification_json))
     return {"verification": warnings} if warnings else {}
 
 
@@ -4050,8 +4065,9 @@ async def chat_message_stream(
                 verification = _verify_turn(client, response_text, stream_db, turn_circular_ids)
                 message_id = persist(response_text, partial=False, verification=verification)
                 done = {"session_id": session_id, "message_id": message_id}
-                if verification and _steps_visible_to(user):
-                    done["verification"] = verification
+                shown = _chat_visible_warnings(verification)
+                if shown and _steps_visible_to(user):
+                    done["verification"] = shown
                 yield sse("done", done)
         except Exception as e:
             stream_db.rollback()

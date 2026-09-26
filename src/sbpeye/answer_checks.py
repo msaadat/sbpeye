@@ -171,12 +171,28 @@ def _grounding(
 # ---------------------------------------------------------------------- supersession
 
 
+def _reference_key(text: str) -> str:
+    """A reference reduced to what identifies it, for finding it in prose.
+
+    SBP's own references are not written consistently, and an answer writes them the way
+    a person does: "SH&SFD Circular No.04 of 2026 of 2026" (no space, the duplicated year —
+    AGENTS.md, known issues) is "SH&SFD Circular No. 04 of 2026" in the answer, and
+    "IH & SMEFD" is "IH&SMEFD". Case, spacing, punctuation, leading zeros and a repeated
+    trailing year go; the letters and numbers that identify the circular stay. Found in the
+    2026-09-27 round, where P06 named its replacing circular in the first sentence and
+    raised three high warnings for not naming it.
+    """
+    folded = re.sub(r"\b(of\s+(\d{4}))\s+of\s+\2\b", r"\1", (text or "").casefold())
+    tokens = re.findall(r"[a-z]+|\d+", folded)
+    return "".join(str(int(token)) if token.isdigit() else token for token in tokens)
+
+
 def _mentions(answer: str, circular: Circular, cited_ids: set[str]) -> bool:
     """Whether the answer names `circular` — by citation, or by its reference in prose."""
     if circular.id in cited_ids:
         return True
-    reference = (circular.reference or "").strip()
-    return bool(reference) and reference.casefold() in answer.casefold()
+    reference = _reference_key(circular.reference or "")
+    return bool(reference) and reference in _reference_key(answer)
 
 
 def _paragraph_of(answer: str, token: str) -> str:
@@ -208,7 +224,12 @@ def _supersession(
         edges = [edge for edge in circular.amended_by or [] if edge.source is not None]
         edges.sort(key=lambda edge: (edge.source.date is None, edge.source.date), reverse=True)
         replacing = [edge.source for edge in edges if edge.type in ("supersedes", "cancels")]
-        amending = [edge.source for edge in edges if edge.type == "amends"]
+        # An amendment that has itself been withdrawn changes nothing any more: 2026-09-27
+        # P20 was told to name FE Circular No. 02 of 2023, which EPD CL 07/2025 cancelled.
+        amending = [
+            edge.source for edge in edges
+            if edge.type == "amends" and (edge.source.status or "active") not in _WITHDRAWN
+        ]
         token = tokens[circular.id]
         withdrawn = (circular.status or "active") in _WITHDRAWN or bool(replacing)
 

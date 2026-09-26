@@ -1,7 +1,9 @@
 # SBPEye Chat Benchmark — Pilot v1 Answer Key (GRADER ONLY)
 
 Every fact below was verified against the SBPEye corpus on **2026-08-19**, except P11, added
-and verified on **2026-08-23**. Source is named per item so a grader can re-check it.
+and verified on **2026-08-23**, and P16–P20, added and verified on **2026-09-26**. Source is
+named per item so a grader can re-check it. P16–P20 were verified against the *corpus*, not the
+live SBP site — re-check the ⏱ ones against sbp.org.pk before their first round.
 
 **Freshness-sensitive items are marked ⏱ — re-verify before each round.**
 
@@ -469,35 +471,207 @@ MPC appointments to the President or the Governor.
 
 ---
 
+## P16 · Stable retail deposits — Hard · Annexure-only rule
+
+**Source:** **BPRD Circular No. 08 of 2016** (Implementation of Basel III – Liquidity
+Standards), **Annexure C8-Annex.pdf, paras 4.10–4.12** (PDF page 15). The covering letter
+(2,819 characters) describes the LCR and NSFR in general terms and states no run-off rate.
+No later circular amends it.
+
+**Required facts** (E=2 needs both rates *and* both conditions of the definition):
+- **Stable retail deposits: run-off rate 5%.**
+- **Less stable retail deposits: run-off rate 10%.**
+- Stable = retail deposits **fully insured by an effective deposit insurance scheme** (up to
+  the maximum coverage limit) **or by an equivalent public guarantee**, *and* either
+  (a) held in **transactional accounts** (e.g. salary accounts), or (b) the depositor has
+  **other established relationships** with the bank that make withdrawal highly unlikely
+  (e.g. a loan contractually binding the depositor).
+- Less stable = all other retail deposits, **including amounts above the deposit
+  insurance coverage limit**.
+
+**Credit but not required:** a bank that cannot bifurcate must treat the full amount as
+less stable (para 4.12); retail = deposits by natural persons (4.6); in Pakistan term
+deposits are generally treated as demand deposits for the LCR (4.7); minimum LCR 100% since
+31 December 2018 after an 80% / 90% phase-in.
+
+**This item is the C12 failure case.** The failure it catches is an answer saying the rates
+are "not stated in the available circular", or stopping at the covering letter →
+**A=0, E=0** (not F). A generic Basel III answer with correct 5%/10% but no SBP instrument →
+A=2, **B=0**.
+
+**Acceptable citation (B=2):** BPRD Circular No. 08 of 2016 *and* its annexure / the
+paragraph (4.11). The circular alone → B=1.
+
+**Fabrication triggers:** any rate other than 5% / 10% for these categories; asserting that
+Basel's optional 3% stable-deposit rate applies in Pakistan.
+
+---
+
+## P17 · AML Act penalties — **ABSTAIN** (instrument not held)
+
+**The corpus does not hold the Anti-Money Laundering Act, 2010.** Verified: the laws corpus
+holds the AML/CFT/CPF Regulations and two TFS companion documents, and no circular states
+the Act's penalties. `get_law_details` now leads with a `resolution_note` for exactly this
+request (2026-09-26 fix). Before that fix it resolved silently to the Regulations.
+
+What a correct answer *may* say from the corpus: the AML/CFT/CPF Regulations are issued under
+**section 6A(2) of the Act**, and violation of the Regulations "shall attract penal as well
+as administrative actions under the applicable laws/rules/regulations, including the
+**AML/CFT Sanctions Rules, 2020**" (Regulations, preamble).
+
+Score on the abstention scale (rubric §4):
+
+- **2 (100)** — states plainly that the Act's text is not available in SBPEye, and does not
+  state its penalties as sourced. Pointing to the Regulations' s.6A(2) basis or the Sanctions
+  Rules, correctly labelled, is fine.
+- **1 (50)** — gives penalty figures from general knowledge, clearly flagged as not
+  sourced from SBPEye, with no SBPEye citation attached to them.
+- **0 (0)** — states penalties and attaches a citation to the AML/CFT/CPF Regulations (or
+  any held document) as their source → **tick F**. Presenting the Regulations *as* the Act
+  scores 0 on its own.
+
+**Grader note:** the Act is real, so a confident general-knowledge answer may be accurate.
+As with P10, the scored behaviour is knowing what the corpus does and does not hold.
+
+---
+
+## P18 · RCOA submission deadlines — Medium · Supersession + changed figure ⏱
+
+**Source:** **BSD-1 Circular dated 24 January 2025**, "Revision in Data File Structure (DFS)
+under Reporting Chart of Accounts (RCOA) through DAP4", addressed to all banks/DFIs.
+
+**SBP-site quirk (accept either):** SBP publishes this as both **BSD-1 Circular No. 01 of
+2025** and **No. 02 of 2025**, each number with one page to banks/DFIs and one to MFBs; one
+URL even reads "…-no-02-of-2015". Either reference with the 24 January 2025 date → B=2.
+
+**Required facts** (E=2 needs all four, plus the monthly change):
+- **Daily RCOA – 2 working days**
+- **Weekly RCOA – 2 working days**
+- **Monthly RCOA – 5 working days** — *extended from 2 working days* by this circular
+- **Quarterly RCOA – 12 working days**
+
+**Credit but not required:** revised DFS for all RCOA returns are on the DAP4 knowledge
+centre, and the previously used DFS is discontinued.
+
+**Currency traps — each is a real, older figure in the corpus:**
+- Monthly **2 working days**: OSED Circular Letter No. 01 of 2020 (status *amended*) → A=1,
+  **D=0**.
+- Quarterly **14 working days**: OSED Circular Letters No. 02/03 of 2014 (*superseded*);
+  quarterly **18**: OSED Circular Letter No. 01 of 2010 (*superseded*) → **D=0**.
+- Quarterly 12 citing OSED Circular No. 01 of 2017 (*superseded*, same figure) → A=2,
+  **D=1**: right number, withdrawn source.
+
+**Fabrication triggers:** any other day count; asserting a single deadline for all returns.
+
+---
+
+## P19 · Auto financing limits — Hard · Amended figure, three layers ⏱
+
+**Source chain:** Prudential Regulations for Consumer Financing (**BPRD Circular No. 10 of
+2016**), R-11 / R-12 / O-7, as amended by **BPRD Circular Letter No. 29 of 2021** and
+**BPRD Circular Letter No. 19 of 2022** (24 May 2022). No later amendment in the corpus.
+
+**Required facts** (E=2 needs all three):
+- **Maximum tenure: 3 years for vehicles above 1,000cc; 5 years for vehicles up to
+  1,000cc** (BPRD CL 19/2022).
+- **Minimum down payment: 30%** of the vehicle's value (BPRD CL 29/2021; extended by CL
+  19/2022 to all locally assembled/manufactured vehicles, including up to 1,000cc and
+  locally made EVs, which CL 29/2021 had exempted).
+- **Aggregate cap: Rs 3,000,000 per person from all banks/DFIs combined** (CL 29/2021,
+  R-12 para 2). Existing limits above it amortise and cannot be increased.
+
+**Credit but not required:** new and used **imported vehicles are not eligible** (O-7); the
+**Roshan Apni Car** treatment for RDA banks continues; the changes apply to new financing
+not yet approved; debt burden ratio 40% (R-3, CL 29/2021).
+
+**This is the item's trap:** the laws corpus holds **"Prudential Regulations for Consumer
+Financing (as of August 03, 2016)"**, which still says **7 years** (R-11) and **15%**
+(R-12). An answer from it → **A=0, D=0**. An answer from CL 29/2021 alone (5 years, with
+the up-to-1,000cc exemption) → A=1, D=0.
+
+**Supersession check (R6):** BPRD Circular No. 10 of 2016 has four `amends` edges (2020 ×2,
+CL 29/2021, CL 19/2022). An answer that cites it without naming any of them should raise a
+medium R6 warning, so this item doubles as a live test of that check. Note the check is
+satisfied by naming *any* amender — including the 2020 ones, which do not touch auto
+financing — so a clean R6 result here does not by itself mean the answer is current.
+
+**Fabrication triggers:** any tenure, percentage or cap other than the above; a cap per
+bank rather than across all banks/DFIs.
+
+---
+
+## P20 · Export proceeds realisation — Medium · FE Manual chapter by name ⏱
+
+**Source:** **Foreign Exchange Manual, Chapter 12 (Exports), para 6 "Method and period of
+Payment"**, incorporating SBP Notification No. F.E. 1/2022-SB (5 January 2022).
+Footnoted instruments: EPD Circular Letter No. 02 of 2022, FE Circular No. 01 of 2022, EPD
+Circular Letter No. 05 of 2022.
+
+**Required facts** (E=2 needs the base rule, the sight-bill period and one extension rule):
+- Full export value to be received **on the due date or within 120 days of shipment,
+  whichever is earlier**.
+- **DP/CAD/sight shipments: within 45 days** of shipment.
+- Where terms / an irrevocable LC provide **120 days' usance**, proceeds may be repatriated
+  **within 135 days** of shipment.
+- **Extension:** where terms provide payment earlier than 120 days, the AD may extend on a
+  documented written explanation, **not beyond 120 days from shipment**, and **not after**
+  the case has been reported overdue to FEOD, SBP-BSC.
+- **Exception:** **up to 180 days** if the export bills/receivables are **discounted and sold
+  forward** to the AD **before shipment or within 14 days** of it (EPD CL 05/2022).
+
+**Currency traps:** **180 days** as the general period — the pre-2022 rule, reduced to 120 by
+FE Circular No. 01 of 2022 → A=0, D=0. **60 days** comes from EPD Circular Letter No. 04 of
+2023, which covers *sugar exports only* and is superseded → A=0.
+
+**Acceptable citation (B=2):** FE Manual Chapter 12 (para 6); **EPD Circular Letter No. 09 of
+2025** (11 September 2025), which issued the consolidated Chapter 12 now in force; **FE
+Circular No. 01 of 2023** (5 January 2023), which restated para 6 with the same 120 / 45-day
+rules; or the 2022 instruments above. *Added after the 2026-09-27 round:* the key as first
+written named only the 2022 instruments, and that round's answer cited the 2023 and 2025 ones
+correctly.
+
+**Also tests:** the chapter is titled "EXPORTS", with "Chapter 12" only in its part label. Until
+the 2026-09-26 title-match fix, `get_law_details("Foreign Exchange Manual Chapter 12")`
+resolved to the whole Manual.
+
+**Fabrication triggers:** any period other than 45 / 120 / 135 / 180 days as stated; an
+extension beyond 120 days by the AD alone.
+
+---
+
 ## Coverage check
 
 | Dimension the set stresses | Items |
 |---|---|
 | Concept / definitional grounding | P01, P07 |
-| Numeric threshold | P03, P04, P11, P12, P13 |
+| Numeric threshold | P03, P04, P11, P12, P13, P16, P18, P19, P20 |
 | Effective-date reasoning | P03, P05 |
-| Supersession / currency | P04, P06, P11, P12, P13, P15 |
+| Supersession / currency | P04, P06, P11, P12, P13, P15, P18, P19, P20 |
 | Scope & applicability | P05 |
 | Change detection | P08 |
-| Abstention | P09, P10 |
+| Abstention | P09, P10, P17 |
 | Adjacent-framework discrimination | P11, P14 |
 | Statutory procedure rather than threshold | P14 |
+| Operative text only in an annexure | P16 |
+| Instrument the corpus does not hold | P17 |
+| Consolidated document older than its amendments | P19 |
+| Part of a document addressed by its label | P20 |
 
 **Three items (P02, P07, P14) have a widely-believed wrong answer**, so a system answering from
 general knowledge rather than the SBP corpus will fail them visibly. That is the point.
 
 ## Source type
 
-Eight items are answered by naming a **circular**. Seven are answered from a **standing
-regulation or an Act** — a different retrieval and reasoning problem, because the operative text
+Ten items are answered by naming a **circular** (P16 from its annexure). Ten are answered from
+a **standing regulation or an Act** (P17 by saying the Act is not held) — a different retrieval and reasoning problem, because the operative text
 sits in a long consolidated document, is addressed by regulation or section number rather than
 circular number, and is amended in place by later circulars rather than superseded wholesale.
 
 | Source type | Items |
 |---|---|
-| Circular | P03, P04, P05, P06, P08, P09, P10, P11 |
-| Standing regulation | P01, P02, P07, P12, P13 |
-| Act of Parliament | P14, P15 |
+| Circular | P03, P04, P05, P06, P08, P09, P10, P11, P16, P18 |
+| Standing regulation | P01, P02, P07, P12, P13, P19, P20 |
+| Act of Parliament | P14, P15, P17 |
 
 P13 is the sharpest of the regulation-sourced items: the regulation's own body text is stale and
 only the amending circular carries the current figures. P14 is the sharpest of the statutory

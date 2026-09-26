@@ -12,7 +12,7 @@ number plus a hallucination rate.
 | File | Purpose |
 |------|---------|
 | `rubric-v1.md` | The scoring rubric. Five weighted dimensions, a fabrication gate, a silent-substitution tick, and the rater protocol. |
-| `pilot-v1-questions.md` | The pilot questions (15 items). The single source of truth — `run_pilot.py` parses them from here. |
+| `pilot-v1-questions.md` | The pilot questions (20 items). The single source of truth — `run_pilot.py` parses them from here. |
 | `pilot-v1-answer-key.md` | **Grader only.** Verified facts, acceptable citations, and the traps each item sets. |
 | `scoresheet-template.csv` | One pre-filled row per item for a rater to complete. |
 | `run_pilot.py` | Puts the questions to a running SBPEye and captures the answers. |
@@ -102,6 +102,14 @@ rate — the same saturation that prompted P11–P15, one tier harder. Only P12 
 discriminate, and both lose the same half-point of completeness. **The set needs harder items
 before another round is worth running**; a round it cannot fail measures nothing. See
 `results/2026-08-26-sbpeye/assessment.md`.
+
+Five more were added on 2026-09-26 in response — **P16 through P20** — each aimed at a failure
+mode the chat work since then was built to fix, and each with a wrong answer the corpus itself
+supplies: the operative text only in an annexure (P16), an Act the corpus does not hold (P17,
+abstention), older circulars with different deadlines (P18), a consolidated regulation two
+amendments out of date (P19), and an FE Manual chapter asked for by number (P20). Their keys
+were verified against the corpus, not the live site; re-check the ⏱ ones before their first
+round. P19 also exercises the warn-only answer checks (`docs/CHAT_REDESIGN.md` R6).
 
 Note also what two rounds have shown about round size: the 2026-08-23 reruns swung P13 by 100
 points on an identical question. One run per item reports one sample of a distribution — decide

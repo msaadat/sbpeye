@@ -253,3 +253,35 @@ def test_a_check_that_raises_in_the_route_costs_the_reader_nothing(db):
 
     assert _verify_turn(Broken(), "An answer.", db, []) == []
     assert _verify_turn(object(), "An answer.", db, []) == []
+
+
+# ------------------------------------------------------ refinements from 2026-09-27
+
+
+def test_a_replacement_named_the_way_a_person_writes_it_counts(db):
+    """P06: the stored reference is SBP's "No.04 of 2026 of 2026"; the answer wrote
+    "No. 04 of 2026". Three high warnings, all for a replacement named in sentence one."""
+    new = db.get(Circular, "new")
+    new.reference = "BPRD Circular No.11 of 2015 of 2015"
+    db.commit()
+    answer = (
+        f"Issued under BPRD Circular No. 11 of 2015, which superseded:\n\n"
+        f"1. {token('old')}"
+    )
+
+    assert check(db, answer) == []
+
+
+def test_a_reference_is_not_found_inside_a_longer_one(db):
+    """No. 1 of 2015 must not be read as a mention of No. 11 of 2015."""
+    answer = f"The limit is PKR 1m under {token('old')}; see BPRD Circular No. 1 of 2015."
+
+    assert kinds(check(db, answer)) == [("supersession", "high")]
+
+
+def test_an_amender_that_was_itself_withdrawn_is_not_required(db):
+    """P20: told to name FE Circular No. 02 of 2023, which a later circular cancelled."""
+    db.get(Circular, "amender").status = "cancelled"
+    db.commit()
+
+    assert check(db, f"The threshold is 10% under {token('base')}.") == []

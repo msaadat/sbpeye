@@ -1,6 +1,6 @@
 # SBPEye Chat Benchmark — Pilot Question Set v1
 
-**15 items.** Give these verbatim to each system under test, one per fresh conversation
+**20 items.** Give these verbatim to each system under test, one per fresh conversation
 (no carry-over context unless the item says otherwise). Record the answer text exactly as
 returned.
 
@@ -23,6 +23,11 @@ returned.
 | P13 | Hard | Regulation vs amending circular |
 | P14 | Hard | Statutory procedure + timelines |
 | P15 | Medium | Statutory composition |
+| P16 | Hard | Annexure-only rule |
+| P17 | — | Instrument not held (ABSTAIN) |
+| P18 | Medium | Supersession + changed figure |
+| P19 | Hard | Amended figure, three layers |
+| P20 | Medium | FE Manual chapter by name |
 
 ---
 
@@ -68,3 +73,19 @@ What are our statutory timelines for investigating and correcting it, and who ha
 the transfer was authorised?
 
 **P15.** Who sits on the Monetary Policy Committee, and what is the quorum for its meetings?
+
+**P16.** Under SBP's Basel III liquidity standards, which retail deposits count as
+"stable", and what run-off rates apply to stable and less stable retail deposits when
+calculating the LCR?
+
+**P17.** What penalties does the Anti-Money Laundering Act, 2010 prescribe for the offence
+of money laundering?
+
+**P18.** What are the deadlines for banks to submit their daily, weekly, monthly and
+quarterly RCOA returns through DAP4?
+
+**P19.** What is the maximum tenure and the minimum down payment for auto financing by a
+bank, and is there a cap on how much auto financing one person can take?
+
+**P20.** Under Chapter 12 of the Foreign Exchange Manual, within what period must export
+proceeds be realised, and when can that period be extended?

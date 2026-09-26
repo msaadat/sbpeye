@@ -91,11 +91,15 @@ TAG_TAXONOMY = [
 ]
 
 
-# Human-readable activity labels for the chat status stream. Keys must match the
-# tool function names declared in ``TOOLS`` below.
+# Human-readable activity labels for the chat status stream. The first three keys are
+# the tool function names declared in ``TOOLS`` below; the rest are the names those
+# replaced (R5a), kept because a model can still call one from replayed history and
+# `_execute_tool` still serves it.
 TOOL_LABELS = {
-    "search_selected_documents": "Searching selected documents",
     "search_corpus": "Searching circulars and laws",
+    "open_document": "Reading the document",
+    "list_documents": "Listing documents",
+    "search_selected_documents": "Searching selected documents",
     "get_latest_circulars": "Fetching latest circulars",
     "get_circular_details": "Reading circular details",
     "get_law_details": "Reading the law text",
@@ -134,332 +138,317 @@ def tool_activity_label(name: str) -> str:
     return TOOL_LABELS.get(name, name.replace("_", " ").strip().capitalize())
 
 
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "search_selected_documents",
-            "description": "Search passages within the circulars currently selected for this chat, including their attachments. Use this to inspect full text, find exact requirements, or retrieve additional passages. The server enforces the selected-document scope.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "A focused question or search phrase for the selected documents"},
-                    "limit": {"type": "integer", "description": "Number of passages to return (1-10)", "default": 5},
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
+# The chat's tool schema — `CHAT_REDESIGN.md` R5a: one search, one reader, one lister,
+# and the values table when there is enough of it to be worth asking.
+#
+# It was nine tools and 16,533 characters, re-sent on every round of every turn, and the
+# nine did not do nine things. Three read inside one document — a circular, an annexure,
+# an Act — and the split between them cost routing prose on both sides: the Act reader's
+# description had to warn that the circular reader "CANNOT retrieve an Act", and a law
+# citation handed to the wrong one came back as a circular that merely mentions it. Three
+# more listed documents as pointer rows, and one searched the pinned selection. The
+# handlers behind them are unchanged; `_execute_tool` routes the new names onto them and
+# still serves the old ones, because a replayed conversation can carry a call to one.
+_SEARCH_CORPUS_DESCRIPTION = (
+    "Search everything SBPEye holds — circulars AND the laws, Acts, regulations "
+    "and guidelines corpus — by keyword, topic, department, tag or year. Department, "
+    "tag and year filter circulars only, so a filtered search leaves out the laws. This is the "
+    "default search: use it for any question about a subject, rule, or topic, "
+    "whether the answer turns out to sit in a circular or in an Act.\n"
+    "Returns TWO independently ranked lists of CIRCULARS, deliberately not "
+    "merged, plus `reference_matches` for any exact circular reference in the "
+    "query, plus `law_results` for the laws corpus:\n"
+    "- `lexical_results`: keyword/BM25 ranking. Favours circulars whose title and "
+    "text repeat the query's words.\n"
+    "- `semantic_results`: meaning-based ranking over passages, including the text "
+    "of attached annexures and frameworks. Finds circulars that answer the question "
+    "without using its words.\n"
+    "Judge both lists yourself; neither is authoritative. Each entry carries "
+    "`lexical_rank` and `semantic_rank`, so you can see which circulars both "
+    "retrievers agreed on. A circular both arms returned, or one an earlier "
+    "search in this conversation already returned, carries its text ONCE: the "
+    "later entry is marked `duplicate_of_earlier_entry` and names in "
+    "`text_provided_earlier` what the first entry gave you. That is a pointer "
+    "upwards, not a missing document — scroll back for the text rather than "
+    "fetching it again. A repeat entry that carries `matching_passages` with "
+    "`passages_not_provided_earlier` is bringing you passages of that document "
+    "no earlier entry did — a sharper query reached a different part of its "
+    "annexure — so read them; one with `letter_not_provided_earlier` carries "
+    "the full letter for the first time. Pay particular attention to a circular ranked highly by "
+    "`semantic_results` whose title looks unrelated — that usually means the answer "
+    "sits in an attachment rather than the covering letter, and consolidated "
+    "frameworks that revise earlier limits often look like this. Open it with "
+    "open_document to read the full document set before concluding.\n"
+    "`matching_passages` are the retrieved passages in full — quote from these. "
+    "`matching_passage_excerpt`, where it appears instead, is a short window and "
+    "is often not the passage that answers the question.\n"
+    "`full_circular_text` is the circular's complete covering LETTER, not its "
+    "complete content — quote it rather than spending an open_document call to "
+    "re-read the same letter. `annexures` lists the circular's attachments, each "
+    "with its size and `in_this_result`; one marked `no` is text that is NOT in "
+    "this result — open it with open_document by its citation. A letter that "
+    "announces a change without stating "
+    "its terms ('details are at Annexure', 'the Framework has been amended') is a "
+    "pointer, not an answer: the operative figures live in the annexure, and "
+    "revised limits usually arrive this way. Do not conclude from an older "
+    "circular that states a figure outright over a newer one whose figure is in "
+    "an annexure you have not read — open the newer one first, with `page` or "
+    "`section` when a passage or contents listing has already told you where the "
+    "figure is. Repeating a search does not open an annexure; open_document does.\n"
+    "CURRENCY. The ranked lists hold circulars that are still in force. One "
+    "that matched but has been superseded or cancelled is moved to "
+    "`withdrawn_matches` — citation, title, date and `superseded_by`, with no "
+    "text — so you can still see it matched and open it if the question turns "
+    "out to be about the old rule. It is demoted, never hidden: a circular you "
+    "name outright always comes back in full under `reference_matches`, with "
+    "its `replaced_by` naming what took its place.\n"
+    "A result carrying `amended_by` is STILL THE RULE — something later "
+    "changed part of it, and the entry names those circulars with their "
+    "dates. Read the amender before quoting any figure, threshold or "
+    "deadline from an amended circular: the base text still shows the old "
+    "number, and nothing in it says so. `older_changes_not_shown` counts "
+    "amendments beyond the three most recent. Never treat `amended` as a "
+    "reason to discard a circular — most amendments add to a circular or "
+    "clarify it rather than change what it requires.\n"
+    "`law_results` is the statute and regulation corpus, ranked separately "
+    "because a rank there is a rank among laws and cannot be compared with a "
+    "rank among circulars. Each entry carries a `[[l:...]]` citation and short "
+    "`passages`. A statute is far too long to return whole, so these passages "
+    "are a pointer, not the provision: when the answer depends on what an Act "
+    "actually says — its composition, its timelines, its thresholds — open it "
+    "with open_document and quote from that. A circular that merely mentions "
+    "an Act is not a source for what the Act requires. `references_laws` on a "
+    "circular names the Acts and regulations it refers to, as citations "
+    "open_document can open."
+)
+
+# Said only on a turn that has a selection: on any other turn `scope` has nothing to
+# search, and a schema that describes it reads as a capability (see `tools_for_turn`).
+_SEARCH_SCOPE_DESCRIPTION = (
+    "\nSCOPE. `scope: 'selected'` searches only the circulars selected for this "
+    "chat — their complete text and attachments — and returns `results`, the "
+    "matched passages. Use it when the passages already in your context do not "
+    "carry enough detail; attachment content is not unavailable merely because it "
+    "was not included there."
+)
+
+_SEARCH_CORPUS_PROPERTIES = {
+    "query": {"type": "string", "description": "Search terms. Examples: 'TT remittance', 'foreign exchange rules', 'AML guidelines', 'KYC requirements'"},
+    "department": {"type": "string", "description": "Optional department name to filter by, e.g. 'BPRD', 'Exchange Policy'"},
+    "tag": {"type": "string", "description": "Optional tag to filter by, e.g. 'Remittance', 'Forex', 'AML'"},
+    "start_year": {"type": "integer", "description": "Optional earliest circular year, e.g. 2022 for anything issued since"},
+    "end_year": {"type": "integer", "description": "Optional latest circular year"},
+    "limit": {"type": "integer", "description": "Max results to return (1-50)", "default": 10},
+}
+
+
+def _search_corpus_tool(*, scoped: bool) -> dict:
+    properties = dict(_SEARCH_CORPUS_PROPERTIES)
+    description = _SEARCH_CORPUS_DESCRIPTION
+    if scoped:
+        properties["scope"] = {
+            "type": "string",
+            "enum": ["corpus", "selected"],
+            "description": "'corpus' (default) searches everything; 'selected' searches only the circulars selected for this chat",
+            "default": "corpus",
+        }
+        description += _SEARCH_SCOPE_DESCRIPTION
+    return {
         "type": "function",
         "function": {
             "name": "search_corpus",
-            "description": (
-                "Search everything SBPEye holds — circulars AND the laws, Acts, regulations "
-                "and guidelines corpus — by keyword, topic, department, or tag. This is the "
-                "default search: use it for any question about a subject, rule, or topic, "
-                "whether the answer turns out to sit in a circular or in an Act.\n"
-                "Returns TWO independently ranked lists of CIRCULARS, deliberately not "
-                "merged, plus `reference_matches` for any exact circular reference in the "
-                "query, plus `law_results` for the laws corpus:\n"
-                "- `lexical_results`: keyword/BM25 ranking. Favours circulars whose title and "
-                "text repeat the query's words.\n"
-                "- `semantic_results`: meaning-based ranking over passages, including the text "
-                "of attached annexures and frameworks. Finds circulars that answer the question "
-                "without using its words.\n"
-                "Judge both lists yourself; neither is authoritative. Each entry carries "
-                "`lexical_rank` and `semantic_rank`, so you can see which circulars both "
-                "retrievers agreed on. A circular both arms returned, or one an earlier "
-                "search in this conversation already returned, carries its text ONCE: the "
-                "later entry is marked `duplicate_of_earlier_entry` and names in "
-                "`text_provided_earlier` what the first entry gave you. That is a pointer "
-                "upwards, not a missing document — scroll back for the text rather than "
-                "fetching it again. A repeat entry that carries `matching_passages` with "
-                "`passages_not_provided_earlier` is bringing you passages of that document "
-                "no earlier entry did — a sharper query reached a different part of its "
-                "annexure — so read them; one with `letter_not_provided_earlier` carries "
-                "the full letter for the first time. Pay particular attention to a circular ranked highly by "
-                "`semantic_results` whose title looks unrelated — that usually means the answer "
-                "sits in an attachment rather than the covering letter, and consolidated "
-                "frameworks that revise earlier limits often look like this. Call "
-                "get_circular_details on it to read the full document set before concluding.\n"
-                "`matching_passages` are the retrieved passages in full — quote from these. "
-                "`matching_passage_excerpt`, where it appears instead, is a short window and "
-                "is often not the passage that answers the question.\n"
-                "`full_circular_text` is the circular's complete covering LETTER, not its "
-                "complete content — quote it rather than spending a get_circular_details "
-                "call to re-read the same letter. `annexures` lists the circular's "
-                "attachments, each with its size and `in_this_result`; one marked `no` is "
-                "text that is NOT in this result — open it with read_attachment by its "
-                "citation. A letter that announces a change without stating "
-                "its terms ('details are at Annexure', 'the Framework has been amended') is a "
-                "pointer, not an answer: the operative figures live in the annexure, and "
-                "revised limits usually arrive this way. Do not conclude from an older "
-                "circular that states a figure outright over a newer one whose figure is in "
-                "an annexure you have not read — call get_circular_details on the newer one "
-                "first, or read_attachment when a passage or contents listing has already "
-                "told you which page or section holds it. Repeating a search does not open "
-                "an annexure; read_attachment does.\n"
-                "CURRENCY. The ranked lists hold circulars that are still in force. One "
-                "that matched but has been superseded or cancelled is moved to "
-                "`withdrawn_matches` — citation, title, date and `superseded_by`, with no "
-                "text — so you can still see it matched and open it if the question turns "
-                "out to be about the old rule. It is demoted, never hidden: a circular you "
-                "name outright always comes back in full under `reference_matches`, with "
-                "its `replaced_by` naming what took its place.\n"
-                "A result carrying `amended_by` is STILL THE RULE — something later "
-                "changed part of it, and the entry names those circulars with their "
-                "dates. Read the amender before quoting any figure, threshold or "
-                "deadline from an amended circular: the base text still shows the old "
-                "number, and nothing in it says so. `older_changes_not_shown` counts "
-                "amendments beyond the three most recent. Never treat `amended` as a "
-                "reason to discard a circular — most amendments add to a circular or "
-                "clarify it rather than change what it requires.\n"
-                "`law_results` is the statute and regulation corpus, ranked separately "
-                "because a rank there is a rank among laws and cannot be compared with a "
-                "rank among circulars. Each entry carries a `[[l:...]]` citation and short "
-                "`passages`. A statute is far too long to return whole, so these passages "
-                "are a pointer, not the provision: when the answer depends on what an Act "
-                "actually says — its composition, its timelines, its thresholds — call "
-                "get_law_details on it and quote from that. A circular that merely mentions "
-                "an Act is not a source for what the Act requires. `references_laws` on a "
-                "circular names the Acts and regulations it refers to, as citations "
-                "get_law_details can open."
-            ),
+            "description": description,
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Search terms. Examples: 'TT remittance', 'foreign exchange rules', 'AML guidelines', 'KYC requirements'"},
-                    "department": {"type": "string", "description": "Optional department name to filter by, e.g. 'BPRD', 'Exchange Policy'"},
-                    "tag": {"type": "string", "description": "Optional tag to filter by, e.g. 'Remittance', 'Forex', 'AML'"},
-                    "limit": {"type": "integer", "description": "Max results to return (1-50)", "default": 10}
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_latest_circulars",
-            "description": "Retrieve the most recent circulars from the database, optionally filtered by department or topic. Use this when the user asks for the latest or most recent circulars.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "department": {"type": "string", "description": "Optional department name to filter by"},
-                    "limit": {"type": "integer", "description": "Number of circulars to return (1-20)", "default": 5}
-                }
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_circular_details",
-            "description": (
-                "Fetch a specific circular by reference number or title: its covering "
-                "letter in full, an attachment manifest, and passages from its annexures "
-                "and attachments matched to `query` (or, without one, to the user's "
-                "question). Use this when the user refers to a specific circular (e.g. "
-                "'BPRD Circular No. 12 of 2023') or needs its complete document set. "
-                "Passages this conversation has already shown you are listed as "
-                "'already provided earlier' rather than repeated, so a second call with "
-                "a sharper `query` returns what the first did not. To read a known page "
-                "or paragraph of an attachment, use read_attachment instead."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "circular_reference": {"type": "string", "description": "The circular's citation as you were shown it (e.g. '[[c:BPRD-CL-12-2023]]'), its reference number ('BPRD Circular No. 12 of 2023'), or its title"},
-                    "query": {"type": "string", "description": "What you need from inside its attachments, e.g. 'definition of stable retail deposits and their run-off rate'. Defaults to the user's question."}
-                },
-                "required": ["circular_reference"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_attachment",
-            "description": (
-                "Read inside one attachment of a circular — an annexure, framework, "
-                "instructions or guidelines PDF behind a covering letter — the way "
-                "get_law_details reads inside an Act. Use it whenever a search result "
-                "lists an `annexures` entry you have not read, a contents listing, or a "
-                "`[[a:...]]` citation and the answer is in the attachment rather than the "
-                "letter: the letter announces the rule, the annexure states it.\n"
-                "Give `circular_reference`, name the `attachment` when the circular has "
-                "more than one (its filename or `[[a:...]]` citation), and ask for one of:\n"
-                "- `page`: every chunk of that page, in order. Use when you have seen a "
-                "page number — in a contents listing, or on a passage already returned.\n"
-                "- `section`: a paragraph or section number as the document numbers it, "
-                "e.g. '4.11', '3.4', 'Part 2'. Semantic search cannot find a number by "
-                "meaning; this scans for the heading directly.\n"
-                "- `query`: what you need, by meaning and keyword. Matches come back with "
-                "the chunk either side, so a paragraph split across a chunk boundary "
-                "arrives whole.\n"
-                "Passages are whole index chunks with `chunk_index` and `page`; consecutive "
-                "indexes are consecutive text. `pages` gives the attachment's page range. "
-                "Chunks already returned in this conversation are not repeated — "
-                "`provided_earlier` names them; they are above."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "circular_reference": {"type": "string", "description": "The circular the attachment belongs to — its citation ('[[c:BPRD-C-08-2016]]') or reference ('BPRD Circular No. 08 of 2016')"},
-                    "attachment": {"type": "string", "description": "Which attachment, by filename ('C8-Annex.pdf') or citation ('[[a:C8-Annex]]'). Optional when the circular has one attachment."},
-                    "page": {"type": "integer", "description": "A page number of the attachment to return whole"},
-                    "section": {"type": "string", "description": "A paragraph or section number to locate, e.g. '4.11', 'Part 2', 'B'"},
-                    "query": {"type": "string", "description": "What you need from the attachment, e.g. 'stable retail deposits definition run-off rate'"},
-                    "limit": {"type": "integer", "description": "Number of matched passages for `query` before neighbour expansion (1-10)", "default": 5}
-                },
-                "required": ["circular_reference"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_law_details",
-            "description": (
-                "Read inside one law, Act, regulation or guideline — the equivalent of "
-                "get_circular_details for the statute corpus. Use it whenever an answer "
-                "depends on what an Act or a set of Regulations actually says: statutory "
-                "timelines, the composition of a body, definitions, thresholds set in "
-                "primary legislation. get_circular_details CANNOT retrieve an Act — it "
-                "searches circulars only, and asking it for one returns an unrelated "
-                "circular that happens to mention the Act by name.\n"
-                "Give `law_title` and a `query` describing what you need from it; the "
-                "matched passages come back with the passages either side of them, so a "
-                "provision split across a page boundary arrives whole. Give `section` "
-                "instead when you already know the provision number — semantic search "
-                "cannot find 'section 9D' by meaning.\n"
-                "The result names the document it actually resolved to in "
-                "`resolved_title`, and when that is a different instrument a "
-                "`resolution_note` says the one you asked for is not in the corpus. Then "
-                "say so rather than answer from whatever came back. Chunks already returned in "
-                "this conversation are not repeated — `provided_earlier` names them; they "
-                "are above, and asking again returns nothing new."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "law_title": {"type": "string", "description": "The law's title, e.g. 'State Bank of Pakistan Act, 1956', 'Payment Systems and Electronic Fund Transfers Act, 2007', 'Prudential Regulations for SME Financing'"},
-                    "query": {"type": "string", "description": "What you need from inside it, e.g. 'composition and quorum of the Monetary Policy Committee'"},
-                    "section": {"type": "string", "description": "Optional provision number to fetch directly, e.g. '9D', '36', 'R-6'. Use when you know it; semantic search cannot find a section by its number."},
-                    "limit": {"type": "integer", "description": "Number of matched passages before neighbour expansion (1-10)", "default": 5}
-                },
-                "required": ["law_title"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "query_regulatory_values",
-            "description": "Query the structured database of regulatory VALUES extracted from circulars — ratios (CAR, LCR, NSFR, Leverage Ratio), monetary thresholds (minimum paid-up capital, MCR, exposure limits), percentage limits, numeric limits, and deadlines. Use this for any quantitative question, e.g. 'what is the current minimum capital requirement for MFBs?', 'which circulars set a threshold above 10%?', 'what is the required CAR?'. Returns each value with its metric, normalized number, unit, comparator (min/max/exactly), subject it applies to, effective date, and a citation to the source circular.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "metric": {"type": "string", "description": "Metric name to match, e.g. 'CAR', 'LCR', 'Paid-up Capital', 'MCR' (substring match)"},
-                    "subject": {"type": "string", "description": "Who the value applies to, e.g. 'MFB', 'locally incorporated banks' (substring match)"},
-                    "entity_type": {"type": "string", "description": "Optional: ratio | monetary_threshold | percentage_limit | numeric_limit | deadline | effective_date"},
-                    "unit": {"type": "string", "description": "Optional unit filter: '%', 'PKR', 'USD', 'times', 'days', 'months'"},
-                    "comparator": {"type": "string", "description": "Optional: min, max, exactly, or range"},
-                    "min_value": {"type": "number", "description": "Only return values whose normalized number is >= this (e.g. 10 with unit '%' for 'above 10%')"},
-                    "max_value": {"type": "number", "description": "Only return values whose normalized number is <= this"},
-                    "current_only": {"type": "boolean", "description": "If true, exclude superseded/cancelled circulars and keep only the latest value per metric+subject. Use for 'current' value questions."},
-                    "limit": {"type": "integer", "description": "Max results (1-50)", "default": 20}
-                }
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_circulars_by_tag",
-            "description": "Retrieve all circulars that have a specific AI-generated tag. Use this when the user asks for circulars categorized under a specific topic like 'AML', 'Remittance', 'Forex', etc.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "tag": {"type": "string", "description": "The tag name, e.g. 'AML', 'Remittance', 'Forex', 'Trade Finance'"},
-                    "limit": {"type": "integer", "description": "Number of circulars to return (1-50)", "default": 10}
-                },
-                "required": ["tag"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_regulatory_inventory",
-            "description": (
-                "Sweep EVERY circular and regulation for every document that "
-                "mentions a subject, and return them as an inventory. Use this only for "
-                "exhaustive 'list all / find every / which documents' questions, e.g. 'list all "
-                "circulars that talk about AML' or 'which regulations mention contact centres'. "
-                "It expands the subject into a full vocabulary (acronyms, spellings, plurals) "
-                "and searches with no result cutoff, so it finds documents that mention the "
-                "subject in passing, which ordinary search misses. It is much slower than "
-                "search_corpus — prefer that tool for ordinary questions about a topic. "
-                "Each row is a pointer, never a reading: the passage is one short excerpt, so "
-                "to learn what a document says, call get_circular_details or get_law_details "
-                "on it. "
-                "IMPORTANT: results are UNREVIEWED candidates. Every returned document contains "
-                "one of the search terms, but nothing has judged whether it genuinely discusses "
-                "the subject, so some will be false matches (a term appearing in an address or "
-                "a passing reference). Say so when presenting them, and use each item's passage "
-                "to judge relevance yourself."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "The subject to take inventory of, e.g. 'anti-money laundering', 'responsibilities of internal audit', 'call centres'"},
-                    "sources": {"type": "string", "description": "Which corpus to sweep: 'all', 'circulars', or 'laws'", "default": "all"},
-                    "department": {"type": "string", "description": "Optional department filter, e.g. 'BPRD'"},
-                    "start_year": {"type": "integer", "description": "Optional earliest circular year"},
-                    "end_year": {"type": "integer", "description": "Optional latest circular year"},
-                    "limit": {"type": "integer", "description": "Optional. Omit to receive every matching document that fits the context budget, which is what an inventory question needs. Set it only to deliberately sample."}
-                },
-                "required": ["query"]
-            }
-        }
+                "properties": properties,
+                "required": ["query"],
+            },
+        },
     }
+
+
+_OPEN_DOCUMENT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "open_document",
+        "description": (
+            "Read inside one document: a circular, one of its attachments (an annexure, "
+            "framework or guidelines PDF behind a covering letter), or a law, Act or "
+            "regulation. Name it in `document` by the citation you were shown — "
+            "[[c:...]], [[a:...]] or [[l:...]] — or by its reference number or title. "
+            "When the question itself names the document, open it by that name "
+            "directly: no search is needed first. "
+            "What comes back depends on what it is:\n"
+            "- a circular: its covering letter in full, its attachment list, and "
+            "passages from its annexures matched to `query` (by default, the user's "
+            "question).\n"
+            "- an attachment — an [[a:...]] citation, or a circular given with "
+            "`attachment`, `page` or `section`: passages from inside it. `page` returns "
+            "that page whole; `section` finds a paragraph by the number the document "
+            "gives it ('4.11', 'Part 2'), which semantic search cannot find by meaning; "
+            "`query` matches by meaning and keyword. Name the `attachment` when the "
+            "circular has more than one.\n"
+            "- a law: passages from the edition in force matched to `query`, or the "
+            "provision numbered `section` ('9D', 'R-6').\n"
+            "Matches come back with the passage either side, so a provision split "
+            "across a boundary arrives whole. A search result that names the page, "
+            "section, annexure or Act holding the answer is a reason to open it, not "
+            "to search again: a letter announces a rule and its annexure states it, and "
+            "a circular that cites an Act is not a source for what the Act requires.\n"
+            "A `resolution_note` means what came back is not exactly what you named — "
+            "the closest match, or a different instrument because the one you named is "
+            "not in the corpus. Then say so rather than answer from it as if it were. "
+            "Passages already returned in this conversation are not repeated: "
+            "`provided_earlier` names them, and they are above."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "document": {"type": "string", "description": "The citation as you were shown it ('[[c:BPRD-C-08-2016]]', '[[a:C8-Annex]]', '[[l:SBP-Act-1956]]'), a circular reference ('BPRD Circular No. 08 of 2016'), or a title ('Payment Systems and Electronic Fund Transfers Act, 2007')"},
+                "query": {"type": "string", "description": "What you need from inside it, e.g. 'definition of stable retail deposits and their run-off rate'"},
+                "section": {"type": "string", "description": "A paragraph, section or provision number to locate, e.g. '4.11', 'Part 2', '9D', 'R-6'"},
+                "page": {"type": "integer", "description": "A page of an attachment to return whole"},
+                "attachment": {"type": "string", "description": "Which attachment of a circular, by filename ('C8-Annex.pdf') or citation. Optional when it has one."},
+                "limit": {"type": "integer", "description": "Matched passages before neighbour expansion (1-10)", "default": 5},
+            },
+            "required": ["document"],
+        },
+    },
+}
+
+_LIST_DOCUMENTS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "list_documents",
+        "description": (
+            "List documents as pointer rows — citation, title, reference, date, status — "
+            "never their text. Two modes:\n"
+            "- without `query`: circulars, newest first, filtered by `department`, `tag` "
+            "and years. For 'the latest circulars', 'what BPRD issued in 2024', "
+            "'circulars tagged AML'.\n"
+            "- with `query`: an exhaustive sweep of EVERY circular and regulation that "
+            "mentions the subject, for 'list all / find every / which documents' "
+            "questions. It expands the subject into a full vocabulary (acronyms, "
+            "spellings, plurals) and has no result cutoff, so it finds documents that "
+            "mention the subject in passing, which ordinary search misses. It is much "
+            "slower than search_corpus — use that for ordinary questions about a topic. "
+            "These rows are UNREVIEWED candidates: each contains a search term, but "
+            "nothing has judged whether it genuinely discusses the subject, so some are "
+            "false matches. Say so when presenting them, and judge each by its passage.\n"
+            "To learn what a listed document says, open it with open_document."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Optional. The subject to take inventory of, e.g. 'anti-money laundering', 'call centres'. Omit to list by date."},
+                "department": {"type": "string", "description": "Optional department filter, e.g. 'BPRD'"},
+                "tag": {"type": "string", "description": "Optional tag filter, e.g. 'AML', 'Remittance'. Only without `query`."},
+                "start_year": {"type": "integer", "description": "Optional earliest circular year"},
+                "end_year": {"type": "integer", "description": "Optional latest circular year"},
+                "sources": {"type": "string", "description": "With `query`: which corpus to sweep — 'all', 'circulars' or 'laws'", "default": "all"},
+                "limit": {"type": "integer", "description": "Without `query`: rows to return (1-50, default 10). With `query`: omit to receive every matching document that fits the context budget, which is what an inventory question needs; set it only to deliberately sample."},
+            },
+        },
+    },
+}
+
+_QUERY_VALUES_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "query_regulatory_values",
+        "description": "Query the structured database of regulatory VALUES extracted from circulars — ratios (CAR, LCR, NSFR, Leverage Ratio), monetary thresholds (minimum paid-up capital, MCR, exposure limits), percentage limits, numeric limits, and deadlines. Use this for any quantitative question, e.g. 'what is the current minimum capital requirement for MFBs?', 'which circulars set a threshold above 10%?', 'what is the required CAR?'. Returns each value with its metric, normalized number, unit, comparator (min/max/exactly), subject it applies to, effective date, and a citation to the source circular.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "metric": {"type": "string", "description": "Metric name to match, e.g. 'CAR', 'LCR', 'Paid-up Capital', 'MCR' (substring match)"},
+                "subject": {"type": "string", "description": "Who the value applies to, e.g. 'MFB', 'locally incorporated banks' (substring match)"},
+                "entity_type": {"type": "string", "description": "Optional: ratio | monetary_threshold | percentage_limit | numeric_limit | deadline | effective_date"},
+                "unit": {"type": "string", "description": "Optional unit filter: '%', 'PKR', 'USD', 'times', 'days', 'months'"},
+                "comparator": {"type": "string", "description": "Optional: min, max, exactly, or range"},
+                "min_value": {"type": "number", "description": "Only return values whose normalized number is >= this (e.g. 10 with unit '%' for 'above 10%')"},
+                "max_value": {"type": "number", "description": "Only return values whose normalized number is <= this"},
+                "current_only": {"type": "boolean", "description": "If true, exclude superseded/cancelled circulars and keep only the latest value per metric+subject. Use for 'current' value questions."},
+                "limit": {"type": "integer", "description": "Max results (1-50)", "default": 20},
+            },
+        },
+    },
+}
+
+# Every tool a turn can be offered, in its fullest form. A given turn gets the subset
+# `tools_for_turn` decides it can serve.
+TOOLS = [
+    _search_corpus_tool(scoped=True),
+    _OPEN_DOCUMENT_TOOL,
+    _LIST_DOCUMENTS_TOOL,
+    _QUERY_VALUES_TOOL,
 ]
+_SEARCH_CORPUS_UNSCOPED = _search_corpus_tool(scoped=False)
 
-# Tools whose server-side implementation can only fail without pre-selected circulars.
-# `search_selected_documents` returns {"error": "No circulars are selected for this chat"}
-# and nothing else when the selection is empty — see `_execute_tool`.
-_SELECTION_ONLY_TOOLS = frozenset({"search_selected_documents"})
+# `query_regulatory_values` answers from `circular_entities`, which holds what the entity
+# extraction pass has been run over: 57 values from 7 of 3,655 circulars on 2026-09-26.
+# Over that, most quantitative questions get nothing back — or one circular's figure
+# presented as the corpus's — and offering the tool costs ~1,900 characters on every
+# round of every turn. `CHAT_REDESIGN.md` §8: an intent whose backing table is below a
+# coverage threshold is not offered. A tenth of the circulars is a floor for "extraction
+# has been run over the corpus", not a claim that 10% is enough; only some circulars
+# state a value at all, so a complete run lands well above it.
+VALUES_TOOL_MIN_COVERAGE = 0.10
 
 
-def tools_for_turn(selected_circular_ids: list[str] | None) -> list[dict]:
+def values_coverage(db: Session | None) -> float:
+    """The share of circulars `circular_entities` holds a value from, 0.0 without a db."""
+    if db is None:
+        return 0.0
+    from sqlalchemy import func
+
+    from .models import Circular, CircularEntity
+
+    try:
+        circulars = db.query(func.count(Circular.id)).scalar() or 0
+        if not circulars:
+            return 0.0
+        covered = db.query(
+            func.count(func.distinct(CircularEntity.circular_id))
+        ).filter(CircularEntity.circular_id.isnot(None)).scalar() or 0
+    except Exception:
+        # A turn is not worth failing over a coverage probe; the tool is simply withheld.
+        return 0.0
+    return covered / circulars
+
+
+def tools_for_turn(
+    selected_circular_ids: list[str] | None, db: Session | None = None,
+) -> list[dict]:
     """The tool schema for one chat turn, minus what this turn cannot serve.
 
-    `_chat_system_prompt` already refuses to name `search_selected_documents` outside the
-    selected branch, and `test_no_prompt_advertises_a_tool_its_path_cannot_call` pins that:
-    "each prompt offers only what that path can actually do". The schema was never held to
-    the same rule. It was the module constant on both loop paths, so a turn with no
-    selection described the tool to the model ("The server enforces the selected-document
-    scope" — which reads as a capability), and the guard in `_execute_tool` then answered
-    every call with an error.
+    `_chat_system_prompt` already refuses to describe a selected-document search outside
+    the selected branch, and `test_no_prompt_advertises_a_tool_its_path_cannot_call` pins
+    that: "each prompt offers only what that path can actually do". The schema is held to
+    the same rule. When it was the module constant on both loop paths, a turn with no
+    selection described the selection search to the model ("The server enforces the
+    selected-document scope" — which reads as a capability), and the guard in
+    `_execute_tool` then answered every call with an error.
 
     Measured on chat session `48655b06` (benchmark P14): the model called it at iteration 3
     of 5, got `{"error": "No circulars are selected for this chat"}`, and spent a fifth of
-    the turn's tool budget on a call that could not have succeeded. It was still fetching
-    useful provisions when the ceiling cut it off two iterations later. Withdrawing the
-    schema is worth more than raising that ceiling: it returns a turn at no token cost,
-    where another iteration re-sends the whole accumulated record to buy one.
+    the turn's tool budget on a call that could not have succeeded. Withdrawing the schema
+    is worth more than raising that ceiling: it returns a turn at no token cost, where
+    another iteration re-sends the whole accumulated record to buy one. Since R5a the
+    selection search is `search_corpus`'s `scope`, so it is the parameter that is
+    withdrawn rather than a tool.
 
-    The guard in `_execute_tool` stays. A model can name a tool it was never given, and the
-    scope check is what makes the selected-document scope a fact rather than a request.
+    `query_regulatory_values` is offered only above `VALUES_TOOL_MIN_COVERAGE`, measured
+    against `db` — without one there is nothing to measure and it is withheld.
+
+    The guard in `_execute_tool` stays. A model can name a tool or a scope it was never
+    given, and the scope check is what makes the selected-document scope a fact rather
+    than a request.
     """
-    if selected_circular_ids:
-        return TOOLS
-    return [
-        tool for tool in TOOLS
-        if (tool.get("function") or {}).get("name") not in _SELECTION_ONLY_TOOLS
-    ]
+    tools = [TOOLS[0] if selected_circular_ids else _SEARCH_CORPUS_UNSCOPED]
+    tools += [_OPEN_DOCUMENT_TOOL, _LIST_DOCUMENTS_TOOL]
+    if values_coverage(db) >= VALUES_TOOL_MIN_COVERAGE:
+        tools.append(_QUERY_VALUES_TOOL)
+    return tools
 
 
 @dataclass(frozen=True)
@@ -1424,7 +1413,7 @@ def _provided_earlier_section(withheld: list[int], returned_any: bool) -> dict:
 # the full entries they replace.
 _WITHDRAWN_MATCHES_NOTE = (
     "These matched the query but are no longer in force, so they are listed without their "
-    "text. Do not answer from them. Open one with get_circular_details only if the question "
+    "text. Do not answer from them. Open one with open_document only if the question "
     "is about what a rule used to say; otherwise use `superseded_by` to find what replaced it."
 )
 
@@ -4242,8 +4231,16 @@ SOURCE BLOCKS:
         user_query: str = "",
     ) -> str:
         """Execute a tool by name and return the result as a JSON string.
-        IDs are exposed only inside opaque citation tokens that the UI can resolve."""
+        IDs are exposed only inside opaque citation tokens that the UI can resolve.
+
+        Serves the four R5a tools and the nine names they replaced: a conversation
+        replayed from before R5a can still prompt a call to an old one."""
         try:
+            if (
+                name == "search_corpus"
+                and str(arguments.get("scope", "") or "").strip().lower() == "selected"
+            ):
+                name = "search_selected_documents"
             if name == "search_selected_documents":
                 from .chat_retrieval import ScopedChatRetriever
 
@@ -4287,6 +4284,18 @@ SOURCE BLOCKS:
                 department = arguments.get("department", "")
                 tag = arguments.get("tag", "")
                 limit = int(arguments.get("limit", 10))
+                # Year bounds, which the engine always supported and the tool never took.
+                # The 2026-09-27 R5a round passed `start_year` twice (P13, P19) — learned
+                # from `list_documents`, which offers it beside the same department and tag
+                # filters — and it was dropped without a word.
+                years: dict[str, int] = {}
+                for key in ("start_year", "end_year"):
+                    if arguments.get(key) in (None, ""):
+                        continue
+                    try:
+                        years[key] = int(arguments[key])
+                    except (TypeError, ValueError):
+                        return json.dumps({"error": f"`{key}` must be a year, got {arguments[key]!r}"})
                 # Superseded and cancelled circulars are 13.2% of every result set and
                 # are not the rule any more, so they leave the ranked lists unless the
                 # question is *about* withdrawal. A circular named outright still
@@ -4301,13 +4310,13 @@ SOURCE BLOCKS:
                         query, db, limit=limit,
                         department=department if department else None,
                         tag=tag if tag else None,
-                        sort_by="date",
+                        sort_by="date", **years,
                     )
                     relaxed_department = False
                     if not results and department:
                         results, _ = search_engine.search(
                             query, db, limit=limit,
-                            tag=tag if tag else None, sort_by="date",
+                            tag=tag if tag else None, sort_by="date", **years,
                         )
                         relaxed_department = bool(results)
                     # The date-sorted branch answers "what is the latest…", which is the
@@ -4353,23 +4362,25 @@ SOURCE BLOCKS:
                         "department_filter_relaxed": relaxed_department,
                     })
 
-                # `department` and `tag` are circular-only concepts, so a filtered call
-                # drops the law arm rather than returning laws that never faced the
-                # filter beside circulars that did.
-                filtered = bool(department or tag)
+                # `department`, `tag` and the years are circular-only concepts, so a
+                # filtered call drops the law arm rather than returning laws that never
+                # faced the filter beside circulars that did.
+                filtered = bool(department or tag or years)
                 arms = search_engine.dual_arm_search(
                     query, db, limit=limit,
                     department=department if department else None,
                     tag=tag if tag else None,
                     include_laws=not filtered,
                     include_withdrawn=include_withdrawn,
+                    **years,
                 )
                 relaxed_department = False
                 if department and not any(arms.values()):
                     arms = search_engine.dual_arm_search(
                         query, db, limit=limit, tag=tag if tag else None,
-                        include_laws=not bool(tag),
+                        include_laws=not (tag or years),
                         include_withdrawn=include_withdrawn,
+                        **years,
                     )
                     relaxed_department = bool(any(arms.values()))
 
@@ -4415,34 +4426,23 @@ SOURCE BLOCKS:
                 }
                 if filtered:
                     result["laws_excluded_by_filter"] = (
-                        "The laws and regulations corpus was not searched: department "
-                        "and tag filters apply to circulars only. Repeat the search "
+                        "The laws and regulations corpus was not searched: department, "
+                        "tag and year filters apply to circulars only. Repeat the search "
                         "without them to include Acts and regulations."
                     )
                 return json.dumps(result)
 
+            elif name == "open_document":
+                return self._open_document_tool(arguments, db, user_query)
+
+            elif name == "list_documents":
+                return self._list_documents_tool(arguments, db)
+
             elif name == "get_latest_circulars":
-                from .models import Circular
-                department = arguments.get("department", "")
-                limit = int(arguments.get("limit", 5))
-                q = db.query(Circular).order_by(Circular.date.desc())
-                if department:
-                    q = q.filter(Circular.department.ilike(f"%{department}%"))
-                rows = q.limit(limit).all()
-                out = []
-                for c in rows:
-                    out.append({
-                        "title": c.title,
-                        "reference": c.reference,
-                        "department": c.department,
-                        "date": c.date.strftime("%Y-%m-%d") if c.date else None,
-                        "summary": c.summary[:500] if c.summary else None,
-                        "status": c.status or "active",
-                        "tags": json.loads(c.tags) if c.tags else [],
-                        "url": c.url,
-                        "citation": f"[[circular:{c.id}|{c.display_name}]]",
-                    })
-                return json.dumps({"results": out, "count": len(out)})
+                return self._list_documents_tool({
+                    "department": arguments.get("department", ""),
+                    "limit": arguments.get("limit", 5),
+                }, db)
 
             elif name == "get_circular_details":
                 return self._circular_details_tool(arguments, db, user_query)
@@ -4454,26 +4454,10 @@ SOURCE BLOCKS:
                 return self._law_details_tool(arguments, db)
 
             elif name == "get_circulars_by_tag":
-                from .models import Circular
-                tag = arguments.get("tag", "")
-                limit = int(arguments.get("limit", 10))
-                rows = db.query(Circular).filter(
-                    Circular.tags.like(f'%"{tag}"%')
-                ).order_by(Circular.date.desc()).limit(limit).all()
-                out = []
-                for c in rows:
-                    out.append({
-                        "title": c.title,
-                        "reference": c.reference,
-                        "department": c.department,
-                        "date": c.date.strftime("%Y-%m-%d") if c.date else None,
-                        "summary": c.summary[:500] if c.summary else None,
-                        "status": c.status or "active",
-                        "tags": json.loads(c.tags) if c.tags else [],
-                        "url": c.url,
-                        "citation": f"[[circular:{c.id}|{c.display_name}]]",
-                    })
-                return json.dumps({"results": out, "count": len(out)})
+                return self._list_documents_tool({
+                    "tag": arguments.get("tag", ""),
+                    "limit": arguments.get("limit", 10),
+                }, db)
 
             elif name == "query_regulatory_values":
                 from sqlalchemy import and_ as _and, func as _func, or_ as _or
@@ -4603,27 +4587,43 @@ SOURCE BLOCKS:
         `by_title` is False only for the search arm — the one step that can land on a
         different instrument — so the caller can say so (`_law_resolution_note`).
         """
-        from .models import RegDocument
         from .search import search_engine
 
         cleaned = title.strip()
         if not cleaned:
             return None, False
+        match = AIClient._law_by_title(db, cleaned)
+        if match is not None:
+            return match, True
+        results, _ = search_engine.search(cleaned, db, limit=1, source="laws")
+        return (results[0]["law"], False) if results else (None, False)
+
+    @staticmethod
+    def _law_by_title(db: Session, title: str) -> Any:
+        """The live law a title names — exact, then `_law_title_rank` — or None.
+
+        The half of `_resolve_law` that cannot land on a different instrument, split out
+        so `open_document` can ask it before trying circular titles: a request that names
+        an Act must reach the Act before a circular whose title merely contains its name.
+        """
+        from .models import RegDocument
+
+        cleaned = title.strip()
+        if not cleaned:
+            return None
         live = db.query(RegDocument).filter(RegDocument.delisted_at.is_(None))
         match = live.filter(RegDocument.title.ilike(cleaned)).first()
         if match is not None:
-            return match, True
+            return match
         wanted = _title_words(cleaned)
-        if wanted:
-            ranked = [
-                (rank, document)
-                for document in live.all()
-                if (rank := _law_title_rank(document, wanted)) is not None
-            ]
-            if ranked:
-                return min(ranked, key=lambda item: item[0])[1], True
-        results, _ = search_engine.search(cleaned, db, limit=1, source="laws")
-        return (results[0]["law"], False) if results else (None, False)
+        if not wanted:
+            return None
+        ranked = [
+            (rank, document)
+            for document in live.all()
+            if (rank := _law_title_rank(document, wanted)) is not None
+        ]
+        return min(ranked, key=lambda item: item[0])[1] if ranked else None
 
     @staticmethod
     def _law_resolution_note(requested: str, document: Any) -> str | None:
@@ -4695,7 +4695,7 @@ SOURCE BLOCKS:
                 return None, {
                     "error": (
                         f"{ref} is a law, Act or regulation, not a circular. Read it with "
-                        "get_law_details."
+                        "open_document."
                     ),
                 }, None
             if kind == "attachment":
@@ -4812,11 +4812,17 @@ SOURCE BLOCKS:
         c, error, resolution_note = self._resolve_circular(ref, db, self._turn_handles)
         if error is not None:
             return json.dumps(error)
+        return self._read_circular(c, resolution_note, arguments, db, user_query or ref)
 
+    def _read_circular(
+        self, c: Any, resolution_note: str | None, arguments: dict, db: Session,
+        user_query: str,
+    ) -> str:
+        """The circular reader behind `open_document` and `get_circular_details`."""
         from .chat_retrieval import build_chat_context
         from .search import _relationship_annotation
 
-        query = str(arguments.get("query", "") or "").strip() or user_query or ref
+        query = str(arguments.get("query", "") or "").strip() or user_query or c.title
         sent = self._sent_passages.setdefault(c.id, set())
         # C1: the turn's text ledger says whether `search_corpus` already handed this
         # letter over whole. Measured on the 2026-08-26 and 2026-09-26 rounds, five of
@@ -4923,8 +4929,6 @@ SOURCE BLOCKS:
         The text was on page 15 of a 63-page attachment the corpus had held for two
         months.
         """
-        from .chat_retrieval import ScopedAttachmentRetriever
-
         ref = str(arguments.get("circular_reference", "")).strip()
         if not ref:
             return json.dumps({"error": "No circular reference provided"})
@@ -4933,6 +4937,13 @@ SOURCE BLOCKS:
         )
         if error is not None:
             return json.dumps(error)
+        return self._read_attachment(circular, resolution_note, arguments)
+
+    def _read_attachment(
+        self, circular: Any, resolution_note: str | None, arguments: dict,
+    ) -> str:
+        """The attachment reader behind `open_document` and `read_attachment`."""
+        from .chat_retrieval import ScopedAttachmentRetriever
 
         wanted = str(arguments.get("attachment", "") or "")
         attachment, readable = self._match_attachment(circular, wanted)
@@ -5070,8 +5081,6 @@ SOURCE BLOCKS:
 
     def _law_details_tool(self, arguments: dict, db: Session) -> str:
         """Read inside one law — the statute analogue of `get_circular_details`."""
-        from .chat_retrieval import ScopedLawRetriever
-
         requested = str(arguments.get("law_title", "")).strip()
         if not requested:
             return json.dumps({"error": "No law title provided"})
@@ -5086,6 +5095,15 @@ SOURCE BLOCKS:
                 ),
             })
         resolution_note = None if by_title else self._law_resolution_note(requested, document)
+        return self._read_law(document, requested, resolution_note, arguments, db)
+
+    def _read_law(
+        self, document: Any, requested: str, resolution_note: str | None,
+        arguments: dict, db: Session,
+    ) -> str:
+        """The law reader behind `open_document` and `get_law_details`."""
+        from .chat_retrieval import ScopedLawRetriever
+
         # First in every payload below: it changes how everything after it must be read.
         noted = {"resolution_note": resolution_note} if resolution_note else {}
 
@@ -5145,6 +5163,228 @@ SOURCE BLOCKS:
             )
         payload.update(_provided_earlier_section(withheld, bool(passages)))
         return json.dumps(payload)
+
+    def _open_document_tool(self, arguments: dict, db: Session, user_query: str) -> str:
+        """R5a: one reader for a circular, an attachment or a law, chosen by what it is.
+
+        The three readers are the ones `get_circular_details`, `read_attachment` and
+        `get_law_details` always ran; this decides which of them a request is for. A
+        handle decides by its kind. Free text is resolved by `_resolve_document`, which
+        tries the exact addresses before any near-match. The legacy argument names are
+        accepted too — a model that learned `circular_reference` from history still
+        means the same thing.
+        """
+        requested = str(
+            arguments.get("document")
+            or arguments.get("circular_reference")
+            or arguments.get("law_title")
+            or ""
+        ).strip()
+        if not requested:
+            return json.dumps({"error": "No document named: give its citation, reference or title"})
+        kind, target, note = self._resolve_document(requested, db)
+        if kind is None:
+            return json.dumps(target)
+        if kind == "law":
+            return self._read_law(target, requested, note, arguments, db)
+        if kind == "attachment":
+            circular, attachment_id = target
+            return self._read_attachment(
+                circular, note, {**arguments, "attachment": attachment_id}
+            )
+        inside = arguments.get("page") not in (None, "") or any(
+            str(arguments.get(key, "") or "").strip() for key in ("section", "attachment")
+        )
+        if inside:
+            return self._read_attachment(target, note, arguments)
+        return self._read_circular(target, note, arguments, db, user_query)
+
+    # Words that make a request that matched nothing exactly worth resolving among laws
+    # rather than circulars: the laws search arm reports a different instrument as one
+    # (`_law_resolution_note`), where circular full-text search would hand back whichever
+    # circular mentions the name most.
+    _LAW_WORDS = re.compile(
+        r"\b(act|ordinance|regulations?|rules|manual|guidelines?|code|law|statute)\b",
+        re.IGNORECASE,
+    )
+
+    def _resolve_document(
+        self, requested: str, db: Session,
+    ) -> tuple[str | None, Any, str | None]:
+        """What `open_document` was asked for: ``(kind, target, resolution_note)``.
+
+        `kind` is ``"circular"``, ``"attachment"`` (target ``(circular, attachment_id)``)
+        or ``"law"``; ``None`` with an error payload as the target. In order:
+
+        1. a handle this turn minted — an exact address, whatever its kind;
+        2. a handle it did not (replayed history, or typed from memory): a circular slug
+           goes to `_resolve_circular`, which matches slugs exactly; a law slug is matched
+           against law titles; an attachment slug cannot be found without its circular;
+        3. a law by title — exact, then `_law_title_rank`. Before any circular match,
+           because the failure this prevents is the one that motivated the law reader:
+           "State Bank of Pakistan Act, 1956" answered by a 1999 circular whose title
+           contains it. Before the reference parser too, which reads any word and number
+           as a reference — "Foreign Exchange Manual Chapter 12" parses as "Chapter 12"
+           and comes back an ambiguous circular. A real circular reference never forms a
+           consecutive run of words inside a law's title, so nothing is lost the other way;
+        4. a circular reference the parser recognises ("BPRD Circular No. 08 of 2016");
+        5. what is left: among laws if it reads like a law's name, else among circulars,
+           each with its own note when the match is not exact.
+
+        A listing row that is really a circular (`RegDocument.circular_id`) has no text of
+        its own, so a law resolving to one is opened as that circular.
+        """
+        from .citation_handles import _BARE_HANDLE_PATTERN, HANDLE_PATTERN
+        from .models import Attachment, Circular, RegDocument
+        from .search import SearchEngine, search_engine
+
+        def as_law(document: Any, note: str | None):
+            if document is not None and document.circular_id:
+                circular = db.get(Circular, document.circular_id)
+                if circular is not None:
+                    return "circular", circular, None
+            return "law", document, note
+
+        entry = self._turn_handles.lookup(requested) if self._turn_handles else None
+        if entry is not None:
+            kind, identifier, _label = entry
+            if kind == "law":
+                document = db.get(RegDocument, identifier)
+                if document is not None:
+                    return as_law(document, None)
+            elif kind == "attachment":
+                attachment = db.get(Attachment, identifier)
+                if attachment is not None and attachment.circular is not None:
+                    return "attachment", (attachment.circular, attachment.id), None
+            else:
+                circular = db.get(Circular, identifier)
+                if circular is not None:
+                    return "circular", circular, None
+
+        shaped = HANDLE_PATTERN.fullmatch(requested) or _BARE_HANDLE_PATTERN.fullmatch(requested)
+        if shaped:
+            prefix, slug = shaped.group(1).lower(), shaped.group(2).strip()
+            if prefix == "a":
+                return None, {
+                    "error": (
+                        f"{requested} is not an attachment citation from this "
+                        "conversation. Name the circular in `document` and the attachment "
+                        "by its filename in `attachment`."
+                    ),
+                }, None
+            if prefix == "l":
+                document = self._law_by_handle_slug(slug, db)
+                if document is not None:
+                    return as_law(document, None)
+                document, by_title = self._resolve_law(db, slug.replace("-", " "))
+                if document is None:
+                    return None, {"error": f"No law, Act or regulation found matching: {requested}"}, None
+                return as_law(
+                    document,
+                    None if by_title else self._law_resolution_note(slug.replace("-", " "), document),
+                )
+
+        if not shaped:
+            document = self._law_by_title(db, requested)
+            if document is not None:
+                return as_law(document, None)
+            if SearchEngine._search_by_reference(requested, db, limit=1):
+                circular, error, note = self._resolve_circular(
+                    requested, db, self._turn_handles
+                )
+                return ("circular", circular, note) if error is None else (None, error, None)
+            if self._LAW_WORDS.search(requested):
+                results, _ = search_engine.search(requested, db, limit=1, source="laws")
+                if results:
+                    document = results[0]["law"]
+                    return as_law(document, self._law_resolution_note(requested, document))
+
+        circular, error, note = self._resolve_circular(requested, db, self._turn_handles)
+        return ("circular", circular, note) if error is None else (None, error, None)
+
+    @staticmethod
+    def _law_by_handle_slug(slug: str, db: Session) -> Any:
+        """The live law whose handle slug is `slug`, exactly, or None.
+
+        A law's handle is minted from its title (`citation_handles.slugify`), so the slug
+        is compared against each title slugified the same way — the law analogue of
+        `_circular_by_handle_slug`, for a handle this turn's map does not hold.
+        """
+        from .citation_handles import slugify
+        from .laws_links import law_label
+        from .models import RegDocument
+
+        wanted = slug.casefold()
+        matches = [
+            document
+            for document in db.query(RegDocument).filter(RegDocument.delisted_at.is_(None))
+            if wanted in {
+                slugify(document.title or "", kind="law").casefold(),
+                slugify(law_label(document), kind="law").casefold(),
+            }
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def _list_documents_tool(self, arguments: dict, db: Session) -> str:
+        """R5a: documents as pointer rows — by date, or by an inventory sweep.
+
+        With `query` this is the inventory sweep `search_regulatory_inventory` always
+        was. Without one it is the date listing that `get_latest_circulars` and
+        `get_circulars_by_tag` each did half of, now with both filters and a year range,
+        and with the card discipline R1 gave search rows: no `summary` (null for 3,649 of
+        3,655 circulars), `url` or `tags`.
+        """
+        from .models import Circular
+
+        query = str(arguments.get("query", "") or "").strip()
+        tag = str(arguments.get("tag", "") or "").strip()
+        if query:
+            if tag:
+                return json.dumps({
+                    "error": (
+                        "`tag` filters the date listing only and cannot narrow an "
+                        "inventory sweep. Drop `tag`, or drop `query` to list tagged "
+                        "circulars by date."
+                    ),
+                })
+            return self._inventory_tool(arguments, db)
+
+        if str(arguments.get("sources", "") or "").strip().lower() == "laws":
+            return json.dumps({
+                "error": (
+                    "Without `query` this lists circulars only. Give `query` to sweep "
+                    "the laws corpus for a subject."
+                ),
+            })
+        try:
+            limit = max(1, min(int(arguments.get("limit") or 10), 50))
+        except (TypeError, ValueError):
+            limit = 10
+        rows = db.query(Circular)
+        department = str(arguments.get("department", "") or "").strip()
+        if department:
+            rows = rows.filter(Circular.department.ilike(f"%{department}%"))
+        if tag:
+            rows = rows.filter(Circular.tags.like(f'%"{tag}"%'))
+        for key, keep in (("start_year", lambda year: Circular.date >= datetime(year, 1, 1)),
+                          ("end_year", lambda year: Circular.date < datetime(year + 1, 1, 1))):
+            if arguments.get(key) not in (None, ""):
+                try:
+                    rows = rows.filter(keep(int(arguments[key])))
+                except (TypeError, ValueError):
+                    return json.dumps({"error": f"`{key}` must be a year, got {arguments[key]!r}"})
+        results = [
+            {
+                "citation": f"[[circular:{c.id}|{c.display_name}]]",
+                "title": c.title,
+                "reference": c.reference,
+                "department": c.department,
+                "date": c.date.strftime("%Y-%m-%d") if c.date else None,
+                "status": c.status or "active",
+            }
+            for c in rows.order_by(Circular.date.desc().nullslast()).limit(limit).all()
+        ]
+        return json.dumps({"ranking": "date", "results": results, "count": len(results)})
 
     def _inventory_tool(self, arguments: dict, db: Session) -> str:
         """Adapter only — the search semantics live in InventorySearchService.
@@ -5298,10 +5538,11 @@ but you also have tools to search the database if the user asks about circulars 
 
 TOOLS
 - Be precise and highlight regulatory differences when comparing circulars.
-- Use search_selected_documents when the included passages do not contain enough detail. It
-can search the complete selected circulars and their attachments. Do not claim attachment
-content is unavailable merely because it was not included in the initial context.
-- Use global circular search tools only when the user explicitly requests broader research.
+- Use search_corpus with scope "selected" when the included passages do not contain enough
+detail. It searches the complete selected circulars and their attachments. Do not claim
+attachment content is unavailable merely because it was not included in the initial context.
+- Use open_document to read a page, section or annexure of a selected circular directly.
+- Search the whole corpus only when the user explicitly requests broader research.
 
 {_ANSWER_CONTRACT}
 
@@ -5315,16 +5556,20 @@ Use your tools to search and retrieve relevant documents before answering.
 {_CITATION_RULES}
 
 TOOLS
-- If you need more details on a circular found in a search, use the get_circular_details
-tool with the circular reference or title, and give it a `query` for what you need.
+- search_corpus finds; open_document reads, with a `query` for what you need.
+- When the question names an instrument — an Act, a set of regulations, a circular by its
+reference — open it by that name first. A search is for finding what the user has not named.
+If the result's `resolution_note` says the corpus does not hold it, say so in the answer;
+searching again will not find it.
+- Otherwise open a document by the citation a search result gave you.
 - When the answer sits inside an attachment — an annexure, framework, instructions or
-guidelines PDF behind a covering letter — read it with read_attachment. It takes a
-`page`, a paragraph or section number (`section`), or a `query`, and returns the matched
-chunks with their neighbours. A search result that names the page or section you need is
-a reason to call it, not a reason to search again.
-- When the answer depends on what an Act or set of Regulations says, read the instrument
-itself with get_law_details. get_circular_details searches circulars only and cannot fetch
-an Act; a circular that cites an Act is not a source for what the Act requires.
+guidelines PDF behind a covering letter — open it with a `page`, a paragraph or section
+number (`section`), or a `query`. A search result that names the page or section you need
+is a reason to open it, not a reason to search again.
+- When the answer depends on what an Act or set of Regulations says, open the instrument
+itself; a circular that cites an Act is not a source for what the Act requires.
+- list_documents is for lists — the latest circulars, or every document on a subject —
+not for answering a question about a topic.
 - If the instrument you need is not in the corpus, say so plainly. Never substitute a
 circular on an adjacent topic for a statute you could not retrieve.
 
@@ -5577,6 +5822,8 @@ circular on an adjacent topic for a statute you could not retrieve.
         self._result_documents = set()
         self._listed_documents = set()
         self._turn_steps = []
+        # Once per turn: the values gate is a query, and the offer must not change mid-turn.
+        turn_tools = tools_for_turn(selected_circular_ids, db)
         full_messages = self._chat_full_messages(
             messages, circulars_context, selected_circular_ids, handles
         )
@@ -5587,7 +5834,7 @@ circular on an adjacent topic for a statute you could not retrieve.
                 model=self.config.effective_chat_model,
                 messages=full_messages,
                 temperature=0.3,
-                tools=tools_for_turn(selected_circular_ids),
+                tools=turn_tools,
                 tool_choice="auto",
             )
 
@@ -5698,6 +5945,8 @@ circular on an adjacent topic for a statute you could not retrieve.
         self._result_documents = set()
         self._listed_documents = set()
         self._turn_steps = []
+        # Once per turn: the values gate is a query, and the offer must not change mid-turn.
+        turn_tools = tools_for_turn(selected_circular_ids, db)
         full_messages = self._chat_full_messages(
             messages, circulars_context, selected_circular_ids, handles
         )
@@ -5709,7 +5958,7 @@ circular on an adjacent topic for a statute you could not retrieve.
                 model=self.config.effective_chat_model,
                 messages=full_messages,
                 temperature=0.3,
-                tools=tools_for_turn(selected_circular_ids),
+                tools=turn_tools,
                 tool_choice="auto",
                 stream=True,
             )

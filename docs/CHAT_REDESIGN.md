@@ -20,15 +20,18 @@ Two assumptions, chosen deliberately:
 
 **Status (2026-09-26):** the prerequisite has landed — `CHAT_CONTEXT_PLAN.md` **C11**
 (status-aware ranking, amender annotation), along with **C1a** (a document's text once per
-turn) and **C12** (passage-keyed ledger, `read_attachment`). **R1 is built** and pinned by
-`tests/test_evidence_card.py`, and has had one chat round (2026-09-26, §5). **R6's checks 2
-and 4 are built, warn-only** (§7). R2–R5 are not started. §9 is the migration path.
+turn), **C12** (passage-keyed ledger, `read_attachment`), and since then **C1**, **C5** and
+**C6**. **R1 is built** and pinned by `tests/test_evidence_card.py`, and has had two chat
+rounds (2026-09-26 and 2026-09-27, §5). **R6's checks 2 and 4 are built, warn-only** (§7).
+**R5 is split:** R5a — four tools, `search_corpus` kept — is built and pinned by
+`tests/test_open_document.py` (§6); R5b, the three-verb schema, still waits on R4. R2–R4
+are not started. §9 is the migration path.
 
 **What moved since this was written.** The measurements in §1–§2 and the "Today" column in
 §8 were taken *before* C11, C1a and C12, and describe that code — they are the baseline this
 design argues from, not the current behaviour. They need re-taking with
-`benchmarks/chat_context_audit.py` before R4 is judged against them. The tool schema has
-grown rather than shrunk: C12 added `read_attachment`, taking it to nine tools (see §6).
+`benchmarks/chat_context_audit.py` before R4 is judged against them. The tool schema grew
+to nine tools when C12 added `read_attachment`, then R5a took it to four (§6).
 Line anchors drift; trust the symbol name, not the number.
 
 ---
@@ -41,7 +44,8 @@ Line anchors drift; trust the symbol name, not the number.
 | **R2** | Chain collapse: one card per amendment chain | `consolidation.py:61` `resolve_chain` | removes duplicate lineage members | S | ☐ |
 | **R3** | Stage 1 plan call replaces iteration 1 | new | −1 round trip, checkable output | M | ☐ |
 | **R4** | Stage 2 intent dispatch | new | retrieval becomes deterministic | L | ☐ |
-| **R5** | Collapse the tool schema to three verbs | `ai.py:136` `TOOLS` | ~15,900 ch (9 tools) → ~1,200 ch | M | ☐ |
+| **R5a** | Four tools: keep `search_corpus`, merge the readers and the listers, gate values | `ai.py` `TOOLS`, `tools_for_turn`, `_open_document_tool`, `_list_documents_tool` | 16,533 ch (9 tools) → **10,664** on a typical turn | M | ☑ built, one round (2026-09-27, §6) |
+| **R5b** | Collapse to three verbs (`search_corpus` → `search_again`, add `insufficient`) | `ai.py` `TOOLS` | 10,664 → ~1,200 ch — see §6 on how much of that is real | M | ☐ needs R4 |
 | **R6** | Stage 4 verification | `answer_checks.py`, `AIClient.verify_answer`, both chat routes | checks 2 and 4, **warn-only**; 5 of 30 replayed answers flagged | M | ◐ checks 2 + 4 built, warn-only (§7) |
 
 **Prerequisite — landed.** Status-aware ranking and amender annotation is **C11** in
@@ -51,9 +55,10 @@ demoted to `withdrawn_matches` pointers, and every changed circular carries `ame
 withdrawn text would have inherited the problem; that is no longer the candidate set.
 
 **Order.** R1 and R2 first: they change what a result *is* without changing the loop. Then R3
-and R4, which change the loop. R5 follows R4 (the tools can only shrink once the deterministic
-path carries the common case). R6 any time after R1, because verification needs the evidence
-set to check against.
+and R4, which change the loop. R5b follows R4 (search can only leave the model's hands once the
+deterministic path carries the common case); R5a did not need to wait, because it keeps
+search and merges only the tools around it. R6 any time after R1, because verification needs
+the evidence set to check against.
 
 ---
 
@@ -364,8 +369,12 @@ as 2026-08-26; C12 also landed between the rounds, so cost deltas are not R1's a
   them was opened. The 5 laws opened were all in `law_results` too.
 - **Found on the way, not caused by R1:** a handle slug passed as `circular_reference`
   (`get_circular_details("BPRD-CL-01-2021")`) silently resolved to BPRD CL 24 of 2006 — the
-  §6 failure, live today — and repeated `get_law_details` on one Act (6 calls in P14) is
-  `CHAT_CONTEXT_PLAN.md` C5.
+  §6 failure — and repeated `get_law_details` on one Act (6 calls in P14) is
+  `CHAT_CONTEXT_PLAN.md` C5. **Both since fixed:** the slug now resolves exactly
+  (`_circular_by_handle_slug`), a near-match carries a `resolution_note`, and C5 has landed.
+  The 2026-09-27 round (`benchmarks/results/2026-09-27-sbpeye/assessment.md`) ran with
+  them; it scored 88.9% on n=18 from one non-blind AI rater, with P04/P05 lost to an
+  OpenRouter outage and awaiting a rerun.
 
 Verdict: keep. Lossless, slightly smaller, and its annexure addressing is used; the law line
 is cheap and may earn its place once R4 routes on the same edges.
@@ -376,7 +385,8 @@ is cheap and may earn its place once R4 routes on the same edges.
 
 System prompt + evidence cards + question, streamed. Tools are available but should rarely be
 needed. The schema is **three verbs, ~1,200 characters**, against eight tools at 11,415 when
-this was written — nine at ~15,900 since C12 added `read_attachment`:
+this was written — nine at 16,533 once C12 added `read_attachment`, and four at 10,664 since
+R5a (below):
 
 ```
 open_document(handle, query?, section?)
@@ -417,6 +427,80 @@ the reason, and it does not stop applying because the loop got shorter.
 **The SSE contract is unchanged.** `meta` → `status` → `token`* → `done` / `error`, as
 `/api/chat/stream` in `main.py` emits today. Stage 1 and Stage 2 report through `status` events, which
 is what the existing tool-activity UI already renders.
+
+### R5a — four tools, as built
+
+The three-verb schema removes `search_corpus` from the model, which is only safe once R3 and
+R4 retrieve for it. Everything *around* search could be merged without waiting, so R5 was
+split, and R5a keeps search and consolidates the rest:
+
+| Tool | Replaces | Size |
+|---|---|---|
+| `search_corpus` | `search_corpus`; `search_selected_documents` as `scope: "selected"` | 6,261 ch with `scope`, 5,728 without |
+| `open_document` | `get_circular_details`, `read_attachment`, `get_law_details` | 2,861 ch |
+| `list_documents` | `get_latest_circulars`, `get_circulars_by_tag`, `search_regulatory_inventory` | 2,069 ch |
+| `query_regulatory_values` | itself — **offered only above `VALUES_TOOL_MIN_COVERAGE`** | 1,873 ch |
+
+**16,533 → 10,664 characters** on a turn with no selection and values withheld (−36%), sent
+on every round. Short of the ~1,200 target by design: ~4,800 of `search_corpus`'s description
+teaches the model to read its payload, and that text does not disappear when tools merge. It
+goes when the card explains itself, or with the tool (R5b).
+
+- **`open_document` routes onto the readers that already existed.** `_read_circular`,
+  `_read_attachment` and `_read_law` are the old tools' bodies, unchanged; the ledgers (C1,
+  C5, C12), `resolution_note` and neighbour expansion come with them. A handle decides by its
+  kind; a circular with `page`, `section` or `attachment` reads inside its annexure.
+- **Free text is still accepted**, not handles only as §6 proposes. A reference quoted in a
+  letter's body was never minted as a handle, and refusing it would push the model to
+  search for a document it can name. `_resolve_document` tries exact addresses first —
+  this turn's handle, a slug from history (circular or law), then a **law title before any
+  circular**. That order is what the split existed to fake with prose: "State Bank of
+  Pakistan Act, 1956" now reaches the Act, where `get_circular_details` returned BPRD
+  Circular No. 27 of 1999, whose title contains it (still true of the old name on the live
+  corpus). Law titles also go before the circular reference parser, which reads any word
+  and number as a reference: on the live corpus "Foreign Exchange Manual Chapter 12" came
+  back as an ambiguous circular before the reorder, and resolves to the chapter after it.
+  A law listing row that is really a circular (`RegDocument.circular_id`) opens as the
+  circular — the law reader would have found no text.
+- **`list_documents`** is the date listing without `query` (department, tag and years
+  together — the old tools had one filter each) and the inventory sweep with one. Its rows
+  drop `summary`, `url` and `tags`, as R1's cards did. A combination it cannot serve — a tag
+  on an inventory sweep, a date listing of laws — is an error, never a silently dropped
+  filter.
+- **The values gate** is §8's rule applied: `circular_entities` covers
+  0.19% of circulars today (7 of 3,655), so the tool is not offered; it returns once
+  extraction reaches a tenth. Measured once per turn in `tools_for_turn`.
+- **The selection scope is a parameter now**, so `tools_for_turn` withholds the parameter
+  and its description on an unselected turn — the P14 rule, kept.
+- **Old names are still served** by `_execute_tool`, and still labelled and digested
+  (`chat_steps._payload_kind` digests an `open_document` or `list_documents` step by the
+  payload it carries): a replayed conversation can prompt a call to one, and stored
+  research steps name them.
+
+`insufficient` was left out: it changes what the model does rather than how the tools are
+shaped, and whether calling it ends the turn is an open design question.
+
+**First round, 2026-09-27** (`benchmarks/results/2026-09-27-sbpeye2/assessment.md`, against
+the same day's pre-R5a round). Every required fact of all 20 items was correct. Two history
+asides were wrong (P18, P19), the same class as the previous round's two fabrication ticks.
+- **Routing:** 32 `open_document` calls, no errors and no misroutes.
+- **`list_documents`:** reached for the inventory sweep no more often than the three listers had.
+- **Values gate:** removed 6 rounds that returned nothing.
+- **Loop cost:** tool calls unchanged, round-limit hits 4 → 2, prompt tokens +12% on a single run.
+
+It exposed two defects, both since fixed:
+
+- **`search_corpus` had no year filter**, and silently dropped the `start_year` the model
+  learned from `list_documents` (P13, P19). The engine always supported year bounds; the tool
+  now takes `start_year`/`end_year`, circular-only like `department` and `tag`, so a
+  year-filtered search leaves out the laws and says so.
+- **A named instrument was searched for before it was opened.** The first wording taught
+  handle-first ("open a document by the citation a result gave you"). P17 then searched three
+  times and swept the inventory before opening the AML Act by name. After the not-in-corpus
+  note it kept searching to the round limit: 10 calls against the baseline's 4, for the same
+  abstention. The prompt and the `open_document` description now say to open a named
+  instrument by its name first, and that a `resolution_note` saying it is not held ends the
+  search. That second fix can only be judged by another round.
 
 ---
 
@@ -459,7 +543,7 @@ the "only check 2 withholds" above. Warnings are stored on the message
 event, recorded as a `verification` trace event (`trace_readout.py` counts them per round), and
 shown under the answer as a collapsible "citation checks flagged" block — open by default only
 for a high-severity one. **Supersession warnings are no longer shown in the chat**
-(`_CHAT_VISIBLE_CHECKS`, 2026-09-27): after its false positives on live answers (P06's
+(`_CHAT_VISIBLE_CHECKS`, 2026-09-26): after its false positives on live answers (P06's
 reference spelling, P20's cancelled amender) and the coarse-`amends` noise, it runs, is stored
 and is traced for benchmark measurement, but a reader sees only grounding warnings. Behind the same admin gate as the research steps while the rate is
 measured; a false positive shown to every reader costs trust before the rate is known.
@@ -497,6 +581,7 @@ edges — master circulars whose "amendments" were reporting formats (BPD 07/200
 That split is the measurement warn-only exists for: check 4's medium tier needs the edge
 typing to improve before it is shown to readers; check 2 has fired on nothing real yet, which
 says more about the benchmark's easy citations than about the check.
+
 ---
 
 ## 8. What it costs, and what it depends on
@@ -507,7 +592,7 @@ says more about the benchmark's easy citations than about the check.
 |---|---|---|
 | Provider round trips per turn | 4–6 | **2**, 3 on escalation |
 | Peak single request | 49,889 tok median, 243,584 max | **~8–10k tok** |
-| Tool schema | 11,415 ch | ~1,200 ch |
+| Tool schema | 11,415 ch (16,533 at nine tools; **10,664 since R5a**) | ~1,200 ch |
 | Documents shown per turn | median 29 | 6–8 |
 | Withdrawn/replaced documents shown | **13.2%** | ~0% — *via C11, landed; re-measure* |
 | Amended documents shown without their amender named | **64.8%** | ~0% — *via C11, landed; re-measure* |
@@ -567,7 +652,8 @@ Each step is independently shippable and independently measurable.
 3. **R3 — the plan call**, replacing iteration 1.
 4. **R4 — intent dispatch.** Start with `definition` and `requirement`; add intents as they earn
    their place. This is the largest single piece of work here.
-5. **R5 — collapse the tool schema** once R4 carries the common case.
+5. **R5 — collapse the tool schema.** R5a (four tools, search kept) is built; R5b (three
+   verbs) once R4 carries the common case.
 6. **R6 — verification.** Checks 1, 2 and 4 first; they need no LLM and no new data.
 
 C11 comes before all of them and is tracked in `CHAT_CONTEXT_PLAN.md`, not here. **It has
@@ -581,18 +667,19 @@ The incremental plan and this design are not alternatives — most of the plan s
 |---|---|
 | C0 turn share | Stays, as the backstop for the escalation path. Matters less once the peak is 10k tokens |
 | C1a suppress the second copy | **Landed.** Survives — becomes the card registry's write path |
-| C1 document ledger | **Survives unchanged** — becomes the card registry |
+| C1 document ledger | **Landed.** Survives unchanged — becomes the card registry |
 | C2 tiered full text | Subsumed by the card |
 | C3 supersession in synthesis | Subsumed — Stage 2 dedupes before the model ever sees it |
 | C4 merged arms | **Retired** — merging refuses the dual-arm design's own argument; C1a dedups in place instead |
-| C5 repeat-call guard | Survives — applies to `open_document` |
-| C6 stop on no new document | **Survives** — becomes the escalation budget |
+| C5 repeat-call guard | **Landed.** Survives — applies to `open_document`, which R5a built on it |
+| C6 stop on no new document | **Landed.** Survives — becomes the escalation budget |
 | C7 history as a contributor | Survives unchanged |
 | C8 measure before sending | Survives as the backstop |
 | C9 pre-warmed first search | Superseded by Stage 1 + Stage 2, which do the same thing better |
 | C10 answer cache | Orthogonal — still worth building, keyed the same way |
 | C11 status-aware ranking | **Prerequisite — landed.** Every step here assumes it |
-| C12 passage ledger, `read_attachment` | **Landed.** The ledger survives as the card registry's passage half; `read_attachment` folds into `open_document` (R5) |
+| C12 passage ledger, `read_attachment` | **Landed.** The ledger survives as the card registry's passage half; `read_attachment` is folded into `open_document` (R5a, done) |
 
-The sensible reading is that C1, C6 and C7 are worth doing now under either plan. C1a, C11 and
-C12 were, and have been done.
+The sensible reading was that C1, C6 and C7 were worth doing under either plan. C1 and C6 have
+been done, along with C1a, C5, C11 and C12; **C7** (history charged to the turn budget) is the
+one still open.

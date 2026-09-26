@@ -16,7 +16,8 @@ three prompts say the same thing.
 The same file also pins the tool *schema* against the same contract. The prompt rule and the
 schema are two statements of one fact — what this turn can actually do — and they were not
 held together: the prompt withheld `search_selected_documents` from an unselected turn while
-the schema offered it anyway (chat session `48655b06`, benchmark P14).
+the schema offered it anyway (chat session `48655b06`, benchmark P14). Since R5a that search
+is `search_corpus`'s `scope`, and the same rule holds of the parameter.
 """
 
 import pytest
@@ -83,16 +84,17 @@ def test_no_prompt_advertises_a_tool_its_path_cannot_call(client):
     """The shared blocks are shared; the tool rules are not, and must not be merged.
 
     Not a check that the wording has not changed — a check that each prompt offers only what
-    that path can actually do. `search_selected_documents` is scoped to selected circulars
-    server-side and has nothing to search without them; the synthesis step runs with no tools
-    at all. A prompt naming either outside its path invites a call that cannot be served.
+    that path can actually do. The selected-document search (since R5a, `search_corpus`
+    with `scope: "selected"`) is scoped to selected circulars server-side and has nothing
+    to search without them; the synthesis step runs with no tools at all. A prompt naming
+    either outside its path invites a call that cannot be served.
     """
     prompts = _all_three(client)
-    assert "search_selected_documents" in prompts["selected"]
-    assert "search_selected_documents" not in prompts["general"]
-    assert "get_law_details" in prompts["general"]
+    assert 'scope "selected"' in prompts["selected"]
+    assert "scope" not in prompts["general"]
+    assert "open_document" in prompts["general"]
     # Synthesis has no tools at all, so it must not advertise any.
-    assert "get_law_details" not in prompts["synthesis"]
+    assert "open_document" not in prompts["synthesis"]
     assert "No tools are available in this step." in prompts["synthesis"]
 
 
@@ -100,33 +102,45 @@ def _offered(selected: list[str] | None) -> set[str]:
     return {tool["function"]["name"] for tool in tools_for_turn(selected)}
 
 
+def _search_schema(selected: list[str] | None) -> dict:
+    return next(
+        tool["function"] for tool in tools_for_turn(selected)
+        if tool["function"]["name"] == "search_corpus"
+    )
+
+
 def test_the_schema_withholds_what_the_prompt_withholds():
     """The schema owes the same answer as the prompt to "what can this turn do?".
 
-    `_chat_system_prompt` has always kept `search_selected_documents` out of the general
-    branch. The schema did not: both loop paths passed the `TOOLS` constant, so an
-    unselected turn was handed a tool whose only possible reply is the scope error. On
-    session `48655b06` the model duly called it and lost an iteration to the answer.
+    `_chat_system_prompt` has always kept the selection search out of the general branch.
+    The schema did not: both loop paths passed the `TOOLS` constant, so an unselected turn
+    was handed a tool whose only possible reply is the scope error. On session `48655b06`
+    the model duly called it and lost an iteration to the answer. Since R5a the selection
+    search is a `scope` of `search_corpus`, so it is the parameter — and the sentence
+    describing it — that an unselected turn must not see.
     """
-    assert "search_selected_documents" in _offered(["circular-id-1"])
-    assert "search_selected_documents" not in _offered(None)
-    assert "search_selected_documents" not in _offered([])
+    assert "scope" in _search_schema(["circular-id-1"])["parameters"]["properties"]
+    for selection in (None, []):
+        schema = _search_schema(selection)
+        assert "scope" not in schema["parameters"]["properties"]
+        assert "SCOPE." not in schema["description"]
 
 
-def test_withdrawing_one_tool_withdraws_only_that_tool():
+def test_withdrawing_the_scope_withdraws_only_the_scope():
     """A filter is one line away from being a filter that drops too much.
 
-    The unselected turn must lose the selection-scoped tool and keep every other tool
-    whole — same objects, so a description edited in `TOOLS` cannot go stale here.
+    The unselected turn must lose the selection scope and keep everything else whole —
+    the same tools, and every tool but search the same objects as `TOOLS`, so a
+    description edited there cannot go stale here.
     """
-    everything = _offered(["circular-id-1"])
-    general = _offered(None)
-
-    assert everything == {tool["function"]["name"] for tool in TOOLS}
-    assert everything - general == {"search_selected_documents"}
-    assert tools_for_turn(["circular-id-1"]) == TOOLS
+    assert _offered(["circular-id-1"]) == _offered(None)
+    selected, general = _search_schema(["circular-id-1"]), _search_schema(None)
+    assert selected["description"].startswith(general["description"])
+    assert set(selected["parameters"]["properties"]) - set(general["parameters"]["properties"]) == {"scope"}
     for tool in tools_for_turn(None):
-        assert tool in TOOLS
+        if tool["function"]["name"] != "search_corpus":
+            assert tool in TOOLS
+    assert tools_for_turn(["circular-id-1"])[0] is TOOLS[0]
 
 
 @pytest.mark.parametrize(
@@ -154,15 +168,18 @@ def test_every_tool_a_prompt_names_is_offered_on_that_path(
             )
 
 
-def test_the_scope_guard_survives_the_schema_change(client):
+@pytest.mark.parametrize("name,arguments", [
+    ("search_selected_documents", {"query": "anything"}),
+    ("search_corpus", {"query": "anything", "scope": "selected"}),
+])
+def test_the_scope_guard_survives_the_schema_change(client, name, arguments):
     """Withdrawing the schema is the saving; the guard is what makes the scope a fact.
 
-    A model can call a tool it was never given, so `_execute_tool` must still refuse an
-    unselected call rather than reaching for a retriever with nothing to retrieve from.
+    A model can call a tool — or a scope — it was never given, so `_execute_tool` must
+    still refuse an unselected call rather than reaching for a retriever with nothing to
+    retrieve from.
     """
-    result = client._execute_tool(
-        "search_selected_documents", {"query": "anything"}, None, None, ""
-    )
+    result = client._execute_tool(name, arguments, None, None, "")
     assert "No circulars are selected for this chat" in result
 
 

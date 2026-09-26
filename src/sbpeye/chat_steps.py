@@ -236,6 +236,35 @@ def _inventory_hits(payload: dict) -> list[dict]:
     return hits
 
 
+def _payload_kind(name: str, arguments: Any, payload: dict) -> str:
+    """Which of the pre-R5a tools a call's payload came from, for digesting it.
+
+    R5a folded nine tools into four names, but not their payloads: `open_document` hands
+    back what the circular, attachment or law reader built, `list_documents` a date
+    listing or an inventory, and `search_corpus` with `scope: "selected"` the selection
+    search's passages. The digest is a parse of a known shape, so it is chosen by the
+    shape — or, for the scope, by the argument that chose it. Stored steps keep the name
+    that ran; old names pass through unchanged.
+    """
+    if name == "open_document":
+        if "resolved_title" in payload or "requested" in payload:
+            return "get_law_details"
+        if "attachment_citation" in payload or "filename" in payload:
+            return "read_attachment"
+        return "get_circular_details"
+    if name == "list_documents":
+        if "documents_matched" in payload or "search_terms" in payload:
+            return "search_regulatory_inventory"
+        return "get_latest_circulars"
+    if (
+        name == "search_corpus"
+        and isinstance(arguments, dict)
+        and str(arguments.get("scope", "") or "").strip().lower() == "selected"
+    ):
+        return "search_selected_documents"
+    return name
+
+
 def _hits_for(name: str, payload: dict) -> list[dict]:
     if name == "search_corpus":
         return _search_hits(payload)
@@ -339,12 +368,13 @@ def build_step(
         step["summary"] = step["error"]
         return step
 
-    hits = _hits_for(name, payload)
+    kind = _payload_kind(name, arguments, payload)
+    hits = _hits_for(kind, payload)
     omitted = max(0, len(hits) - _MAX_HITS)
     step["hits"] = hits[:_MAX_HITS]
     if omitted:
         step["omitted"] = omitted
-    step["summary"] = _summary(name, payload, step["hits"], omitted)
+    step["summary"] = _summary(kind, payload, step["hits"], omitted)
     if error:
         step["error"] = _clip(error, _SNIPPET_CHARS)
     # The tool says outright when its own list was cut short, and that outranks

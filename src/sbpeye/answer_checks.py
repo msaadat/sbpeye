@@ -40,8 +40,10 @@ from .models import Attachment, Circular, CircularRelationship
 # circular in a recency or tag listing, an inventory row with its excerpt. Citing one of
 # those rows is citing what the tool showed. Every other tool is accounted by the
 # ledgers, because its payload also names documents it did not deliver (a circular's
-# amenders, its attachment manifest).
+# amenders, its attachment manifest). `list_documents` is R5a's name for the last three;
+# they stay for turns replayed from before it.
 LISTING_TOOLS = frozenset({
+    "list_documents",
     "query_regulatory_values",
     "get_latest_circulars",
     "get_circulars_by_tag",

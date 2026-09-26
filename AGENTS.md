@@ -100,15 +100,21 @@ The model reaches the corpus only through these. Names are load-bearing: the mod
 on them before it reads a description, which is why the discovery tool is not called
 `search_circulars` — under that name it never looked for an Act.
 
+Four tools since R5a (`docs/CHAT_REDESIGN.md` §6, `tests/test_open_document.py`); there were
+nine. `tools_for_turn(selected_circular_ids, db)` decides what one turn is offered, once per
+turn.
+
 | Tool | Reaches | Notes |
 |---|---|---|
-| `search_corpus` | circulars **and** laws | Default search. Returns `lexical_results` / `semantic_results` (circulars, unfused, both ranks visible), `reference_matches`, and `law_results` (laws, RRF-fused, ranked separately — a rank among laws is not comparable with a rank among circulars). Department/tag filters are circular-only and drop the law arm. |
-| `get_circular_details` | one circular + attachments | Letter, manifest, and annexure passages for `query` (default: the user's question). Cannot fetch a law. Passages the turn already sent are listed as pointers, not repeated. `circular_reference` takes a handle (`[[c:…]]`, resolved exactly through the turn's `CitationHandles` map, or by slug), a reference, or a title; a result found only by full-text search carries `resolution_note` saying it is the closest match. `read_attachment` resolves the same way. |
-| `read_attachment` | inside one attachment | The annexure analogue of `get_law_details`: `page`, `section` (a paragraph number, "4.11") or `query`; hits come back with `ATTACHMENT_NEIGHBOUR_CHUNKS` either side. Names the attachment by filename or `[[a:…]]` handle; optional when the circular has one. |
-| `get_law_details` | inside one law | `query` or `section`; matched chunks come back with `LAW_NEIGHBOUR_CHUNKS` either side, because a statute's sub-sections split across chunk boundaries. Reports `resolved_title` rather than passing a near-match off as the requested document; when only the search arm matched and the titles name different instruments (not a spelling variant), a leading `resolution_note` says the requested one is not in the corpus (`_law_resolution_note`). Title matching is whole-word over `normalized_title`, ranked by `_law_title_rank` so a "<parent> - <subtitle>" companion never stands in for its parent; parts also answer to "<parent> <part_label>". |
-| `search_selected_documents` | pinned circulars | Scoped; errors when nothing is pinned. |
-| `search_regulatory_inventory` | every document | Exhaustive "list all" sweeps only. Rows are pointers with one short excerpt — drill in with the two `get_*_details` tools. |
-| `get_latest_circulars`, `get_circulars_by_tag`, `query_regulatory_values` | circulars | Recency, tag browse, structured values. |
+| `search_corpus` | circulars **and** laws | Default search. Returns `lexical_results` / `semantic_results` (circulars, unfused, both ranks visible), `reference_matches`, and `law_results` (laws, RRF-fused, ranked separately — a rank among laws is not comparable with a rank among circulars). Department, tag and year (`start_year`/`end_year`) filters are circular-only and drop the law arm. `scope: "selected"` searches only the pinned circulars (was `search_selected_documents`); the parameter is withheld from the schema on a turn with no selection, and refused by `_execute_tool` if called anyway. |
+| `open_document` | one circular, attachment or law | Routes onto the three readers that were separate tools — `_read_circular` (was `get_circular_details`: letter, manifest, annexure passages for `query`), `_read_attachment` (was `read_attachment`: `page`, `section` ("4.11") or `query`, with `ATTACHMENT_NEIGHBOUR_CHUNKS` either side) and `_read_law` (was `get_law_details`: `query` or `section`, with `LAW_NEIGHBOUR_CHUNKS` either side, because a statute's sub-sections split across chunk boundaries). The prompt tells the model to open an instrument the question names by that name, not to search for it first (P17, 2026-09-27 R5a round). A handle decides by its kind; a circular given `page`/`section`/`attachment` reads inside its annexure. Free text goes through `_resolve_document`: this turn's `CitationHandles`, then a slug from history (circular or law), then a **law title before any circular** — the reference parser reads any word and number as a reference ("Chapter 12"), and a circular's title can contain an Act's name — then the reference parser, then the near-match fallbacks, each of which says so in `resolution_note`. A law listing row that is a circular opens as the circular. |
+| `list_documents` | pointer rows | Without `query`: circulars newest first, filtered by department, tag and years (was `get_latest_circulars` / `get_circulars_by_tag`). With `query`: the exhaustive inventory sweep (was `search_regulatory_inventory`) — "list all" questions only; rows are unreviewed pointers with one short excerpt. |
+| `query_regulatory_values` | circulars | Structured values. **Offered only while `circular_entities` covers `VALUES_TOOL_MIN_COVERAGE` of circulars** (0.19% on 2026-09-26, so withheld). |
+
+The nine old names are still served by `_execute_tool`, labelled in `TOOL_LABELS` and digested
+by `chat_steps` — a replayed conversation can prompt a call to one, and stored research steps
+name them. The prose below names the readers by their old tool names, which is what the
+traces and benchmark rounds it cites recorded.
 
 Retrieval into the laws corpus is exercised by `tests/test_law_chat_reach.py`, which
 documents the 2026-08-23 benchmark failure each property fixes; retrieval into a

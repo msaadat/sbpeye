@@ -637,17 +637,18 @@ def test_an_unindexed_attachment_is_still_readable(db, monkeypatch):
 
 
 def test_the_tool_is_declared_and_labelled():
+    """R5a folded `read_attachment` into `open_document`; its modes are that tool's now."""
     from sbpeye.ai import TOOLS, tool_activity_label
 
     names = [tool["function"]["name"] for tool in TOOLS]
-    assert "read_attachment" in names
-    schema = next(t for t in TOOLS if t["function"]["name"] == "read_attachment")
-    assert {"page", "section", "query", "attachment"} <= set(
+    assert "open_document" in names
+    schema = next(t for t in TOOLS if t["function"]["name"] == "open_document")
+    assert {"document", "page", "section", "query", "attachment"} <= set(
         schema["function"]["parameters"]["properties"]
     )
+    # Still labelled: a replayed conversation can call the old name.
     assert tool_activity_label("read_attachment") == "Reading the annexure"
-    details = next(t for t in TOOLS if t["function"]["name"] == "get_circular_details")
-    assert "query" in details["function"]["parameters"]["properties"]
+    assert tool_activity_label("open_document") == "Reading the document"
 
 
 def test_a_read_step_lists_its_passages_under_the_attachment():

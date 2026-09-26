@@ -351,7 +351,7 @@ def _transform(name: str, raw: str, ledger: dict, seen: set, opts: dict) -> int:
             top = (isinstance(lexical, int) and lexical <= 3) or (isinstance(semantic, int) and semantic <= 3)
             if not top:
                 item.pop("full_circular_text")
-        if opts.get("inventory") and name == "search_regulatory_inventory" and item.get("passage"):
+        if opts.get("inventory") and name in ("search_regulatory_inventory", "list_documents") and item.get("passage"):
             item["passage"] = item["passage"][:200]
         if citation:
             ledger[citation] = max(ledger.get(citation, 0), 3 if item.get("full_circular_text") else 2)

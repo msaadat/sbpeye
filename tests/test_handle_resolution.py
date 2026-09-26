@@ -113,7 +113,7 @@ def test_a_law_handle_is_refused_with_the_tool_that_reads_it(db):
     )
 
     assert circular is None
-    assert "get_law_details" in error["error"]
+    assert "open_document" in error["error"]
 
 
 # ---------------------------------------------------------- slugs outside the map
@@ -173,4 +173,4 @@ def test_both_circular_tools_resolve_through_the_turns_map(db, tool):
         tool, {"circular_reference": "[[l:Anti-Money-Laundering-Act-2010]]"}, db,
     ))
 
-    assert "get_law_details" in result["error"]
+    assert "open_document" in result["error"]

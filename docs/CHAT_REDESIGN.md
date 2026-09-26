@@ -364,7 +364,7 @@ as 2026-08-26; C12 also landed between the rounds, so cost deltas are not R1's a
   them was opened. The 5 laws opened were all in `law_results` too.
 - **Found on the way, not caused by R1:** a handle slug passed as `circular_reference`
   (`get_circular_details("BPRD-CL-01-2021")`) silently resolved to BPRD CL 24 of 2006 — the
-  §6 failure, live today — and repeated `get_law_details` on one Act (7 calls in P14) is
+  §6 failure, live today — and repeated `get_law_details` on one Act (6 calls in P14) is
   `CHAT_CONTEXT_PLAN.md` C5.
 
 Verdict: keep. Lossless, slightly smaller, and its annexure addressing is used; the law line

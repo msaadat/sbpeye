@@ -297,7 +297,9 @@ TOOLS = [
                 "the chunk either side, so a paragraph split across a chunk boundary "
                 "arrives whole.\n"
                 "Passages are whole index chunks with `chunk_index` and `page`; consecutive "
-                "indexes are consecutive text. `pages` gives the attachment's page range."
+                "indexes are consecutive text. `pages` gives the attachment's page range. "
+                "Chunks already returned in this conversation are not repeated — "
+                "`provided_earlier` names them; they are above."
             ),
             "parameters": {
                 "type": "object",
@@ -333,7 +335,9 @@ TOOLS = [
                 "The result names the document it actually resolved to in "
                 "`resolved_title`. Check it against what you asked for: a mismatch means "
                 "the corpus does not hold the instrument you wanted, and you should say "
-                "so rather than answer from whatever came back."
+                "so rather than answer from whatever came back. Chunks already returned in "
+                "this conversation are not repeated — `provided_earlier` names them; they "
+                "are above, and asking again returns nothing new."
             ),
             "parameters": {
                 "type": "object",
@@ -1284,6 +1288,49 @@ def _card_referenced_laws(circular) -> dict:
     if len(ordered) > MAX_CARD_REFERENCED_LAWS:
         section["references_laws_not_listed"] = len(ordered) - MAX_CARD_REFERENCED_LAWS
     return section
+
+def _chunk_ranges(indexes: list[int]) -> str:
+    """``[45, 46, 47, 49]`` → ``"45-47, 49"`` — chunk indexes as a reader would write them."""
+    runs: list[list[int]] = []
+    for index in sorted(set(indexes)):
+        if runs and index == runs[-1][-1] + 1:
+            runs[-1].append(index)
+        else:
+            runs.append([index])
+    return ", ".join(
+        f"{run[0]}-{run[-1]}" if len(run) > 1 else str(run[0]) for run in runs
+    )
+
+
+def _provided_earlier_section(withheld: list[int], returned_any: bool) -> dict:
+    """What a drill-in call matched but did not re-send, for the payload (C5).
+
+    A bare "duplicate" tells the model nothing about how to make progress, and a model
+    that cannot make progress spends the rest of the loop finding that out — so the
+    pointer names the chunks, says they are above rather than missing, and, when nothing
+    new came back at all, says what to do instead of asking again.
+    """
+    if not withheld:
+        return {}
+    chunks = _chunk_ranges(withheld)
+    if returned_any:
+        return {"provided_earlier": {
+            "chunks": chunks,
+            "note": (
+                "These matching chunks were already returned earlier in this conversation "
+                "and are not repeated; read them above alongside the passages here."
+            ),
+        }}
+    return {"provided_earlier": {
+        "chunks": chunks,
+        "note": (
+            f"Everything this request matched (chunks {chunks}) was already returned "
+            "earlier in this conversation — it is above, not missing. Asking again will "
+            "not return anything new: ask for a different section or page, a query aimed "
+            "at a different provision, or answer from what you have."
+        ),
+    }}
+
 
 # Said once per response, not once per pointer. There can be a dozen withdrawn matches and
 # the instruction is the same for all of them; repeating it is the pattern `_dedupe_repeat_row`
@@ -3993,8 +4040,15 @@ SOURCE BLOCKS:
         *,
         budget: int = LAW_SEARCH_PASSAGE_BUDGET_CHARS,
         sent: dict[str, list[str]] | None = None,
+        sent_passages: dict[str, set[str]] | None = None,
     ) -> list[dict]:
         """Serialize the law arm of a search response, under one shared budget.
+
+        `sent_passages` is the turn's passage ledger, shared with `get_law_details`: a
+        chunk either tool sent is held for both (C5), keyed as the index keys it —
+        ``{version_id}__chunk_N``, since a new edition is different text. Held chunks
+        are dropped before the budget sees them, and a repeat row that still carries a
+        chunk no earlier call did hands it over, as a circular row does since C12.
 
         The law form of the evidence card (`docs/CHAT_REDESIGN.md` §5, R1), and
         deliberately thinner than `_search_result_payload`. A circular's body is inlined
@@ -4003,6 +4057,8 @@ SOURCE BLOCKS:
         instrument worth opening, and a citation to open it with. Anything more spends
         the window on a document the model has not yet decided it needs.
         """
+        from .chat_retrieval import passage_key  # lazy: see `_passage_ledger_key`
+
         payloads: list[dict] = []
         remaining = budget
         for result in results:
@@ -4023,10 +4079,18 @@ SOURCE BLOCKS:
                 # from a snippet.
                 payload["full_text_chars"] = len(version.content_text)
             passages = [item for item in (result.get("passages") or []) if item.get("text")]
-            # Serialized as usual and stripped by `_withhold_repeated_text` below when this
-            # turn already sent them. Not charged, for the reason `_inline_body_texts`
-            # gives: budget spent on bytes that never leave starves the laws after it.
-            charged = sent is None or document.id not in sent
+            held: set[str] | None = None
+            if sent_passages is not None and version is not None:
+                held = sent_passages.setdefault(document.id, set())
+                passages = [
+                    item for item in passages
+                    if passage_key(version.id, item.get("chunk_index"), item["text"]) not in held
+                ]
+            # Without a passage ledger, a repeat row's passages are serialized as usual
+            # and stripped by `_dedupe_repeat_row` below. Not charged, for the reason
+            # `_inline_body_texts` gives: budget spent on bytes that never leave starves
+            # the laws after it. With the ledger, what is left is new and does leave.
+            charged = held is not None or sent is None or document.id not in sent
             kept: list[dict] = []
             for item in passages:
                 text = item["text"].strip()
@@ -4036,9 +4100,15 @@ SOURCE BLOCKS:
                     "passage": text,
                     "locator": item.get("source_ref"),
                     "page": item.get("source_page"),
+                    "chunk_index": item.get("chunk_index"),
                 })
                 if charged:
                     remaining -= len(text)
+            if held is not None and kept:
+                held.update(
+                    passage_key(version.id, item["chunk_index"], item["passage"])
+                    for item in kept
+                )
             if kept:
                 payload["passages"] = kept
             elif result.get("snippet"):
@@ -4050,7 +4120,8 @@ SOURCE BLOCKS:
                     payload[key] = result[key]
             payloads.append(
                 AIClient._dedupe_repeat_row(
-                    payload, document.id, _REPEAT_LAW_ROW_KEYS, sent
+                    payload, document.id, _REPEAT_LAW_ROW_KEYS, sent,
+                    fresh_keys=("passages",) if held is not None and kept else (),
                 )
             )
         return payloads
@@ -4221,7 +4292,7 @@ SOURCE BLOCKS:
                     for key, results in arms.items()
                 }
                 law_payload = self._law_search_payloads(
-                    law_results, budget=law_budget, sent=sent
+                    law_results, budget=law_budget, sent=sent, sent_passages=sent_passages,
                 )
                 unique = {
                     item["citation"]
@@ -4736,37 +4807,45 @@ SOURCE BLOCKS:
                 return json.dumps({"error": f"`page` must be a number, got {raw_page!r}"})
 
         pages = retriever.pages
-        passages: list[dict] = []
         notes: list[str] = []
-        if page is not None:
-            passages = retriever.page(page, token_budget=budget)
-            if not passages:
+
+        def by_page(held):
+            found = retriever.page(page, token_budget=budget, exclude=held)
+            if not found and not retriever.last_provided_earlier:
                 span = f"{pages[0]}-{pages[-1]}" if pages else "none"
-                notes.append(
-                    f"No page {page} in this attachment (pages with text: {span})."
-                )
-        if not passages and section:
-            passages = retriever.section(section, token_budget=budget)
-            if not passages:
+                notes.append(f"No page {page} in this attachment (pages with text: {span}).")
+            return found
+
+        def by_section(held):
+            found = retriever.section(section, token_budget=budget, exclude=held)
+            if not found and not retriever.last_provided_earlier:
                 notes.append(
                     f"No paragraph or section numbered {section} was located; the "
                     "passages below, if any, come from the query instead."
                 )
-        if not passages and query:
-            passages = retriever.search(query, limit=limit, token_budget=budget)
-        if not passages and not (query or section or page is not None):
-            passages = retriever.search(
-                circular.title or attachment.filename, limit=limit, token_budget=budget
-            )
-        if not passages:
+            return found
+
+        attempts = []
+        if page is not None:
+            attempts.append(by_page)
+        if section:
+            attempts.append(by_section)
+        if query:
+            attempts.append(lambda held: retriever.search(
+                query, limit=limit, token_budget=budget, exclude=held))
+        if not (query or section or page is not None):
+            attempts.append(lambda held: retriever.search(
+                circular.title or attachment.filename, limit=limit,
+                token_budget=budget, exclude=held))
+        # Keyed on the circular, as `search_corpus` and `get_circular_details` key their
+        # attachment passages, so a chunk any of the three sent is held for all of them.
+        passages, withheld = self._read_with_ledger(retriever, circular.id, attempts)
+        if not passages and not withheld:
             notes.append(
                 "Nothing in this attachment matched. Do not infer its contents — say "
                 "what you could not find."
             )
 
-        self._sent_passages.setdefault(circular.id, set()).update(
-            retriever.chunk_ids(passages)
-        )
         payload = {
             **({"resolution_note": resolution_note} if resolution_note else {}),
             "circular": circular.reference or circular.title,
@@ -4784,7 +4863,37 @@ SOURCE BLOCKS:
         }
         if notes:
             payload["note"] = " ".join(notes)
+        payload.update(_provided_earlier_section(withheld, bool(passages)))
         return json.dumps(payload)
+
+    def _read_with_ledger(
+        self, retriever: Any, owner_id: str, attempts: list,
+    ) -> tuple[list[dict], list[int]]:
+        """Run a drill-in tool's retrieval attempts against the turn's passage ledger.
+
+        `CHAT_CONTEXT_PLAN.md` C5. Keying a repeat guard on the arguments does not work —
+        in the 2026-08-19 worked example four `get_law_details` calls with four different
+        queries returned chunks 45-49 twice, byte for byte, and in the 2026-09-26 round
+        P14 read one Act six times. What repeats is what the call *resolved to*: the
+        chunks. So every attempt excludes the chunks the ledger says the model holds, and
+        what it withheld is reported rather than re-sent.
+
+        Attempts are tried in order (section, then query, then a default) and the first
+        that returns *or withholds* anything ends it. A section the model already holds
+        must come back as "you have this", not fall through to a query that hands it
+        something else instead.
+        """
+        ledger = self._sent_passages.setdefault(owner_id, set())
+        held = retriever.sent_indexes(ledger)
+        passages: list[dict] = []
+        withheld: list[int] = []
+        for attempt in attempts:
+            passages = attempt(held)
+            withheld = retriever.last_provided_earlier
+            if passages or withheld:
+                break
+        ledger.update(retriever.chunk_ids(passages))
+        return passages, withheld
 
     def _law_details_tool(self, arguments: dict, db: Session) -> str:
         """Read inside one law — the statute analogue of `get_circular_details`."""
@@ -4818,13 +4927,17 @@ SOURCE BLOCKS:
         query = str(arguments.get("query", "")).strip()
         limit = max(1, min(int(arguments.get("limit", 5)), 10))
 
-        passages: list[dict] = []
+        attempts = []
         if section:
-            passages = retriever.section(section, token_budget=budget)
-        if not passages and query:
-            passages = retriever.search(query, limit=limit, token_budget=budget)
-        if not passages and not query and not section:
-            passages = retriever.search(document.title, limit=limit, token_budget=budget)
+            attempts.append(lambda held: retriever.section(
+                section, token_budget=budget, exclude=held))
+        if query:
+            attempts.append(lambda held: retriever.search(
+                query, limit=limit, token_budget=budget, exclude=held))
+        if not query and not section:
+            attempts.append(lambda held: retriever.search(
+                document.title, limit=limit, token_budget=budget, exclude=held))
+        passages, withheld = self._read_with_ledger(retriever, document.id, attempts)
 
         payload = {
             "requested": requested,
@@ -4842,16 +4955,17 @@ SOURCE BLOCKS:
             "passages": passages,
             "passage_count": len(passages),
         }
-        if section and not passages:
+        if section and not passages and not withheld:
             payload["note"] = (
                 f"No provision numbered {section} was located in this document. The "
                 "passages below, if any, come from the query instead."
             )
-        if not passages:
+        if not passages and not withheld:
             payload["note"] = (
                 "Nothing in this document matched. Do not infer its contents — say what "
                 "you could not find."
             )
+        payload.update(_provided_earlier_section(withheld, bool(passages)))
         return json.dumps(payload)
 
     def _inventory_tool(self, arguments: dict, db: Session) -> str:

@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import re
+from collections.abc import Collection
 from dataclasses import dataclass
 
 from rank_bm25 import BM25Okapi
@@ -513,9 +514,34 @@ class IndexedDocumentRetriever:
     def __init__(self) -> None:
         self._chunks = self._load_chunks()
         self._by_index = {chunk.chunk_index: chunk for chunk in self._chunks}
+        # The chunks the last retrieval selected but withheld because the caller's
+        # `exclude` said the model already has them — what a repeat call is told it
+        # already holds, instead of being handed it again.
+        self.last_provided_earlier: list[int] = []
 
     def _where(self) -> dict:
         raise NotImplementedError
+
+    def _ledger_id(self) -> str:
+        """The document id the index writes this document's chunks under."""
+        raise NotImplementedError
+
+    def chunk_ids(self, passages: list[dict]) -> list[str]:
+        """The ledger keys of returned passages, in the index's own id form."""
+        return [
+            passage_key(self._ledger_id(), item["chunk_index"])
+            for item in passages
+            if item.get("chunk_index") is not None
+        ]
+
+    def sent_indexes(self, ledger: set[str]) -> set[int]:
+        """The chunk indexes of this document that `ledger` says a turn already sent."""
+        prefix = f"{self._ledger_id()}__chunk_"
+        return {
+            int(key[len(prefix):])
+            for key in ledger
+            if key.startswith(prefix) and key[len(prefix):].isdigit()
+        }
 
     def _fallback_document(self) -> dict | None:
         """The document to chunk locally when the store holds none of it, or None."""
@@ -575,7 +601,9 @@ class IndexedDocumentRetriever:
         """The page numbers the chunks carry, ascending; empty for an HTML source."""
         return sorted({chunk.page for chunk in self._chunks if chunk.page is not None})
 
-    def page(self, number: int, *, token_budget: int) -> list[dict]:
+    def page(
+        self, number: int, *, token_budget: int, exclude: Collection[int] = (),
+    ) -> list[dict]:
         """Every chunk of one page, in order, with no neighbour expansion.
 
         The chunker restarts at page boundaries, so a page's chunks *are* the page. A
@@ -584,9 +612,11 @@ class IndexedDocumentRetriever:
         so nothing is widened and the budget is the only bound.
         """
         hits = [chunk for chunk in self._chunks if chunk.page == number]
-        return self._expand(hits, token_budget=token_budget, neighbours=0)
+        return self._expand(hits, token_budget=token_budget, neighbours=0, exclude=exclude)
 
-    def section(self, label: str, *, token_budget: int) -> list[dict]:
+    def section(
+        self, label: str, *, token_budget: int, exclude: Collection[int] = (),
+    ) -> list[dict]:
         """Chunks where a numbered provision matching `label` is set out.
 
         Retrieval by meaning cannot be asked for "section 9D" — the phrase carries no
@@ -609,6 +639,7 @@ class IndexedDocumentRetriever:
             r"^(?:sections?|sec\.?|s\.?|regulations?|reg\.?)\s*", "", label.strip(),
             flags=re.IGNORECASE,
         ).strip(" .()")
+        self.last_provided_earlier = []
         if not wanted:
             return []
         escaped = re.escape(wanted)
@@ -638,9 +669,12 @@ class IndexedDocumentRetriever:
             hits = [chunk for chunk in hits if densities[chunk.chunk_index] == floor]
         if not hits:
             hits = [chunk for chunk in self._chunks if mention.search(chunk.text)]
-        return self._expand(hits, token_budget=token_budget)
+        return self._expand(hits, token_budget=token_budget, exclude=exclude)
 
-    def search(self, query: str, *, limit: int, token_budget: int) -> list[dict]:
+    def search(
+        self, query: str, *, limit: int, token_budget: int, exclude: Collection[int] = (),
+    ) -> list[dict]:
+        self.last_provided_earlier = []
         if not query.strip() or not self._chunks or token_budget <= 0:
             return []
 
@@ -687,7 +721,7 @@ class IndexedDocumentRetriever:
             key=lambda key: (is_listing_chunk(self._by_index[key].text), -scores[key]),
         )
         hits = [self._by_index[key] for key in ranked_indexes[: max(1, min(limit, 10))]]
-        return self._expand(hits, token_budget=token_budget)
+        return self._expand(hits, token_budget=token_budget, exclude=exclude)
 
     def _payload(self, chunk: LawChunk) -> dict:
         return chunk.payload()
@@ -698,15 +732,27 @@ class IndexedDocumentRetriever:
         *,
         token_budget: int,
         neighbours: int | None = None,
+        exclude: Collection[int] = (),
     ) -> list[dict]:
         """Widen each hit by its neighbours, merge overlaps, return in document order.
 
         Order is the document's, never relevance: consecutive chunks of one provision
         read as the provision only in the order it was written, and a caller that quotes
         them out of order quotes a rule that does not exist.
+
+        `exclude` is the chunks the model already holds (`CHAT_CONTEXT_PLAN.md` C5). They
+        are withheld — not charged to the budget, not returned — and listed on
+        `last_provided_earlier`. The ranking is not deepened to replace them: a query
+        whose best matches are already in context has been answered, and reaching down
+        the ranking for something new to return is how a repeat call turns into noise.
+        Only held chunks are withheld: a held hit's neighbours still go out when they are
+        new, because `search_corpus` sends a law hit without them and the neighbours are
+        the reason `get_law_details` gets called — a provision split across a boundary.
         """
         radius = self.neighbour_chunks if neighbours is None else max(0, neighbours)
+        excluded = set(exclude)
         keep: set[int] = set()
+        withheld: set[int] = set()
         remaining = max(0, token_budget)
         for hit in hits:
             window = [
@@ -714,12 +760,17 @@ class IndexedDocumentRetriever:
                 for index in range(hit.chunk_index - radius, hit.chunk_index + radius + 1)
                 if index in self._by_index and index not in keep
             ]
+            withheld.update(index for index in window if index in excluded)
+            window = [index for index in window if index not in excluded]
+            if not window:
+                continue
             cost = sum(estimate_tokens(self._by_index[index].text) for index in window)
             # The hit itself is worth exceeding the budget for; its neighbours are not.
             if cost > remaining and keep:
                 break
             keep.update(window)
             remaining -= cost
+        self.last_provided_earlier = sorted(withheld)
         return [self._payload(self._by_index[index]) for index in sorted(keep)]
 
 
@@ -735,6 +786,11 @@ class ScopedLawRetriever(IndexedDocumentRetriever):
 
     def _where(self) -> dict:
         return {"document_id": self.document.id}
+
+    def _ledger_id(self) -> str:
+        # Law chunks are indexed under the *version* in force, not the document: a new
+        # edition is different text, and a chunk sent from the old one is not held.
+        return self.version.id if self.version is not None else self.document.id
 
     def _log_label(self) -> str:
         return f"law {self.document.id}"
@@ -779,13 +835,8 @@ class ScopedAttachmentRetriever(IndexedDocumentRetriever):
             item["page"] = chunk.page
         return item
 
-    def chunk_ids(self, passages: list[dict]) -> list[str]:
-        """The ledger keys of returned passages, in the index's own id form."""
-        return [
-            passage_key(self.attachment.id, item["chunk_index"])
-            for item in passages
-            if item.get("chunk_index") is not None
-        ]
+    def _ledger_id(self) -> str:
+        return self.attachment.id
 
 
 def build_chat_context(

@@ -41,7 +41,7 @@ for the evidence budget, and every changed circular now names what changed it: a
 | **C2** | ~~Tier `full_circular_text` by rank~~ — **measured 1:1 against recall, do not ship as written** | `ai.py:3479` `_inline_body_texts` | see §5.2 | S | ⚠ blocked |
 | **C3** | Supersession pass before `_fair_shares` | `ai.py:1930` `_tool_result_synthesis_messages` | the one request never cached | S | ☐ |
 | **C4** | ~~One merged result list carrying both ranks~~ — **retired into C1a**, see §5.4 | — | — | — | ✗ retired |
-| **C5** | Repeat-call guard keyed on what was resolved | `ai.py:4227` `_law_details_tool` | 2.2%, far more when stuck | S | ☐ |
+| **C5** | Repeat-call guard keyed on what was resolved | `ai.py` `_read_with_ledger`, `chat_retrieval.py` `IndexedDocumentRetriever._expand` | **28.9% of drill-in output on the 2026-09-26 replay; 45% on P14** | S | ☑ landed |
 | **C6** | Stop when an iteration adds no new document | `ai.py:4692` `_stream_chat_impl` | removes 1–3 requests | S | ☐ |
 | **C7** | Charge conversation history to the turn budget | `main.py:3351` | the remaining unbounded input | S | ☐ |
 | **C8** | Express the synthesis budget as a share, and measure before sending | `ai.py:1850`, `ai.py:1647` | **the guarantee** | M | ☐ |
@@ -567,6 +567,36 @@ On a repeat, append a pointer:
 ~150 chars instead of 5,605. The `hint` matters: a bare "duplicate" tells the model nothing
 about how to make progress, and a model that cannot make progress spends the rest of the loop
 discovering that.
+
+**☑ Landed** (2026-09-26), pinned by `tests/test_repeat_reads.py`. As built, it went one step
+past the sketch above, on three points:
+
+- **It is the passage ledger, not a new one.** C12's `_sent_passages` already keyed chunks by
+  the index's own ids, so C5 is that ledger *enforced* on the drill-in path. The guard lives in
+  `IndexedDocumentRetriever._expand` (`exclude=`), so `read_attachment` — same base class, same
+  failure — got it for free. Law chunks are keyed `{version_id}__chunk_N`, as the store writes
+  them, and the law arm of `search_corpus` reads and writes the same ledger: a chunk either
+  tool sent is held for both.
+- **Only held chunks are withheld.** A held *hit* still sends its un-held neighbours: search
+  hands a law hit over without them, and the neighbours are why `get_law_details` gets called
+  (the s.9D(1)/(6) split from P15). The ranking is never deepened to replace a withheld hit.
+- **Attempts stop on a withhold.** `section` → `query` → default run in order, and the first
+  that returns *or withholds* anything ends it — a section the model holds comes back as "you
+  have this", not as a query result standing in for it.
+
+The payload carries `provided_earlier: {chunks: "45-49, 60", note}`; when nothing new came
+back the note says asking again returns nothing and names what to do instead.
+
+**Replay.** The exact `get_law_details` / `read_attachment` calls P01, P02, P12, P13 and P14
+made in the 2026-09-26 round, re-run against the corpus with and without the ledger:
+**279,167 → 198,535 characters (−28.9%)**. P14's six reads of one Act went from 87,121 to
+47,882 (−45%), two of them reduced to an 832-character pointer. First reads are untouched.
+
+Found on the way, not C5's: P01/P02 asked three times for the *Anti-Money Laundering Act,
+2010*, which the corpus does not hold. `_resolve_law`'s search fallback returned the AML/CFT/CPF
+Regulations each time; `resolved_title` said so and the model did not act on it. The
+circular path now carries an explicit `resolution_note` for a closest-match resolution
+(`_resolve_circular`); the law path should say "not held" as plainly.
 
 ### 5.6 — C6. Stop when an iteration adds no new document
 

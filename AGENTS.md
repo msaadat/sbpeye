@@ -136,7 +136,11 @@ keeps `_sent_passages` (which chunks, keyed by `passage_key` — the store's own
 chunk from `search_corpus`, `get_circular_details` and `read_attachment` is the same
 chunk). A repeat search row carries only passages no earlier row did, marked
 `passages_not_provided_earlier`; the scoped retrievers return already-sent hits as
-`provided_earlier` pointers that cost no budget.
+`provided_earlier` pointers that cost no budget. The drill-in tools obey it too (C5):
+`get_law_details` and `read_attachment` pass the held chunks to
+`IndexedDocumentRetriever` as `exclude`, withhold them, and name them in `provided_earlier`;
+law chunks are keyed `{version_id}__chunk_N` and shared with the law arm of `search_corpus`.
+A held hit's un-held neighbours still go out. Pinned by `tests/test_repeat_reads.py`.
 
 **Turn budget.** A chat turn is assembled from the selected-circular context plus one
 tool result per round, and the loop keeps every one of them, so the request grows

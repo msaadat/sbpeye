@@ -714,6 +714,9 @@ class ChatMessage(AppBase):
     # describe exist only while the turn is running. Never sent with the message
     # itself: the list is fetched a step at a time, when a reader opens one.
     steps_json = Column(Text, nullable=True)
+    # R6's warnings on this answer (`answer_checks.check_answer`), as a JSON list. NULL
+    # when the answer passed, and on turns written before the checks existed.
+    verification_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     session = relationship("ChatSession", back_populates="messages")

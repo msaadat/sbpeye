@@ -21,8 +21,8 @@ Two assumptions, chosen deliberately:
 **Status (2026-09-26):** the prerequisite has landed — `CHAT_CONTEXT_PLAN.md` **C11**
 (status-aware ranking, amender annotation), along with **C1a** (a document's text once per
 turn) and **C12** (passage-keyed ledger, `read_attachment`). **R1 is built** and pinned by
-`tests/test_evidence_card.py`, and has had one chat round (2026-09-26, §5). R2–R6 are not
-started. §9 is the migration path.
+`tests/test_evidence_card.py`, and has had one chat round (2026-09-26, §5). **R6's checks 2
+and 4 are built, warn-only** (§7). R2–R5 are not started. §9 is the migration path.
 
 **What moved since this was written.** The measurements in §1–§2 and the "Today" column in
 §8 were taken *before* C11, C1a and C12, and describe that code — they are the baseline this
@@ -42,7 +42,7 @@ Line anchors drift; trust the symbol name, not the number.
 | **R3** | Stage 1 plan call replaces iteration 1 | new | −1 round trip, checkable output | M | ☐ |
 | **R4** | Stage 2 intent dispatch | new | retrieval becomes deterministic | L | ☐ |
 | **R5** | Collapse the tool schema to three verbs | `ai.py:136` `TOOLS` | ~15,900 ch (9 tools) → ~1,200 ch | M | ☐ |
-| **R6** | Stage 4 verification | new | citation grounding, supersession check | M | ☐ |
+| **R6** | Stage 4 verification | `answer_checks.py`, `AIClient.verify_answer`, both chat routes | checks 2 and 4, **warn-only**; 5 of 30 replayed answers flagged | M | ◐ checks 2 + 4 built, warn-only (§7) |
 
 **Prerequisite — landed.** Status-aware ranking and amender annotation is **C11** in
 `CHAT_CONTEXT_PLAN.md`, pinned by `tests/test_search_currency.py`. Withdrawn circulars are
@@ -444,6 +444,56 @@ an unresolvable or ungrounded citation is withheld rather than rendered. Checks 
 after the stream and annotate the `done` event, so the reader gets "this cites a circular
 amended in 2021" as a footer rather than not at all. Failures annotate; only check 2 withholds.
 
+
+### R6 as built — checks 2 and 4, warn-only
+
+**Built** (2026-09-26): `answer_checks.check_answer`, run by `AIClient.verify_answer` from both
+chat routes on the text they save (for a stream, the segment after the last tool call).
+Pinned by `tests/test_answer_checks.py`. Checks 1 (resolution) was already
+`CitationHandles.expand`; 3 and 5 are not built — 5 because `circular_entities` covers seven
+circulars (§8).
+
+*Warn-only, by decision.* Neither check alters the answer or withholds a citation, contrary to
+the "only check 2 withholds" above. Warnings are stored on the message
+(`chat_messages.verification_json`), returned on the session payload and the stream's `done`
+event, recorded as a `verification` trace event (`trace_readout.py` counts them per round), and
+shown under the answer as a collapsible "citation checks flagged" block — open by default only
+for a high-severity one. Behind the same admin gate as the research steps while the rate is
+measured; a false positive shown to every reader costs trust before the rate is known.
+
+*Grounding (check 2)* is set membership over the turn's ledgers: a cited document is grounded
+if its text went out (`_sent_text_keys`, `_sent_passages` — an attachment only by its own
+chunks), if it was a row of a listing tool (values, latest, tags, inventory), or if it was
+pinned to the conversation. Not by C6's `_result_documents`: a `get_circular_details` payload
+also cites the circular's amenders and its attachment manifest, none of which was read.
+
+*Supersession (check 4)* flags a withdrawn circular cited without naming its replacement or
+saying so in the citation's own paragraph (**high**), and one changed by an `amends` edge
+cited without naming an amender (**medium**). `adds_to` and `clarifies` are not flagged —
+C11 measured that most "amended" circulars had nothing changed.
+
+*Two refinements, from replaying the benchmark rounds.* Every tool call of the 2026-08-26 and
+2026-09-26 rounds was replayed to rebuild each turn's ledgers, and the checks run on the 30
+saved answers (84 citations). First pass: 7 answers flagged — 7 medium, 2 grounding. Reading
+them:
+
+- Both grounding warnings were **lineage**: "the 2025 PRs have since been amended by X", X
+  never read, the answer saying it could not see X's provisions (08-26 P12). A fact from the
+  relationship graph, put there by C11 and correctly disclosed. A cited circular related by an
+  edge to one the turn *read* — or to another cited one — is now exempt. The cost is that an
+  answer attributing *content* to such an amender is exempt too; the check cannot tell naming
+  from quoting without reading prose.
+- One medium was an amended circular the answer framed as **the earlier rule** ("set by X and
+  since superseded by the 2025 PRs", 09-26 P12). Withdrawal language in the citation's
+  paragraph now exempts the amendment check, as it already did the withdrawal check.
+
+After them: **5 of 30 answers flagged, 6 warnings, all medium, none high, no grounding.** Two
+look like the check doing its job — the AML/CFT/CPF Regulations circular cited for EDD and
+record retention without its 2021 amendments (P01, P02). Two are noise from coarse `amends`
+edges — master circulars whose "amendments" were reporting formats (BPD 07/2006, BSD 01/2004).
+That split is the measurement warn-only exists for: check 4's medium tier needs the edge
+typing to improve before it is shown to readers; check 2 has fired on nothing real yet, which
+says more about the benchmark's easy citations than about the check.
 ---
 
 ## 8. What it costs, and what it depends on

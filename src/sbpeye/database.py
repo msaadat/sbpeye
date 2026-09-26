@@ -613,6 +613,12 @@ def _ensure_app_columns(bind=None):
                 conn.execute(text(
                     "ALTER TABLE chat_messages ADD COLUMN steps_json TEXT"
                 ))
+            # R6's answer checks. Older turns stay NULL, which reads as "not checked":
+            # the ledgers the checks run against existed only while each turn ran.
+            if "verification_json" not in existing:
+                conn.execute(text(
+                    "ALTER TABLE chat_messages ADD COLUMN verification_json TEXT"
+                ))
 
         if "users" in table_names:
             existing = {c["name"] for c in insp.get_columns("users")}

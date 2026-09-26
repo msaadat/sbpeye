@@ -19,6 +19,10 @@ reports the things a rater cannot see:
     A per-round count says whether a prompt change broke citation compliance without
     grading a single answer. The 2026-08-23 baseline is 8 handles across 15 items and 3
     reruns; 3 of those fell in the round proper.
+  * **Answer checks (R6)** — the `verification` event's counts: citations whose text the
+    turn never read (`grounding`), and withdrawn or `amends`-changed circulars cited
+    without saying so (`supersession`). Warn-only, so this is the number that decides
+    whether either check is ever allowed to withhold a citation.
   * **Which tools were called**, so the reach of `search_corpus` / `get_law_details` into
     the laws corpus can be read off directly rather than inferred from the prose.
 
@@ -53,6 +57,7 @@ def turn_trace(db: sqlite3.Connection, session_id: str) -> dict | None:
     iterations = 0
     synthesis = False
     early = False
+    checks = {"grounding": 0, "supersession": 0}
     for kind, stage, payload_json in events:
         if kind == "tool_request":
             payload = json.loads(payload_json)
@@ -60,6 +65,10 @@ def turn_trace(db: sqlite3.Connection, session_id: str) -> dict | None:
             tools[name] += 1
         if kind == "early_stop":
             early = True
+        if kind == "verification":
+            payload = json.loads(payload_json)
+            for key in checks:
+                checks[key] += int(payload.get(key) or 0)
         if kind == "citation_drop":
             # Each entry is {"reason": …, "handle": …}; the handle is the readable half.
             for entry in json.loads(payload_json).get("dropped", []):
@@ -83,6 +92,7 @@ def turn_trace(db: sqlite3.Connection, session_id: str) -> dict | None:
         "iterations": iterations,
         "hit_ceiling": synthesis and not early,
         "stopped_early": early,
+        "checks": checks,
         "dropped": dropped,
     }
 
@@ -122,6 +132,9 @@ def main() -> None:
         totals["tool_calls"] += trace["tool_calls"]
         totals["ceilings"] += trace["hit_ceiling"]
         totals["early"] += trace["stopped_early"]
+        totals["grounding"] += trace["checks"]["grounding"]
+        totals["supersession"] += trace["checks"]["supersession"]
+        totals["flagged"] += any(trace["checks"].values())
         totals["drops"] += len(trace["dropped"])
         totals["in"] += trace["prompt_tokens"] or 0
         totals["out"] += trace["completion_tokens"] or 0
@@ -142,6 +155,9 @@ def main() -> None:
         f"\n  {totals['tool_calls']} tool calls · {totals['ceilings']} turns hit the "
         f"iteration ceiling · {totals['early']} ended early (C6) · "
         f"{totals['drops']} dropped citation handles\n"
+        f"  answer checks: {totals['grounding']} unread citations, "
+        f"{totals['supersession']} supersession warnings, "
+        f"across {totals['flagged']} answer(s)\n"
         f"  tokens: {totals['in']:,} in, {totals['out']:,} out\n"
     )
     print("  tool usage across the round:")

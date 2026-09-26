@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from .chat_steps import build_step, failed_step
 from .checklist import compact_required_checklist
+from .answer_checks import LISTING_TOOLS, check_answer
 from .citation_handles import TOKEN_PATTERN, CitationHandles, StreamExpander
 from .database import AppSessionLocal
 from .env import load_app_env, resolve_env_value
@@ -1670,6 +1671,9 @@ class AIClient:
         # fail. Turn-scoped and round-scoped respectively; see `_round_added_nothing`.
         self._result_documents: set[tuple[str, str]] = set()
         self._round_failed = False
+        # R6's third input: the rows of the tools whose rows *are* what they list
+        # (`answer_checks.LISTING_TOOLS`). Turn-scoped with the ledgers.
+        self._listed_documents: set[tuple[str, str]] = set()
         # One digested record per tool call this turn makes, in execution order, for
         # the route to persist beside the answer. Turn-scoped for the same reason as
         # the ledger above.
@@ -5366,10 +5370,42 @@ circular on an adjacent topic for a statute you could not retrieve.
         if isinstance(payload, dict) and payload.get("error"):
             self._round_failed = True
         if name != "search_corpus":
-            self._result_documents.update(
+            documents = {
                 (match.group(1), match.group(2).strip())
                 for match in TOKEN_PATTERN.finditer(result or "")
+            }
+            self._result_documents.update(documents)
+            if name in LISTING_TOOLS:
+                self._listed_documents.update(documents)
+
+    def verify_answer(
+        self, answer: str, db: Session, selected_circular_ids: list[str] | None = None,
+    ) -> list[dict]:
+        """R6, warn-only: the grounding and supersession warnings for a finished answer.
+
+        Called by the chat routes on the text they save — for a streamed turn that is the
+        segment after the last tool call, not the narration before it — using the ledgers
+        this client kept while the turn ran, so it must be the turn's own client. Never
+        alters the answer, and never raises: a check that fails is logged and reports
+        nothing, because an unverified answer is still an answer.
+        """
+        try:
+            warnings = check_answer(
+                answer, db,
+                sent_text_keys=self._sent_text_keys,
+                sent_passages=self._sent_passages,
+                listed_documents=self._listed_documents,
+                selected_circular_ids=selected_circular_ids or (),
             )
+        except Exception as exc:
+            emit_event("verification_failed", exception_payload(exc), stage="chat.verify")
+            return []
+        emit_event("verification", {
+            "grounding": sum(item["check"] == "grounding" for item in warnings),
+            "supersession": sum(item["check"] == "supersession" for item in warnings),
+            "warnings": warnings,
+        }, stage="chat.verify")
+        return warnings
 
     def _evidence_state(self) -> frozenset:
         """Everything the turn has put in front of the model, as one comparable value.
@@ -5539,6 +5575,7 @@ circular on an adjacent topic for a statute you could not retrieve.
         self._sent_passages = {}
         self._turn_handles = handles
         self._result_documents = set()
+        self._listed_documents = set()
         self._turn_steps = []
         full_messages = self._chat_full_messages(
             messages, circulars_context, selected_circular_ids, handles
@@ -5659,6 +5696,7 @@ circular on an adjacent topic for a statute you could not retrieve.
         self._sent_passages = {}
         self._turn_handles = handles
         self._result_documents = set()
+        self._listed_documents = set()
         self._turn_steps = []
         full_messages = self._chat_full_messages(
             messages, circulars_context, selected_circular_ids, handles

@@ -1507,6 +1507,71 @@ a.context-chip:hover {
 
 /* Tool rounds are listed as their own steps instead of being concatenated into
    the answer prose. */
+/* Warn-only answer checks (R6), under the answer they are about. */
+.answer-checks {
+  margin-top: 0.5rem;
+  border: 1px solid var(--sbp-border);
+  border-left: 3px solid var(--sbp-warning);
+  border-radius: var(--sbp-radius);
+  background: color-mix(in srgb, var(--sbp-warning) 6%, transparent);
+  font-size: var(--sbp-fs-meta);
+}
+
+.answer-checks > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.5rem;
+  color: var(--sbp-warning);
+  cursor: pointer;
+  list-style: none;
+}
+
+.answer-checks > summary::-webkit-details-marker {
+  display: none;
+}
+
+.answer-checks > summary .steps-chevron {
+  margin-left: auto;
+  font-size: 0.75em;
+  transition: transform 0.15s ease;
+}
+
+.answer-checks[open] > summary .steps-chevron {
+  transform: rotate(90deg);
+}
+
+.answer-checks ul {
+  margin: 0;
+  padding: 0 0.6rem 0.5rem;
+  list-style: none;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.answer-check {
+  display: grid;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.answer-check-kind {
+  font-weight: 600;
+  color: var(--sbp-muted);
+}
+
+.answer-check-high .answer-check-kind {
+  color: var(--sbp-danger);
+}
+
+.answer-check-body {
+  overflow-wrap: anywhere;
+}
+
+.answer-check-body p {
+  margin: 0;
+}
+
 .assistant-steps {
   border: 1px solid var(--sbp-border);
   border-radius: var(--sbp-radius);

@@ -172,6 +172,15 @@ a max-min fair share so no single lookup can starve the rest, each section names
 that produced it, and anything clipped is marked as clipped in both the evidence and the
 system prompt. Pinned by `tests/test_chat_synthesis_budget.py`.
 
+**Answer checks (R6, warn-only).** After a turn, both chat routes run
+`AIClient.verify_answer` on the saved answer text (`answer_checks.py`): *grounding* flags a
+citation whose text the turn's ledgers say was never sent (lineage — an amender named off a
+read circular's `amended_by` — is exempt), *supersession* flags a withdrawn circular, or one
+changed by an `amends` edge, cited without saying so. Warnings never alter the answer; they are
+stored in `chat_messages.verification_json`, returned on the session payload and the stream's
+`done` event, recorded as a `verification` trace event, and rendered under the answer — all
+behind the same admin gate as research steps. Pinned by `tests/test_answer_checks.py`.
+
 ## CLI Commands
 
 ```bash

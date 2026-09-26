@@ -3400,6 +3400,7 @@ def get_chat_session(
                     "content": m.content,
                     "circular_ids": resolve_identity_ids(db, _normalize_circular_ids(_safe_json_list(m.circular_ids))),
                     "steps": _step_headers(m, user),
+                    **_message_verification(m, user),
                     "created_at": _isoformat(m.created_at),
                 }
                 for m in messages
@@ -3429,6 +3430,7 @@ def get_chat_session(
                 "content": m.content,
                 "circular_ids": resolve_identity_ids(db, _normalize_circular_ids(_safe_json_list(m.circular_ids))),
                 "steps": _step_headers(m, user),
+                **_message_verification(m, user),
                 "created_at": _isoformat(m.created_at),
             }
             for m in messages
@@ -3643,6 +3645,36 @@ def _step_headers(message: ChatMessage, user: User) -> list[dict]:
     return [{"label": step.get("label") or "Research step"} for step in _message_steps(message)]
 
 
+def _message_verification(message: ChatMessage, user: User) -> dict:
+    """R6's warnings on one answer, as a payload fragment — empty when there are none.
+
+    Behind the same gate as the research steps while warn-only checks are being measured:
+    a false positive shown to every reader would cost more trust than the check earns
+    until the rate is known. Lifting the gate exposes every warning recorded meanwhile.
+    """
+    if not _steps_visible_to(user):
+        return {}
+    warnings = [item for item in _safe_json_list(message.verification_json) if isinstance(item, dict)]
+    return {"verification": warnings} if warnings else {}
+
+
+def _verify_turn(client, answer: str, db: Session, selected_ids: list[str]) -> list[dict]:
+    """Run R6 on a finished answer with the turn's own client; nothing on failure.
+
+    Guarded here as well as inside `AIClient.verify_answer`: the answer is already
+    written when this runs, and no check — or a client that has none — may cost the
+    reader it.
+    """
+    verify = getattr(client, "verify_answer", None)
+    if verify is None or not answer.strip():
+        return []
+    try:
+        return verify(answer, db, selected_ids) or []
+    except Exception:
+        logging.warning("Answer verification failed", exc_info=True)
+        return []
+
+
 @app.get("/api/chat/sessions/{session_id}/messages/{message_id}/steps/{step_index}")
 def chat_message_step(
     session_id: str,
@@ -3816,6 +3848,7 @@ async def chat_message(
                 selected_circular_ids=turn_circular_ids,
             )
             emit_event("normalized_result", {"response": response_text}, stage="chat.result")
+            verification = _verify_turn(client, response_text, db, turn_circular_ids)
             # No narration to attach on this path: without a stream there is nothing
             # to have narrated, so the steps carry their tool labels alone.
             steps = client.turn_steps
@@ -3823,6 +3856,7 @@ async def chat_message(
                 id=str(uuid.uuid4()), session_id=session_id,
                 role="assistant", content=response_text,
                 steps_json=json.dumps(steps) if steps else None,
+                verification_json=json.dumps(verification) if verification else None,
             )
             app_db.add(assistant_msg)
             session.updated_at = datetime.utcnow()
@@ -3841,7 +3875,10 @@ async def chat_message(
         session.updated_at = datetime.utcnow()
         app_db.commit()
 
-    return {"response": response_text, "session_id": session_id}
+    payload = {"response": response_text, "session_id": session_id}
+    if assistant_msg.verification_json:
+        payload.update(_message_verification(assistant_msg, user))
+    return payload
 
 
 @app.post("/api/chat/stream")
@@ -3927,7 +3964,9 @@ async def chat_message_stream(
                     steps[offset]["note"] = note
             return steps
 
-        def persist(text: str, partial: bool) -> str | None:
+        def persist(
+            text: str, partial: bool, verification: list[dict] | None = None,
+        ) -> str | None:
             """Save the assistant turn. Returns the new message id, or None."""
             nonlocal persisted
             if persisted or not text.strip():
@@ -3937,6 +3976,7 @@ async def chat_message_stream(
                 id=str(uuid.uuid4()), session_id=session_id,
                 role="assistant", content=text,
                 steps_json=json.dumps(steps) if steps else None,
+                verification_json=json.dumps(verification) if verification else None,
             )
             stream_app_db.add(assistant_msg)
             stream_session = stream_app_db.query(ChatSession).filter(
@@ -4004,10 +4044,15 @@ async def chat_message_stream(
 
                 response_text = "".join(answer_parts)
                 emit_event("normalized_result", {"response": response_text}, stage="chat.result")
-                message_id = persist(response_text, partial=False)
-                yield sse("done", {
-                    "session_id": session_id, "message_id": message_id,
-                })
+                # Checked on the saved segment — the text after the last tool call —
+                # since that is the answer a reader keeps. A partial answer is not
+                # checked: the model had not finished citing.
+                verification = _verify_turn(client, response_text, stream_db, turn_circular_ids)
+                message_id = persist(response_text, partial=False, verification=verification)
+                done = {"session_id": session_id, "message_id": message_id}
+                if verification and _steps_visible_to(user):
+                    done["verification"] = verification
+                yield sse("done", done)
         except Exception as e:
             stream_db.rollback()
             stream_app_db.rollback()

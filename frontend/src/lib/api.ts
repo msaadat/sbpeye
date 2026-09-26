@@ -644,7 +644,21 @@ export interface ChatMessage {
   /** The research steps behind this answer, named but not filled in. What each one
       found is fetched when a reader opens it — see `getChatMessageStep`. */
   steps?: { label: string }[]
+  /** Warn-only checks run on the finished answer (R6): a citation whose text the
+      research never read, or a withdrawn / amended circular cited without saying so.
+      Absent when the answer passed, or for accounts the checks are not shown to. */
+  verification?: AnswerWarning[]
   created_at?: string | null
+}
+
+export interface AnswerWarning {
+  check: 'grounding' | 'supersession' | string
+  severity: 'high' | 'medium' | 'low' | string
+  /** The citation token the warning is about, renderable like any answer citation. */
+  citation: string
+  message: string
+  /** What replaced or amended it, as citation tokens. */
+  related?: string[]
 }
 
 /** One document a research step found. Every field but `title` may be absent: what a

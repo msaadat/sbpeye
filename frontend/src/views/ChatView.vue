@@ -24,6 +24,7 @@ import {
   resolveDocument,
   streamChatMessage,
   truncateChatSession,
+  type AnswerWarning,
   type ChatMessage,
   type ChatSession,
   type ChatStep,
@@ -1160,6 +1161,18 @@ function showsTurnSteps(index: number): boolean {
     && index === messages.value.length - 1
 }
 
+/** One answer check as renderable markdown: the citation, what is wrong, and what
+    replaced or amended it — rendered like the answer so its citations open the same way. */
+function warningMarkdown(warning: AnswerWarning): string {
+  const related = warning.related?.length ? ` See ${warning.related.join(', ')}.` : ''
+  return `${warning.citation} — ${warning.message}${related}`
+}
+
+/** A withdrawn circular cited as current is worth opening unasked; the rest are not. */
+function hasHighWarning(message: LocalMessage): boolean {
+  return Boolean(message.verification?.some((warning) => warning.severity === 'high'))
+}
+
 function stepKey(messageId: string, index: number): string {
   return `${messageId}:${index}`
 }
@@ -1678,6 +1691,35 @@ onBeforeUnmount(() => {
               @click="handleCitationClick"
             />
             <p v-else>{{ message.content }}</p>
+
+            <!-- Warn-only answer checks (R6). They never change the answer; they say
+                 where it may not be what it looks like. -->
+            <details
+              v-if="message.role === 'assistant' && message.verification?.length"
+              class="answer-checks"
+              :open="hasHighWarning(message)"
+            >
+              <summary>
+                <i class="pi pi-exclamation-triangle" />
+                <span>
+                  {{ message.verification.length }} citation
+                  {{ message.verification.length === 1 ? 'check' : 'checks' }} flagged
+                </span>
+                <i class="pi pi-chevron-right steps-chevron" />
+              </summary>
+              <ul @click="handleCitationClick">
+                <li
+                  v-for="(warning, warningIndex) in message.verification"
+                  :key="warningIndex"
+                  :class="`answer-check answer-check-${warning.severity}`"
+                >
+                  <span class="answer-check-kind">
+                    {{ warning.check === 'supersession' ? 'Superseded or amended' : 'Not read' }}
+                  </span>
+                  <div class="answer-check-body" v-html="renderMarkdown(warningMarkdown(warning))" />
+                </li>
+              </ul>
+            </details>
 
             <div v-if="message.pending" class="assistant-activity">
               <i class="pi pi-spin pi-spinner" />

@@ -441,6 +441,7 @@ onMounted(() => {
             <Password
               v-model="apiKey"
               :feedback="false"
+              fluid
               toggle-mask
               :placeholder="externalProvider ? 'Enter a new token to replace the saved one' : 'Optional for LM Studio'"
               :disabled="loading"
@@ -535,6 +536,7 @@ onMounted(() => {
             <Password
               v-model="embeddingApiKey"
               :feedback="false"
+              fluid
               toggle-mask
               :placeholder="embeddingNeedsApiKey ? 'Enter a new token to replace the saved one' : 'Not used by FastEmbed'"
               :disabled="loading || !embeddingNeedsApiKey"
@@ -584,8 +586,8 @@ onMounted(() => {
   margin: 0;
   max-width: 44rem;
   text-transform: none;
-  color: var(--text-muted, #6b7280);
-  font-size: 0.8125rem;
+  color: var(--sbp-muted);
+  font-size: var(--sbp-fs-sm);
   line-height: 1.45;
 }
 </style>

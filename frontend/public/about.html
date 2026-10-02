@@ -1079,7 +1079,8 @@
     moon.style.display = dark ? 'none' : '';
     sun.style.display = dark ? '' : 'none';
   };
-  applyTheme(localStorage.getItem(KEY) === 'dark');
+  const stored = localStorage.getItem(KEY);
+  applyTheme(stored ? stored === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches);
   document.getElementById('themeToggle').addEventListener('click', () => {
     const dark = !root.classList.contains('sbpeye-dark');
     localStorage.setItem(KEY, dark ? 'dark' : 'light');

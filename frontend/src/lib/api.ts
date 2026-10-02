@@ -2039,3 +2039,15 @@ export async function unpinLawVersion(id: string, versionId: string): Promise<La
 export function buildLawFileUrl(id: string, versionId?: string | null): string {
   return `${API_BASE}/laws/${encodeURIComponent(id)}/file${toQueryString({ version_id: versionId })}`
 }
+
+/**
+ * The same URL, framed for the browser's built-in PDF viewer: no thumbnail sidebar,
+ * fitted to the frame's width. Chrome opens multi-page PDFs with the sidebar showing,
+ * which in a dialog or reading pane takes a fifth of the width and leaves the page at
+ * ~48%. Open parameters ride in the fragment, so the server never sees them and a
+ * non-PDF response simply ignores them. Only for `src` on a frame — links that open or
+ * download the file keep the plain URL.
+ */
+export function pdfFrameUrl(url: string): string {
+  return url ? `${url}#navpanes=0&view=FitH` : ''
+}

@@ -24,6 +24,37 @@ import './views/admin/adminTab.css'
  * type scale have a single definition (styles.css) and PrimeVue follows it —
  * including the light/dark swap, which var() resolves at computed-value time.
  */
+const AMBER = {
+  50: '#fdf7ec', 100: '#faecce', 200: '#f4d79c', 300: '#ebbf63',
+  400: '#e0a336', 500: '#c4851a', 600: '#a76a09', 700: '#855107',
+  800: '#6c4108', 900: '#5a370b', 950: '#331d03',
+}
+
+/*
+ * The neutral ramp every PrimeVue surface, border, field and muted text is drawn
+ * from. Aura's stock one is slate in light and zinc in dark, so a Dialog, Card,
+ * DataTable or input rendered #18181b inside a pane painted --sbp-surface
+ * #18211d — two palettes on one screen. This is the same green-grey family, with
+ * the steps Aura reads per scheme pinned to the --sbp-* values (literals, since
+ * one step must hold a different token in each scheme):
+ *   light — 50 bg, 100 subtle (hover), 200 border, 500 muted text
+ *   dark  — 950 bg (fields), 900 surface, 800 subtle (hover), 700 border, 400 muted text
+ */
+const SURFACE = {
+  0: '#ffffff',
+  50: '#f7f8f6',
+  100: '#eef2ed',
+  200: '#dfe5df',
+  300: '#c6d0c9',
+  400: '#a8b7af',
+  500: '#66736d',
+  600: '#4d5e56',
+  700: '#2d3a35',
+  800: '#202b26',
+  900: '#18211d',
+  950: '#111714',
+}
+
 const SBPEyePreset = definePreset(Aura, {
   primitive: {
     borderRadius: {
@@ -49,11 +80,12 @@ const SBPEyePreset = definePreset(Aura, {
       400: '#56c48c', 500: '#2c9d67', 600: '#167a4a', 700: '#12603b',
       800: '#104d31', 900: '#0e3f29', 950: '#052316',
     },
-    amber: {
-      50: '#fdf7ec', 100: '#faecce', 200: '#f4d79c', 300: '#ebbf63',
-      400: '#e0a336', 500: '#c4851a', 600: '#a76a09', 700: '#855107',
-      800: '#6c4108', 900: '#5a370b', 950: '#331d03',
-    },
+    // Aura's warn severity never reads `amber`: Message and Toast draw on
+    // `yellow`, Tag, Button and Badge on `orange`. Both point at the amber ramp,
+    // or a warn Message renders stock #eab308 beside a .status-chip.status-warn.
+    amber: AMBER,
+    yellow: AMBER,
+    orange: AMBER,
   },
   semantic: {
     primary: {
@@ -75,6 +107,7 @@ const SBPEyePreset = definePreset(Aura, {
     },
     colorScheme: {
       light: {
+        surface: SURFACE,
         primary: {
           color: '{primary.600}',
           contrastColor: '#ffffff',
@@ -83,6 +116,7 @@ const SBPEyePreset = definePreset(Aura, {
         },
       },
       dark: {
+        surface: SURFACE,
         primary: {
           // The 600 step is too dark to read on the dark surfaces; 400 is the
           // same hue at the lightness --sbp-green-text uses.
@@ -114,6 +148,13 @@ const SBPEyePreset = definePreset(Aura, {
       root: {
         borderRadius: 'var(--sbp-radius-pill)',
         fontSize: 'var(--sbp-fs-eyebrow)',
+      },
+    },
+    // Aura sets message text at 1rem — the largest text in most panes it sat in.
+    message: {
+      text: {
+        fontSize: 'var(--sbp-fs-body)',
+        sm: { fontSize: 'var(--sbp-fs-sm)' },
       },
     },
     toast: {

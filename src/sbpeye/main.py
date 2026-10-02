@@ -881,7 +881,10 @@ def _run_circular_sync(job_id: str, options: dict) -> None:
 
 
 def spa_index_response() -> FileResponse:
-    return FileResponse(SPA_INDEX)
+    # `no-cache` is "revalidate every time", not "don't store": a reload costs one 304
+    # against the etag. Sent with no Cache-Control at all, browsers cached this file
+    # heuristically — for hours after a build — and kept loading the old hashes.
+    return FileResponse(SPA_INDEX, headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/")

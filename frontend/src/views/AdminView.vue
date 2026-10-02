@@ -172,7 +172,7 @@ onMounted(loadCurrentUser)
 
 .admin-header p {
   margin: 0.25rem 0 0;
-  color: var(--text-muted, #6b7280);
+  color: var(--sbp-muted);
   font-size: 0.875rem;
 }
 
@@ -190,7 +190,7 @@ onMounted(loadCurrentUser)
   gap: 0.5rem;
   padding: 0.6rem 0.9rem;
   font-size: 0.875rem;
-  color: var(--text-muted, #6b7280);
+  color: var(--sbp-muted);
   text-decoration: none;
   border-bottom: 2px solid transparent;
   /* Reserve the bold weight's width up front so the row does not reflow on selection. */
@@ -222,7 +222,7 @@ onMounted(loadCurrentUser)
 .admin-subtab {
   padding: 0.3rem 0.7rem;
   font-size: 0.8125rem;
-  color: var(--sbp-muted, #6b7280);
+  color: var(--sbp-muted);
   text-decoration: none;
   border: 1px solid var(--sbp-border, #d1d5db);
   border-radius: var(--sbp-radius-pill, 999px);

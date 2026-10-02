@@ -639,11 +639,17 @@ onMounted(() => {
 <style scoped>
 .eco-data-toolbar {
   display: grid;
-  grid-template-columns: minmax(17rem, 1.35fr) minmax(0, 3fr) auto;
+  grid-template-columns: minmax(25rem, 1.35fr) minmax(0, 3fr) auto;
   align-items: center;
   gap: 0.5rem;
   padding: 0.15rem 0 0.55rem;
   border-bottom: 1px solid var(--sbp-border);
+}
+
+/* Pinned to the last track. Auto-placed, it slid into the 3fr quick-links track
+   whenever there were no quick links and stretched ~900px wide. */
+.refresh-button {
+  grid-column: -2 / -1;
 }
 
 .eco-data-search {
@@ -702,7 +708,7 @@ onMounted(() => {
 }
 
 .toolbar-quick-link .pi {
-  color: var(--sbp-green);
+  color: var(--sbp-green-text);
   font-size: var(--sbp-fs-meta);
   flex: 0 0 auto;
 }
@@ -777,7 +783,7 @@ onMounted(() => {
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
-  color: var(--sbp-green);
+  color: var(--sbp-green-text);
   font-weight: 600;
 }
 
@@ -789,7 +795,7 @@ onMounted(() => {
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
-  color: var(--sbp-green);
+  color: var(--sbp-green-text);
   font-size: var(--sbp-fs-body);
 }
 

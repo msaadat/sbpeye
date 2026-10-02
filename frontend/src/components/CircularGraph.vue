@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { VueFlow, Handle, Position, MarkerType, BaseEdge, type Node, type Edge } from '@vue-flow/core'
+import {
+  VueFlow, Handle, Position, MarkerType, BaseEdge,
+  type Node, type Edge, type GraphNode, type VueFlowStore,
+} from '@vue-flow/core'
 import { getCircularDetail, type CircularDetail } from '@/lib/api'
+import { circularStatusColor } from '@/lib/circularStatus'
 import '@vue-flow/core/dist/style.css'
 
 const props = defineProps<{ circular: CircularDetail }>()
@@ -251,12 +255,40 @@ function arcPath(p: { sourceX: number; sourceY: number; targetX: number; targetY
   return `M ${p.sourceX},${p.sourceY} Q ${mx},${my} ${p.targetX},${p.targetY}`
 }
 
-function statusColor(status: string | null): string {
-  const s = (status || '').toLowerCase()
-  if (s.includes('active') || s.includes('indexed')) return 'var(--sbp-success)'
-  if (s.includes('superseded') || s.includes('replaced') || s.includes('amended')) return 'var(--sbp-gold)'
-  if (s.includes('withdrawn') || s.includes('cancel')) return 'var(--sbp-danger)'
-  return 'var(--sbp-muted)'
+// Fitting a long chain into the dialog bottomed out at the 0.25 zoom floor — 52px
+// nodes nobody can read, and the circular the graph is *about* pushed off the edge.
+// So: fit when that is legible, otherwise centre the focused circular at a zoom that
+// is, and leave the overview one click away on the controls.
+const READABLE_ZOOM = 0.7
+let flow: VueFlowStore | null = null
+let framed = false
+
+function onPaneReady(instance: VueFlowStore) {
+  flow = instance
+  framed = false
+  void frame(instance.getNodes.value)
+}
+
+function onNodesInitialized() {
+  if (flow) void frame(flow.getNodes.value)
+}
+
+async function frame(nodes: GraphNode[]) {
+  if (!flow || framed) return
+  const current = nodes.find(n => n.id === '__current__')
+  if (!current?.dimensions.width) return
+  framed = true
+  await flow.fitView({ padding: 0.12 })
+  if (flow.getViewport().zoom < READABLE_ZOOM) await centreOnCurrent()
+}
+
+async function centreOnCurrent() {
+  const current = flow?.findNode('__current__')
+  if (!flow || !current) return
+  const { x, y } = current.computedPosition
+  await flow.setCenter(x + current.dimensions.width / 2, y + current.dimensions.height / 2, {
+    zoom: Math.max(flow.getViewport().zoom, READABLE_ZOOM),
+  })
 }
 
 function onNodeClick({ node }: { node: Node<NodeData> }) {
@@ -280,10 +312,11 @@ function onNodeClick({ node }: { node: Node<NodeData> }) {
       :nodes-draggable="false"
       :nodes-connectable="false"
       :elements-selectable="false"
-      :fit-view-on-init="true"
       :min-zoom="0.25"
       :max-zoom="2"
       class="cg-flow"
+      @pane-ready="onPaneReady"
+      @nodes-initialized="onNodesInitialized"
       @node-click="onNodeClick"
     >
       <template #edge-arc="p">
@@ -296,14 +329,14 @@ function onNodeClick({ node }: { node: Node<NodeData> }) {
           <button
             v-if="data.circularId"
             class="cg-open-btn"
-            title="Open this circular"
-            aria-label="Open this circular"
+            :title="`Open ${data.label}`"
+            :aria-label="`Open ${data.label}`"
             @click.stop="openCircular(data.circularId)"
           ><i class="pi pi-external-link" /></button>
           <div class="cg-node-label">{{ data.label }}</div>
           <div class="cg-node-meta">
             <span v-if="data.dateLabel" class="cg-node-date">{{ data.dateLabel }}</span>
-            <span v-if="data.status" class="cg-node-status" :style="{ color: statusColor(data.status) }">{{ data.status }}</span>
+            <span v-if="data.status" class="cg-node-status" :style="{ color: circularStatusColor(data.status) }">{{ data.status }}</span>
           </div>
         </div>
       </template>
@@ -320,18 +353,25 @@ function onNodeClick({ node }: { node: Node<NodeData> }) {
           <button
             v-if="data.resolved && data.circularId"
             class="cg-open-btn"
-            title="Open this circular"
-            aria-label="Open this circular"
+            :title="`Open ${data.label}`"
+            :aria-label="`Open ${data.label}`"
             @click.stop="openCircular(data.circularId)"
           ><i class="pi pi-external-link" /></button>
           <div class="cg-node-label">{{ data.label }}</div>
           <div class="cg-node-meta">
             <span v-if="data.dateLabel" class="cg-node-date">{{ data.dateLabel }}</span>
-            <span v-if="data.status" class="cg-node-status" :style="{ color: statusColor(data.status) }">{{ data.status }}</span>
+            <span v-if="data.status" class="cg-node-status" :style="{ color: circularStatusColor(data.status) }">{{ data.status }}</span>
           </div>
         </div>
       </template>
     </VueFlow>
+
+    <div class="cg-controls" role="group" aria-label="Graph view">
+      <button type="button" title="Zoom in" aria-label="Zoom in" @click="flow?.zoomIn()"><i class="pi pi-plus" /></button>
+      <button type="button" title="Zoom out" aria-label="Zoom out" @click="flow?.zoomOut()"><i class="pi pi-minus" /></button>
+      <button type="button" title="Show the whole chain" aria-label="Show the whole chain" @click="flow?.fitView({ padding: 0.12 })"><i class="pi pi-expand" /></button>
+      <button type="button" title="Centre on this circular" aria-label="Centre on this circular" @click="centreOnCurrent"><i class="pi pi-bullseye" /></button>
+    </div>
 
     <div class="cg-legend">
       <span v-for="item in legendItems" :key="item.label" class="cg-legend-item">
@@ -409,7 +449,7 @@ function onNodeClick({ node }: { node: Node<NodeData> }) {
 }
 
 .cg-open-btn:hover {
-  color: var(--sbp-green);
+  color: var(--sbp-green-text);
   border-color: var(--sbp-green);
 }
 
@@ -484,9 +524,46 @@ function onNodeClick({ node }: { node: Node<NodeData> }) {
   transition: border-color 0.15s, color 0.15s;
 }
 
+.cg-controls {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--sbp-border);
+  border-radius: var(--sbp-radius);
+  background: var(--sbp-surface);
+  box-shadow: var(--sbp-shadow-sm);
+}
+
+.cg-controls button {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--sbp-muted);
+  font-size: var(--sbp-fs-meta);
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+
+.cg-controls button + button {
+  border-top: 1px solid var(--sbp-border);
+}
+
+.cg-controls button:hover {
+  color: var(--sbp-green-text);
+  background: var(--sbp-subtle);
+}
+
 .cg-back:hover {
   border-color: var(--sbp-green);
-  color: var(--sbp-green);
+  color: var(--sbp-green-text);
 }
 
 .cg-loading {
@@ -494,7 +571,7 @@ function onNodeClick({ node }: { node: Node<NodeData> }) {
   top: 16px;
   right: 16px;
   z-index: 5;
-  color: var(--sbp-green);
+  color: var(--sbp-green-text);
   font-size: var(--sbp-fs-title);
 }
 

@@ -15,6 +15,7 @@ import { ADMIN_ONLY_EMPTY_HINT, adminOnlyHint, adminOnlyLabel } from '@/lib/admi
 import { useCurrentUser } from '@/lib/useCurrentUser'
 import {
   buildLawFileUrl,
+  pdfFrameUrl,
   downloadLawChecklistExcel,
   getLawDetail,
   getLaws,
@@ -1423,7 +1424,7 @@ onMounted(() => {
           v-if="fileUrl"
           :key="fileUrl"
           class="reader-frame"
-          :src="fileUrl"
+          :src="pdfFrameUrl(fileUrl)"
           :title="detail.display_title"
         />
 

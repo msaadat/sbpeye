@@ -125,7 +125,7 @@ const contextModeLabel = computed(() => {
 const contextModeHint = computed(() =>
   hasContext.value
     ? 'Answers are restricted to the attached documents first, then the wider index.'
-    : 'Answers search the full circular index. Attach documents to narrow the scope.',
+    : 'Answers search every circular and the laws & regulations. Attach documents to narrow the scope.',
 )
 const elapsedLabel = computed(() => {
   const total = elapsedSeconds.value
@@ -508,7 +508,9 @@ async function scrollToBottom(force = false) {
     })
   })
   if (messagesEl.value) {
-    messagesEl.value.scrollTop = messagesEl.value.scrollHeight
+    // With no messages this pane holds the empty state, which reads from the top:
+    // pinned to the bottom on a phone, its heading scrolled out of view.
+    messagesEl.value.scrollTop = messages.value.length ? messagesEl.value.scrollHeight : 0
     pinnedToBottom.value = true
   }
 }
@@ -1491,11 +1493,11 @@ onBeforeUnmount(() => {
 
         <div v-else-if="!messages.length" class="chat-empty-state">
           <span class="chat-empty-icon"><i class="pi pi-comments" /></span>
-          <h2>Ask SBPEye about SBP circulars</h2>
+          <h2>Ask SBPEye about SBP circulars and laws</h2>
           <p>
             {{ hasContext
               ? 'Your attached circulars are searched first. Ask a question, or try one of these:'
-              : 'Answers search the whole circular index. Attach documents above to narrow the scope, or try one of these:' }}
+              : 'Answers search every circular and the laws & regulations. Attach documents above to narrow the scope, or try one of these:' }}
           </p>
           <div class="chat-empty-prompts">
             <button

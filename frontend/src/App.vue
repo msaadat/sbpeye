@@ -18,7 +18,12 @@ const router = useRouter()
 const toast = useToast()
 const { state: llmDebugState, refreshLlmDebugState } = useLlmDebugState()
 const { email: userEmail, isAdmin, load: loadCurrentUser, clear: clearCurrentUser } = useCurrentUser()
-const darkMode = ref(localStorage.getItem('sbpeye-theme') === 'dark')
+// An explicit choice wins; with none, follow the OS — as the server-rendered login page
+// does, so a dark-OS user isn't signed in from a dark page into a light app.
+const storedTheme = localStorage.getItem('sbpeye-theme')
+const darkMode = ref(
+  storedTheme ? storedTheme === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches,
+)
 const status = ref<AppStatus | null>(null)
 const statusLoading = ref(false)
 const statusError = ref('')
@@ -368,11 +373,13 @@ function onLlmStatusClick() {
 
 function syncThemeClass() {
   document.documentElement.classList.toggle('sbpeye-dark', darkMode.value)
-  localStorage.setItem('sbpeye-theme', darkMode.value ? 'dark' : 'light')
 }
 
+// Only a click records a choice. Writing on mount would freeze whatever the OS said
+// on the first visit into a preference nobody made.
 function toggleTheme() {
   darkMode.value = !darkMode.value
+  localStorage.setItem('sbpeye-theme', darkMode.value ? 'dark' : 'light')
   syncThemeClass()
 }
 

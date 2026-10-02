@@ -163,6 +163,7 @@ onMounted(loadUsers)
             <Password
               v-model="newPassword"
               :feedback="false"
+              fluid
               toggle-mask
               required
               autocomplete="new-password"

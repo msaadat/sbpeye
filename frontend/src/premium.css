@@ -224,7 +224,7 @@ h1, h2, h3, h4, h5, h6 {
   height: 3.25rem;
   margin-bottom: 0.35rem;
   border-radius: 999px;
-  color: var(--sbp-green);
+  color: var(--sbp-green-text);
   background: color-mix(in srgb, var(--sbp-green) 10%, var(--sbp-surface));
   font-size: 1.4rem;
 }
@@ -269,7 +269,7 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .chat-empty-prompt i {
-  color: var(--sbp-green);
+  color: var(--sbp-green-text);
   font-size: var(--sbp-fs-sm);
 }
 

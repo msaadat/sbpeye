@@ -56,6 +56,9 @@ const exportLoading = ref(false)
 const zipLoading = ref(false)
 const errorMessage = ref('')
 const totalRecords = ref(0)
+// False until the first search answers, so the footer doesn't announce "0 results ·
+// Page 1 of 1" for the moment before it does.
+const resultsLoaded = ref(false)
 const page = ref(1)
 const perPage = ref(20)
 const resultsListRef = ref<HTMLElement | null>(null)
@@ -307,6 +310,7 @@ async function loadCirculars(resetPage = false, scrollToTop = false) {
     if (controller !== searchController) return
     rows.value = response.items
     totalRecords.value = response.total
+    resultsLoaded.value = true
     page.value = response.page
     perPage.value = response.per_page
     if (scrollToTop) await scrollResultsToTop()
@@ -318,6 +322,7 @@ async function loadCirculars(resetPage = false, scrollToTop = false) {
     if (controller !== searchController) return
     rows.value = []
     totalRecords.value = 0
+    resultsLoaded.value = true
     errorMessage.value = controller.signal.aborted
       ? 'Search timed out. Refine the query and try again.'
       : error instanceof Error ? error.message : 'Unable to load circulars.'
@@ -757,13 +762,16 @@ onBeforeUnmount(() => searchController?.abort())
         </div>
 
         <div class="results-toolbar">
-          <div class="results-count"><strong>{{ totalRecords.toLocaleString() }}</strong><span> results</span></div>
+          <div class="results-count">
+            <template v-if="resultsLoaded"><strong>{{ totalRecords.toLocaleString() }}</strong><span> results</span></template>
+            <span v-else>Searching…</span>
+          </div>
           <div class="results-toolbar-actions">
             <Checkbox v-if="selectionMode" :model-value="allPageSelected" binary aria-label="Select page" :disabled="!searchRows.length" @update:model-value="togglePageSelection" />
             <span v-if="selectionMode && selectedIds.length">{{ selectedIds.length }} selected</span>
             <div class="results-pagination">
               <Button icon="pi pi-angle-left" text rounded aria-label="Previous page" :disabled="page <= 1 || loading" @click="changePage(-1)" />
-              <span>Page {{ page }} of {{ totalPages }}</span>
+              <span v-if="resultsLoaded">Page {{ page }} of {{ totalPages }}</span>
               <Button icon="pi pi-angle-right" text rounded aria-label="Next page" :disabled="page >= totalPages || loading" @click="changePage(1)" />
             </div>
           </div>

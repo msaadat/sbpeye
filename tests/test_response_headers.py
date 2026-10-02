@@ -72,6 +72,22 @@ def test_index_html_is_not_cached_forever(client):
         assert response.headers.get("cache-control") != IMMUTABLE
 
 
+def test_spa_entry_is_revalidated(client):
+    """With no Cache-Control, browsers cache `index.html` heuristically.
+
+    Measured: after a rebuild the browser kept loading the previous build's hashed entry
+    script from its cache, so the new UI never appeared until a hard reload.
+    """
+    from sbpeye.main import SPA_INDEX
+
+    if not SPA_INDEX.exists():
+        pytest.skip("SPA not built — run `npm run build` in frontend/")
+    test_client, _ = client
+    response = test_client.get("/circulars", follow_redirects=False)
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-cache"
+
+
 def test_small_responses_are_not_compressed(client):
     """`minimum_size` has to actually fire.
 

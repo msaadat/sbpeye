@@ -24,6 +24,7 @@ import {
   type LawSummary,
 } from '@/lib/api'
 import { useResizablePane } from '@/lib/useResizablePane'
+import { circularStatusTone } from '@/lib/circularStatus'
 import { useAiGeneration } from '@/lib/useAiGeneration'
 import { ADMIN_ONLY_EMPTY_HINT, adminOnlyHint, adminOnlyLabel } from '@/lib/adminOnly'
 import { useCurrentUser } from '@/lib/useCurrentUser'
@@ -91,13 +92,6 @@ function formatDate(value?: string | null): string {
   return new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short', day: '2-digit' }).format(new Date(value))
 }
 
-function statusSeverity(status?: string | null): 'success' | 'info' | 'warn' | 'danger' | 'secondary' {
-  const value = (status || '').toLowerCase()
-  if (value.includes('active') || value.includes('indexed')) return 'success'
-  if (value.includes('superseded') || value.includes('replaced')) return 'warn'
-  if (value.includes('withdrawn') || value.includes('cancel')) return 'danger'
-  return status ? 'info' : 'secondary'
-}
 
 function relationshipLabel(value?: string | null): string {
   return (value || 'Related').replace(/[_-]+/g, ' ').replace(/\b\w/g, (match) => match.toUpperCase())
@@ -381,7 +375,7 @@ watch(() => props.id, loadCircular)
             <span
               v-if="circular.status"
               class="status-chip"
-              :class="`status-${statusSeverity(circular.status)}`"
+              :class="`status-${circularStatusTone(circular.status)}`"
             >
               <span class="status-dot" />{{ circular.status }}
             </span>

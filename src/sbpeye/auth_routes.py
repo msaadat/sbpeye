@@ -192,33 +192,55 @@ _LOGIN_PAGE = """<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Sign in - SBPEye</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+<script>
+  // The theme the SPA stored, if one was chosen there; otherwise the OS decides, which
+  // is what the SPA does too. Set before first paint so the page never flashes.
+  try{const t=localStorage.getItem('sbpeye-theme');if(t)document.documentElement.dataset.theme=t}catch(_){}
+</script>
 <style>
-  :root { color-scheme: light dark;
-    --bg:#f6f7f9; --card:#fff; --fg:#16181d; --muted:#666c7a; --line:#dfe3ea;
-    --accent:#1f5fd0; --err:#b3261e; }
-  @media (prefers-color-scheme: dark) { :root {
-    --bg:#14161a; --card:#1c1f25; --fg:#e8eaed; --muted:#9aa2b1; --line:#2c313a;
-    --accent:#6f9bea; --err:#f2b8b5; } }
+  /* The SPA's palette (frontend/src/styles.css --sbp-*), copied: this page sits outside
+     the bundle on purpose, so it cannot import it. */
+  :root { color-scheme: light;
+    --bg:#f7f8f6; --card:#fff; --fg:#14211b; --muted:#66736d; --line:#dfe5df;
+    --green:#156f52; --gold:#b88918; --focus:#156f52; --err:#b3261e; }
+  :root[data-theme=dark] { color-scheme: dark;
+    --bg:#111714; --card:#18211d; --fg:#edf5f0; --muted:#a8b7af; --line:#2d3a35;
+    --focus:#4fae87; --err:#f08a80; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme=light]) { color-scheme: dark;
+    --bg:#111714; --card:#18211d; --fg:#edf5f0; --muted:#a8b7af; --line:#2d3a35;
+    --focus:#4fae87; --err:#f08a80; } }
   * { box-sizing:border-box }
-  body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--bg);
-    color:var(--fg); font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
-  form { background:var(--card); padding:2rem; border-radius:12px; border:1px solid var(--line);
-    width:min(92vw,23rem); box-shadow:0 1px 3px rgba(0,0,0,.06) }
-  h1 { margin:0 0 .25rem; font-size:1.25rem }
+  body { margin:0; min-height:100vh; display:grid; place-items:center;
+    background:linear-gradient(180deg, rgba(21,111,82,.06), transparent 18rem), var(--bg);
+    color:var(--fg); font:15px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
+  form { background:var(--card); padding:2rem; border-radius:.85rem; border:1px solid var(--line);
+    width:min(92vw,23rem); box-shadow:0 1px 2px rgba(20,33,27,.04), 0 10px 28px -16px rgba(20,33,27,.22) }
+  .brand { display:flex; align-items:center; gap:.65rem; margin:0 0 .25rem }
+  .mark { display:inline-grid; place-items:center; width:2rem; height:2rem; border-radius:.5rem;
+    color:#fff; background:linear-gradient(135deg,var(--green),var(--gold)); font-weight:800;
+    font-size:.8125rem; box-shadow:0 2px 8px rgba(21,111,82,.28) }
+  h1 { margin:0; font-size:1.25rem; letter-spacing:-.012em }
   p.sub { margin:0 0 1.5rem; color:var(--muted); font-size:.875rem }
   label { display:block; margin-bottom:1rem; font-size:.8125rem; color:var(--muted) }
-  input { width:100%; margin-top:.375rem; padding:.625rem .75rem; font-size:.9375rem;
-    border:1px solid var(--line); border-radius:7px; background:var(--bg); color:var(--fg) }
-  input:focus { outline:2px solid var(--accent); outline-offset:-1px; border-color:transparent }
-  button { width:100%; padding:.6875rem; font-size:.9375rem; font-weight:600; cursor:pointer;
-    border:0; border-radius:7px; background:var(--accent); color:#fff }
+  input { width:100%; margin-top:.375rem; padding:.625rem .75rem; font:inherit; font-size:.9375rem;
+    border:1px solid var(--line); border-radius:.5rem; background:var(--bg); color:var(--fg) }
+  input:focus { outline:2px solid var(--focus); outline-offset:-1px; border-color:transparent }
+  /* --green in both themes: white on it is 6.1:1, where a lightened dark-theme green
+     would drop under 3:1. */
+  button { width:100%; padding:.6875rem; font:inherit; font-size:.9375rem; font-weight:600;
+    cursor:pointer; border:0; border-radius:.5rem; background:var(--green); color:#fff }
+  button:hover:not([disabled]) { background:#105941 }
+  button:focus-visible { outline:2px solid var(--focus); outline-offset:2px }
   button[disabled] { opacity:.6; cursor:progress }
-  .err { margin:0 0 1rem; padding:.625rem .75rem; border-radius:7px; font-size:.8125rem;
+  .err { margin:0 0 1rem; padding:.625rem .75rem; border-radius:.5rem; font-size:.8125rem;
     color:var(--err); border:1px solid var(--err); display:none }
   .err.on { display:block }
 </style></head><body>
 <form id="f">
-  <h1>SBPEye</h1>
+  <div class="brand"><span class="mark" aria-hidden="true">SBP</span><h1>SBPEye</h1></div>
   <p class="sub">Sign in to continue.</p>
   <p class="err" id="e" role="alert"></p>
   <label>Email<input name="email" type="email" autocomplete="username" required autofocus></label>

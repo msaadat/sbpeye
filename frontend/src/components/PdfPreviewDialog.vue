@@ -4,7 +4,7 @@ import Button from 'primevue/button'
 import Dialog from 'primevue/dialog'
 import Message from 'primevue/message'
 import ProgressSpinner from 'primevue/progressspinner'
-import { buildDocumentContentUrl, buildPdfProxyUrl } from '@/lib/api'
+import { buildDocumentContentUrl, buildPdfProxyUrl, pdfFrameUrl } from '@/lib/api'
 
 const props = defineProps<{
   visible: boolean
@@ -105,7 +105,7 @@ watch(
         v-if="canShowPdf"
         :key="frameKey"
         class="pdf-native-viewer"
-        :src="pdfProxyUrl"
+        :src="pdfFrameUrl(pdfProxyUrl)"
         :title="title || 'PDF preview'"
         @load="handleFrameLoad"
       />

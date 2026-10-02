@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import Tag from 'primevue/tag'
 import type { CircularSummary } from '@/lib/api'
+import { circularStatusTone } from '@/lib/circularStatus'
 
 withDefaults(defineProps<{
   circular: CircularSummary
@@ -19,14 +20,6 @@ function formatDate(value?: string | null): string {
     day: '2-digit',
   }).format(new Date(value))
 }
-
-function statusSeverity(status: string): 'success' | 'info' | 'warn' | 'danger' {
-  const value = status.toLowerCase()
-  if (value.includes('active') || value.includes('indexed')) return 'success'
-  if (value.includes('superseded') || value.includes('replaced')) return 'warn'
-  if (value.includes('withdrawn') || value.includes('cancel')) return 'danger'
-  return 'info'
-}
 </script>
 
 <template>
@@ -34,11 +27,13 @@ function statusSeverity(status: string): 'success' | 'info' | 'warn' | 'danger' 
     <strong>{{ circular.title }}</strong>
     <span class="result-topline">
       <span class="result-reference">{{ circular.reference || 'No reference' }} · {{ formatDate(circular.date) }}</span>
-      <Tag
+      <span
         v-if="circular.status && circular.status !== 'active'"
-        :value="circular.status"
-        :severity="statusSeverity(circular.status)"
-      />
+        class="status-chip"
+        :class="`status-${circularStatusTone(circular.status)}`"
+      >
+        <span class="status-dot" />{{ circular.status }}
+      </span>
     </span>
     <span v-if="showSnippet && circular.snippet" class="result-snippet" v-html="circular.snippet" />
     <span v-else-if="showSnippet && circular.summary" class="result-snippet">{{ circular.summary }}</span>

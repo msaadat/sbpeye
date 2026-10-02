@@ -143,6 +143,7 @@ onMounted(() => {
             <Password
               v-model="myApiKey"
               :feedback="false"
+              fluid
               toggle-mask
               :placeholder="myApiKeySet ? 'Stored — leave blank to keep' : 'Required for hosted providers'"
               autocomplete="off"
@@ -171,12 +172,12 @@ onMounted(() => {
 <style scoped>
 .field-hint {
   margin: 0 0 1rem;
-  color: var(--text-muted, #6b7280);
-  font-size: 0.8125rem;
+  color: var(--sbp-muted);
+  font-size: var(--sbp-fs-sm);
 }
 
 .optional {
-  color: var(--text-muted, #6b7280);
+  color: var(--sbp-muted);
   font-weight: 400;
 }
 </style>

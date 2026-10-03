@@ -245,6 +245,7 @@ sbpeye dry-run --dept bprd --year 2025  # Preview what would be scraped
 | GET | `/api/circulars/search` | Hybrid search. Query: `q`, `tag`, `department`, `start_year`, `end_year`, `sort_by`, `source` (circulars/laws/all, default circulars), `doc_type` |
 | GET | `/api/laws` | List or search laws & regulations. Query: `q`, `doc_type`, `parent_id`, `top_level`, `include_delisted` |
 | GET | `/api/laws/types` | Document-type facets with counts |
+| GET | `/api/laws/most_cited` | Top-level documents ranked by distinct citing circulars (parts roll up to their container; a circular-backed row's own circular is excluded). Query: `limit` (default 12). Feeds the laws landing page |
 | GET | `/api/laws/{id}` | Detail: current version, version timeline, parts, linked circulars, AI analysis (`generation`, `entities`, `relationships`) |
 | POST | `/api/laws/{id}/generate` | Queue AI analysis for a law. Body `{feature}`; 422 names the reason and whether it is structural |
 | GET | `/api/laws/{id}/checklist.xlsx` | Export the in-force edition's obligations checklist as a workbook |

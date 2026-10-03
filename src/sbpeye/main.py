@@ -2344,6 +2344,60 @@ def list_law_types(db: Session = Depends(get_db)):
     ]
 
 
+@app.get("/api/laws/most_cited")
+def most_cited_laws(limit: int = 12, db: Session = Depends(get_db)):
+    """The documents circulars cite most, for the laws landing page.
+
+    Counted in distinct circulars, with a part's citations rolled up to its container: a
+    circular revising four FE Manual chapters cites the Manual once, and the Manual is
+    the thing a newcomer should be pointed at. The hierarchy is one level deep, so
+    `coalesce(parent_id, id)` is the container.
+
+    A circular-backed row's link to its own circular is not a citation — it is SBP listing
+    the circular as the document (`link_type="listing"`), or the name pass finding the
+    document's title inside itself — so those edges are left out.
+
+    Most of these edges are name matches (`detected_via="name_match"`), which is why the
+    count is of circulars that *cite* a document, never of ones that amend it.
+    """
+    limit = min(max(limit, 1), 24)
+    part = aliased(RegDocument)
+    container_id = func.coalesce(part.parent_id, part.id).label("container_id")
+    circular_count = func.count(func.distinct(RegDocumentLink.circular_id))
+    rows = (
+        db.query(container_id, circular_count, func.max(Circular.date))
+        .select_from(RegDocumentLink)
+        .join(part, part.id == RegDocumentLink.document_id)
+        .join(Circular, Circular.id == RegDocumentLink.circular_id)
+        .filter(or_(part.circular_id.is_(None), part.circular_id != RegDocumentLink.circular_id))
+        .group_by(container_id)
+        .order_by(circular_count.desc(), func.max(Circular.date).desc())
+        .all()
+    )
+    ids = [row[0] for row in rows]
+    documents = {
+        document.id: document
+        for document in db.query(RegDocument)
+        .options(*law_summary_load_options())
+        .filter(RegDocument.id.in_(ids), RegDocument.delisted_at.is_(None))
+        .all()
+    }
+    items = []
+    for document_id, count, latest in rows:
+        document = documents.get(document_id)
+        if document is None:
+            continue
+        items.append({
+            "document": _law_summary(document),
+            "circular_count": count,
+            "latest_cited_at": _isoformat(latest),
+            "part_count": len(document.children),
+        })
+        if len(items) == limit:
+            break
+    return {"items": items}
+
+
 # --------------------------------------------------------------- law uploads
 #
 # docs/LAWS_UPLOADS_PLAN.md phase 3. These live here rather than in `api/admin.py`

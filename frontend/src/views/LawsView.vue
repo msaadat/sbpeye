@@ -20,6 +20,7 @@ import {
   getLawDetail,
   getLaws,
   getLawTypes,
+  getMostCitedLaws,
   startLawGeneration,
   type LawDetail,
   type LawGenerationAction,
@@ -28,6 +29,7 @@ import {
   type LawSummary,
   type LawVersion,
   type LawTypeCount,
+  type MostCitedLaw,
 } from '@/lib/api'
 
 // Collapsed on arrival and the only thing on this route that needs a markdown parser,
@@ -63,6 +65,9 @@ const provenanceOpen = ref(false)
 
 const corpusTypes = ref<LawTypeCount[]>([])
 const typeFilter = ref('')
+
+/** The landing page's "start here" cards; null until asked for, [] when there are none. */
+const mostCited = ref<MostCitedLaw[] | null>(null)
 
 const matchTotal = ref(0)
 const expandedMatches = ref<Set<string>>(new Set())
@@ -511,6 +516,41 @@ const editionLines = computed(() => {
       }
     })
 })
+
+/** "Jun 2026": a card says how recently a document was cited, not on which day. */
+function formatMonth(value: string): string {
+  return new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short' }).format(new Date(value))
+}
+
+/**
+ * The muted line on a landing card: the edition, how much of it there is, and when a
+ * circular last cited it. Said in the rail's own terms (`subLine`), minus the type —
+ * the card's badge already carries that.
+ */
+function citedCardMeta(item: MostCitedLaw): string {
+  const doc = item.document
+  const parts: string[] = []
+  const edition = editionLabel(doc, doc.current_version)
+  if (edition) parts.push(capitalize(edition))
+  if (item.part_count) parts.push(`${item.part_count} parts`)
+  else if (doc.circular_id) parts.push('is a circular')
+  else if (doc.is_external && !doc.current_version) parts.push('hosted externally')
+  else if (!doc.current_version) parts.push('no file held')
+  if (item.latest_cited_at) parts.push(`last cited ${formatMonth(item.latest_cited_at)}`)
+  return parts.join(' · ')
+}
+
+function loadMostCited() {
+  if (mostCited.value) return
+  // The landing page reads fine without the cards; failing to load them costs only them.
+  getMostCitedLaws()
+    .then((items) => {
+      mostCited.value = items
+    })
+    .catch(() => {
+      mostCited.value = []
+    })
+}
 
 function formatDate(value?: string | null): string {
   if (!value) return 'an unknown date'
@@ -1028,6 +1068,12 @@ watch(typeFilter, () => {
 })
 
 watch(selectedId, (id) => void loadDetail(id), { immediate: true })
+
+// Fetched the first time the landing page is shown, so a deep link to a document never
+// pays for cards it will not see.
+watch(selectedId, (id) => {
+  if (!id) loadMostCited()
+}, { immediate: true })
 
 onMounted(() => {
   void loadCurrentUser()
@@ -1608,13 +1654,40 @@ onMounted(() => {
       </template>
 
       <div v-else class="reader-overview">
-        <h1>SBP's rulebook, as we hold it</h1>
-        <p>
-          {{ topLevelTotal }} documents captured from sbp.org.pk, plus
-          {{ documents.length - topLevelTotal }} chapters and appendices inside them. SBP replaces
-          these files in place and keeps no history; from the day we started watching, we do.
-          Pick anything on the left to open it.
-        </p>
+        <div class="overview-intro">
+          <h1>SBP's rulebook, as we hold it</h1>
+          <p>
+            {{ topLevelTotal }} documents captured from sbp.org.pk, plus
+            {{ documents.length - topLevelTotal }} chapters and appendices inside them. SBP replaces
+            these files in place and keeps no history; from the day we started watching, we do.
+            Pick anything on the left to open it, or start with the documents below.
+          </p>
+        </div>
+
+        <section v-if="mostCited?.length" class="overview-section" aria-labelledby="most-cited-heading">
+          <header class="overview-section-head">
+            <h2 id="most-cited-heading" class="sbp-eyebrow">Most cited by circulars</h2>
+            <p>
+              The documents SBP's circulars refer to most often. A citation to a chapter counts
+              toward the document it belongs to.
+            </p>
+          </header>
+          <ol class="cited-grid">
+            <li v-for="item in mostCited" :key="item.document.id">
+              <button type="button" class="cited-card" @click="select(item.document)">
+                <span class="cited-card-top">
+                  <span class="sbp-badge">{{ typeLabel(item.document.doc_type) }}</span>
+                  <span class="cited-count">
+                    <strong>{{ item.circular_count.toLocaleString() }}</strong>
+                    circular{{ item.circular_count === 1 ? '' : 's' }}
+                  </span>
+                </span>
+                <span class="cited-title">{{ item.document.display_title }}</span>
+                <span class="cited-meta">{{ citedCardMeta(item) }}</span>
+              </button>
+            </li>
+          </ol>
+        </section>
       </div>
     </section>
   </div>
@@ -1832,8 +1905,7 @@ onMounted(() => {
   }
 }
 
-.reader-empty,
-.reader-overview {
+.reader-empty {
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -1845,18 +1917,134 @@ onMounted(() => {
 }
 
 .reader-empty h2,
-.reader-overview h1 {
+.overview-intro h1 {
   margin: 0;
   font-size: var(--sbp-fs-title);
   font-weight: 600;
 }
 
 .reader-empty p,
-.reader-overview p {
+.overview-intro p {
   margin: 0;
   color: var(--sbp-muted);
   font-size: var(--sbp-fs-body);
   line-height: 1.6;
+}
+
+/* ---- Landing page ---- */
+/* Top-aligned and scrolling now that it holds more than a paragraph; centred, the
+   cards pushed the intro up out of view on a short window. */
+.reader-overview {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+  min-height: 0;
+  padding: 2rem 2.4rem 2.4rem;
+  overflow-y: auto;
+}
+
+.overview-intro {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-width: 44rem;
+}
+
+.overview-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  max-width: 64rem;
+}
+
+.overview-section-head h2 {
+  margin: 0;
+}
+
+.overview-section-head p {
+  margin: 0.3rem 0 0;
+  color: var(--sbp-muted);
+  font-size: var(--sbp-fs-sm);
+  line-height: 1.5;
+}
+
+.cited-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: 0.75rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cited-grid > li {
+  display: flex;
+}
+
+.cited-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  min-width: 0;
+  padding: 0.85rem 0.95rem 0.9rem;
+  border: 1px solid var(--sbp-border);
+  border-radius: var(--sbp-radius-lg);
+  background: var(--sbp-surface);
+  box-shadow: var(--sbp-shadow-sm);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.18s var(--sbp-ease), box-shadow 0.18s var(--sbp-ease);
+}
+
+.cited-card:hover {
+  border-color: color-mix(in srgb, var(--sbp-green) 40%, var(--sbp-border));
+  box-shadow: var(--sbp-shadow);
+}
+
+.cited-card:focus-visible {
+  outline: 2px solid var(--sbp-green);
+  outline-offset: 2px;
+}
+
+.cited-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.cited-count {
+  color: var(--sbp-muted);
+  font-size: var(--sbp-fs-meta);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.cited-count strong {
+  color: var(--sbp-green-text);
+  font-size: var(--sbp-fs-sm);
+  font-weight: 700;
+}
+
+.cited-title {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: var(--sbp-fs-sm);
+  font-weight: 600;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.cited-meta {
+  margin-top: auto;
+  color: var(--sbp-muted);
+  font-size: var(--sbp-fs-meta);
+  line-height: 1.4;
 }
 
 .reader-empty .sbp-ghost-button {

@@ -1847,6 +1847,15 @@ export interface LawTypeCount {
   count: number
 }
 
+/** One row of `/api/laws/most_cited`: a top-level document and the circulars citing it. */
+export interface MostCitedLaw {
+  document: LawSummary
+  /** Distinct circulars citing the document or any of its parts. */
+  circular_count: number
+  latest_cited_at: string | null
+  part_count: number
+}
+
 export interface LawListFilters {
   q?: string
   doc_type?: string
@@ -1882,6 +1891,12 @@ export async function getLaws(
 
 export async function getLawTypes(): Promise<LawTypeCount[]> {
   return requestJson<LawTypeCount[]>('/laws/types')
+}
+
+/** Twelve by default: it fills a grid of one, two, three or four columns without a ragged row. */
+export async function getMostCitedLaws(limit = 12): Promise<MostCitedLaw[]> {
+  const response = await requestJson<{ items: MostCitedLaw[] }>(`/laws/most_cited?limit=${limit}`)
+  return response.items
 }
 
 export async function getLawDetail(id: string, signal?: AbortSignal): Promise<LawDetail> {

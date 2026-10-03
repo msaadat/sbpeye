@@ -5,7 +5,8 @@ import {
   type Node, type Edge, type GraphNode, type VueFlowStore,
 } from '@vue-flow/core'
 import { getCircularDetail, type CircularDetail } from '@/lib/api'
-import { circularStatusColor } from '@/lib/circularStatus'
+import { standingColor, standingLabel } from '@/lib/circularStatus'
+import { displayTitle } from '@/lib/displayTitle'
 import '@vue-flow/core/dist/style.css'
 
 const props = defineProps<{ circular: CircularDetail }>()
@@ -25,7 +26,7 @@ async function traverseTo(id: string) {
   try {
     const detail = await getCircularDetail(id)
     focusStack.value = [...focusStack.value, detail]
-    emit('focuschange', detail.reference || detail.title)
+    emit('focuschange', detail.reference || displayTitle(detail.title))
   } catch {
     emit('navigate', id)
   } finally {
@@ -37,7 +38,7 @@ function goBack() {
   if (focusStack.value.length <= 1) return
   focusStack.value = focusStack.value.slice(0, -1)
   const s = source.value
-  emit('focuschange', s.reference || s.title)
+  emit('focuschange', s.reference || displayTitle(s.title))
 }
 
 function openCircular(id: string) {
@@ -71,20 +72,21 @@ interface TimelineEntry {
   rels: { type: string; dir: 'out' | 'in' }[]
 }
 
-// Categorical scale drawn from the app palette, ordered by how much force the
-// relationship carries: green = still in effect, gold = replaced, red = void.
+// The relationship verbs (docs/REDESIGN_PLAN.md FN5), coloured like the standing each one
+// leaves behind: amends is gold like an amended circular, supersedes grey like a
+// superseded one, cancels red. The tokens carry the dark-theme values.
 const TYPE_STYLES: Record<string, { label: string; color: string }> = {
-  amends: { label: 'Amends', color: 'var(--sbp-green)' },
-  adds_to: { label: 'Adds to', color: 'var(--p-primary-400)' },
-  supersedes: { label: 'Supersedes', color: 'var(--sbp-gold)' },
-  clarifies: { label: 'Clarifies', color: 'var(--sbp-muted)' },
-  cancels: { label: 'Cancels', color: 'var(--sbp-danger)' },
+  amends: { label: 'Amends', color: 'var(--sbp-rel-amends)' },
+  adds_to: { label: 'Adds to', color: 'var(--sbp-rel-adds-to)' },
+  supersedes: { label: 'Supersedes', color: 'var(--sbp-rel-supersedes)' },
+  clarifies: { label: 'Clarifies', color: 'var(--sbp-rel-clarifies)' },
+  cancels: { label: 'Cancels', color: 'var(--sbp-rel-cancels)' },
 }
 
 function typeStyle(type: string): { label: string; color: string } {
   return TYPE_STYLES[type] ?? {
     label: type.replace(/_/g, ' ').replace(/^\w/, ch => ch.toUpperCase()),
-    color: 'var(--sbp-gold)',
+    color: 'var(--sbp-muted)',
   }
 }
 
@@ -110,7 +112,7 @@ const relatedEntries = computed<TimelineEntry[]>(() => {
 
   function upsert(other: { id?: string; reference?: string | null; title?: string | null; status?: string | null; date?: string | null } | null | undefined, otherId: string | null | undefined, fallbackRef: string | null | undefined, type: string, dir: 'out' | 'in') {
     if (otherId && otherId === c.id) return
-    const label = other?.reference || other?.title || fallbackRef || 'Unknown'
+    const label = other?.reference || displayTitle(other?.title) || fallbackRef || 'Unknown'
     const key = otherId || `ref:${label.trim().toLowerCase()}`
     let entry = map.get(key)
     if (!entry) {
@@ -138,7 +140,7 @@ const relatedEntries = computed<TimelineEntry[]>(() => {
 
 const layout = computed(() => {
   const c = source.value
-  const currentRef = c.reference || c.title
+  const currentRef = c.reference || displayTitle(c.title)
   const current: TimelineEntry = {
     key: '__current__',
     label: currentRef,
@@ -336,7 +338,7 @@ function onNodeClick({ node }: { node: Node<NodeData> }) {
           <div class="cg-node-label">{{ data.label }}</div>
           <div class="cg-node-meta">
             <span v-if="data.dateLabel" class="cg-node-date">{{ data.dateLabel }}</span>
-            <span v-if="data.status" class="cg-node-status" :style="{ color: circularStatusColor(data.status) }">{{ data.status }}</span>
+            <span v-if="data.status" class="cg-node-status" :style="{ color: standingColor(data.status) }">{{ standingLabel(data.status) }}</span>
           </div>
         </div>
       </template>
@@ -360,7 +362,7 @@ function onNodeClick({ node }: { node: Node<NodeData> }) {
           <div class="cg-node-label">{{ data.label }}</div>
           <div class="cg-node-meta">
             <span v-if="data.dateLabel" class="cg-node-date">{{ data.dateLabel }}</span>
-            <span v-if="data.status" class="cg-node-status" :style="{ color: circularStatusColor(data.status) }">{{ data.status }}</span>
+            <span v-if="data.status" class="cg-node-status" :style="{ color: standingColor(data.status) }">{{ standingLabel(data.status) }}</span>
           </div>
         </div>
       </template>

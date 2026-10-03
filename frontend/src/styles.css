@@ -1,8 +1,14 @@
 :root {
   color-scheme: light;
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+  /* Three faces, one job each (docs/REDESIGN_PLAN.md FN1): Plex Sans for the interface,
+     Source Serif for what SBP wrote — titles and letter text — and Plex Mono for
+     references and counts, which are identifiers and scan better at a fixed pitch. */
+  --sbp-font-sans:
+    'IBM Plex Sans', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
+  --sbp-font-serif: 'Source Serif 4 Variable', 'Source Serif 4', Georgia, 'Times New Roman', serif;
+  --sbp-font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--sbp-font-sans);
   --sbp-green: #156f52;
   --sbp-green-strong: #0d4f3a;
   /* The same accent, but safe as *text*. --sbp-green is tuned for fills, borders and
@@ -10,12 +16,34 @@
      dark surface lands around 2.7:1, under WCAG AA. Use this for anything the user reads.  */
   --sbp-green-text: #156f52;
   --sbp-gold: #b88918;
-  --sbp-bg: #f7f8f6;
+  /* Gold as text. --sbp-gold is a fill: ~2.8:1 on white. Gold means "something changed",
+     so it is the colour of every amendment — and those labels have to be readable. */
+  --sbp-gold-text: #765709;
+  --sbp-bg: #f3f5f2;
   --sbp-surface: #ffffff;
-  --sbp-border: #dfe5df;
-  --sbp-text: #14211b;
-  --sbp-muted: #66736d;
-  --sbp-subtle: #eef2ed;
+  --sbp-border: #dce2dd;
+  --sbp-text: #15201b;
+  --sbp-muted: #5d6a64;
+  --sbp-subtle: #eef1ed;
+
+  /* Standing (FN4): one chip per state, the same everywhere a circular's status shows.
+     Each pair clears 6:1; they also differ in lightness, so they survive greyscale. */
+  --sbp-standing-in-force-bg: #e5f0ea;
+  --sbp-standing-in-force-fg: #0f5a42;
+  --sbp-standing-amended-bg: #f6eed8;
+  --sbp-standing-amended-fg: #765709;
+  --sbp-standing-superseded-bg: #eceeec;
+  --sbp-standing-superseded-fg: #4f5854;
+  --sbp-standing-cancelled-bg: #f7e6e4;
+  --sbp-standing-cancelled-fg: #9e2b25;
+
+  /* Relationship verbs (FN5), matched to the standing they produce: what amends is gold
+     like what is amended, what supersedes is grey like what is superseded. */
+  --sbp-rel-amends: var(--sbp-gold-text);
+  --sbp-rel-adds-to: var(--sbp-green-text);
+  --sbp-rel-clarifies: #3e5a73;
+  --sbp-rel-supersedes: #4f5854;
+  --sbp-rel-cancels: #9e2b25;
   --sbp-green-rgb: 21, 111, 82;
   --sbp-gold-rgb: 184, 137, 24;
 
@@ -38,12 +66,16 @@
      step for the same kind of text.
      Floors, not suggestions: at 10.24 / 11.5 / 12.5 / 13.8px about 70% of the
      Circulars screen was 12.5px or under and a circular's letter was set at
-     13.8px — too small for a product whose job is reading regulation. */
-  --sbp-fs-eyebrow: 0.6875rem; /* 11px — uppercase section labels, badges */
-  --sbp-fs-meta: 0.75rem;      /* 12px — counts, dates, snippets, secondary meta */
-  --sbp-fs-sm: 0.8125rem;      /* 13px — list rows, chips, dense controls */
+     13.8px — too small for a product whose job is reading regulation. Nothing in
+     running UI goes under 12px (FN2). */
+  --sbp-fs-eyebrow: 0.75rem;   /* 12px — uppercase section labels, badges */
+  --sbp-fs-meta: 0.8125rem;    /* 13px — counts, dates, snippets, secondary meta */
+  --sbp-fs-sm: 0.875rem;       /* 14px — list rows, chips, dense controls */
   --sbp-fs-body: 0.9375rem;    /* 15px — running prose, chat messages */
-  --sbp-fs-title: 1.125rem;    /* 18px — pane / document titles */
+  --sbp-fs-title: 1.125rem;    /* 18px — pane titles */
+  --sbp-fs-reading: 1.125rem;  /* 18px — document text, in the serif */
+  --sbp-fs-heading: 1.5rem;    /* 24px — document titles */
+  --sbp-fs-display: 2.125rem;  /* 34px — page titles */
 
   /* One height for every interactive control, so a search field, a Select and
      an icon button sitting in the same bar line up. */
@@ -87,13 +119,25 @@
 
 :root.sbpeye-dark {
   color-scheme: dark;
-  --sbp-bg: #111714;
-  --sbp-surface: #18211d;
-  --sbp-border: #2d3a35;
-  --sbp-text: #edf5f0;
-  --sbp-muted: #a8b7af;
-  --sbp-subtle: #202b26;
-  --sbp-green-text: #4fae87;
+  --sbp-bg: #0e1411;
+  --sbp-surface: #141c18;
+  --sbp-border: #26322c;
+  --sbp-text: #e6eee9;
+  --sbp-muted: #93a39b;
+  --sbp-subtle: #1a241f;
+  --sbp-green-text: #6cc59f;
+  --sbp-gold-text: #e8bf63;
+  --sbp-standing-in-force-bg: #183528;
+  --sbp-standing-in-force-fg: #7fd0ac;
+  --sbp-standing-amended-bg: #3a2f12;
+  --sbp-standing-amended-fg: #e8bf63;
+  --sbp-standing-superseded-bg: #232c28;
+  --sbp-standing-superseded-fg: #b4c0ba;
+  --sbp-standing-cancelled-bg: #3d1f1c;
+  --sbp-standing-cancelled-fg: #f2a39b;
+  --sbp-rel-clarifies: #9bb8d1;
+  --sbp-rel-supersedes: #b4c0ba;
+  --sbp-rel-cancels: #f2a39b;
   /* Lightened so status text clears AA on the dark surfaces. */
   --sbp-success: #56c48c;
   --sbp-warning: #e0a336;
@@ -112,9 +156,8 @@ body {
   min-width: 320px;
   min-height: 100vh;
   color: var(--sbp-text);
-  background:
-    linear-gradient(180deg, rgba(21, 111, 82, 0.06), transparent 18rem),
-    var(--sbp-bg);
+  /* Flat ground (FN3). The green wash that used to tint the top 18rem was decoration. */
+  background: var(--sbp-bg);
 }
 
 a {
@@ -462,8 +505,8 @@ a {
   place-items: center;
   border-radius: var(--sbp-radius);
   color: #fff;
-  background: linear-gradient(135deg, var(--sbp-green), var(--sbp-gold));
-  font-weight: 800;
+  background: var(--sbp-green);
+  font-weight: 700;
   font-size: var(--sbp-fs-sm);
 }
 
@@ -656,9 +699,11 @@ a {
 .page-heading h1 {
   margin: 0;
   color: var(--sbp-text);
-  font-size: clamp(1.25rem, 1.8vw, 1.65rem);
+  font-family: var(--sbp-font-serif);
+  font-size: clamp(1.5rem, 2.2vw, var(--sbp-fs-display));
+  font-weight: 600;
   line-height: 1.15;
-  letter-spacing: 0;
+  letter-spacing: -0.01em;
 }
 
 .filter-grid,
@@ -760,7 +805,7 @@ a {
 .sbp-source-content {
   min-width: min(760px, 100%);
   padding: clamp(1rem, 2.4vw, 1.75rem);
-  color: #172033;
+  color: var(--sbp-text);
   font-size: var(--sbp-fs-title);
 
   line-height: 1.55;
@@ -2268,7 +2313,7 @@ a.context-chip:hover {
 .workspace-tab-label {
   min-width: 0;
   overflow: hidden;
-  font-weight: 650;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2306,7 +2351,7 @@ a.context-chip:hover {
   padding-inline: 0.45rem;
   color: var(--sbp-muted);
   font-size: var(--sbp-fs-meta);
-  font-weight: 650;
+  font-weight: 600;
   white-space: nowrap;
 }
 
@@ -2609,7 +2654,9 @@ a.context-chip:hover {
 
 .results-count strong {
   color: var(--sbp-green-text);
-  font-size: var(--sbp-fs-title);
+  font-family: var(--sbp-font-mono);
+  font-size: var(--sbp-fs-body);
+  font-weight: 600;
 }
 
 .results-count span,
@@ -2777,6 +2824,27 @@ a.context-chip:hover {
 
 /* Reference + date is the row's sub-line, the same role .sbp-row-sub plays in
    the Laws tree and the Chat session list — quiet grey, not an accent. */
+/* References and counts set in mono (FN6): "No. 03 of 2022" is an identifier, and a fixed
+   pitch makes a column of them scan as one. Mono runs wide, so it sits a step smaller
+   than the sans around it to keep the same optical size. Not in the results rail: at
+   ~300px, mono cut the reference off before its number. There the sans keeps tabular
+   figures instead, until SR1 widens the list. */
+.detail-eyebrow,
+.relationship-ref-pill {
+  font-family: var(--sbp-font-mono);
+}
+
+.result-reference {
+  font-variant-numeric: tabular-nums;
+}
+
+.detail-eyebrow {
+  font-size: var(--sbp-fs-eyebrow);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
 .result-reference {
   min-width: 0;
   overflow: hidden;
@@ -2904,6 +2972,8 @@ a.context-chip:hover {
 
 .detail-main > .source-section {
   border-bottom: 0;
+  /* Tighter than other detail sections: the letter's paper frame is margin enough. */
+  padding: 0.5rem 0.625rem;
 }
 
 .detail-source-empty {
@@ -3009,10 +3079,11 @@ a.context-chip:hover {
 
 .detail-document-header h1 {
   margin: 0;
-  font-family: inherit;
-  font-size: clamp(1.1rem, 1.4vw, 1.4rem);
-  font-weight: 650;
-  line-height: 1.2;
+  font-family: var(--sbp-font-serif);
+  font-size: clamp(1.25rem, 1.7vw, var(--sbp-fs-heading));
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
 }
 
 .status-chip {
@@ -3023,48 +3094,45 @@ a.context-chip:hover {
   border-radius: var(--sbp-radius-pill);
   font-size: var(--sbp-fs-eyebrow);
   font-weight: 600;
-  text-transform: capitalize;
-  border: 1px solid var(--sbp-border);
+  border: 1px solid transparent;
   background: var(--sbp-subtle);
   color: var(--sbp-text);
+  white-space: nowrap;
 }
 
 .status-chip .status-dot {
   width: 0.42rem;
   height: 0.42rem;
   border-radius: var(--sbp-radius-pill);
-  background: var(--sbp-muted);
+  background: currentColor;
   flex: 0 0 auto;
 }
 
-.status-chip.status-success {
-  color: var(--sbp-green-text);
-  border-color: color-mix(in srgb, var(--sbp-green) 32%, var(--sbp-border));
-  background: color-mix(in srgb, var(--sbp-green) 10%, var(--sbp-surface));
+/* The four standings (lib/circularStatus.ts). Fill and text are a fixed pair per theme
+   rather than mixes of the surface, so every chip measures the same wherever it sits. */
+.status-chip.status-in-force {
+  color: var(--sbp-standing-in-force-fg);
+  background: var(--sbp-standing-in-force-bg);
 }
 
-.status-chip.status-success .status-dot {
-  background: var(--sbp-green);
+.status-chip.status-amended {
+  color: var(--sbp-standing-amended-fg);
+  background: var(--sbp-standing-amended-bg);
 }
 
-.status-chip.status-warn {
-  color: color-mix(in srgb, var(--sbp-gold) 70%, var(--sbp-text));
-  border-color: color-mix(in srgb, var(--sbp-gold) 34%, var(--sbp-border));
-  background: color-mix(in srgb, var(--sbp-gold) 12%, var(--sbp-surface));
+.status-chip.status-superseded {
+  color: var(--sbp-standing-superseded-fg);
+  background: var(--sbp-standing-superseded-bg);
 }
 
-.status-chip.status-warn .status-dot {
-  background: var(--sbp-gold);
+.status-chip.status-cancelled {
+  color: var(--sbp-standing-cancelled-fg);
+  background: var(--sbp-standing-cancelled-bg);
 }
 
-.status-chip.status-danger {
-  color: var(--sbp-danger);
-  border-color: color-mix(in srgb, var(--sbp-danger) 34%, var(--sbp-border));
-  background: color-mix(in srgb, var(--sbp-danger) 10%, var(--sbp-surface));
-}
-
-.status-chip.status-danger .status-dot {
-  background: var(--sbp-danger);
+.status-chip.status-unknown {
+  color: var(--sbp-muted);
+  border-color: var(--sbp-border);
 }
 
 .detail-actions-sep {
@@ -3242,7 +3310,12 @@ a.context-chip:hover {
   gap: 0.28rem;
 }
 
+/* Coloured by verb (FN5), not by direction: "Amends" and "Amended by" are the same
+   relationship read from either end, so both are gold. --rel is the verb's text colour;
+   the chip tints it and the count inverts it, which clears AA in both themes for every
+   verb because each --sbp-rel-* token is itself a text colour. */
 .relationship-group-chip {
+  --rel: var(--sbp-green-text);
   display: inline-flex;
   align-items: center;
   gap: 0.3rem;
@@ -3252,10 +3325,21 @@ a.context-chip:hover {
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--sbp-green-text);
-  background: color-mix(in srgb, var(--sbp-green) 14%, var(--sbp-surface));
-  border: 1px solid color-mix(in srgb, var(--sbp-green) 30%, transparent);
+  color: var(--rel);
+  background: color-mix(in srgb, var(--rel) 12%, var(--sbp-surface));
+  border: 1px solid color-mix(in srgb, var(--rel) 28%, transparent);
 }
+
+/* :where() keeps this at one class of weight, so a verb below always outranks direction. */
+:where(.relationship-group.incoming) .relationship-group-chip {
+  --rel: var(--sbp-gold-text);
+}
+
+.relationship-group-chip[data-rel='amends'] { --rel: var(--sbp-rel-amends); }
+.relationship-group-chip[data-rel='adds_to'] { --rel: var(--sbp-rel-adds-to); }
+.relationship-group-chip[data-rel='clarifies'] { --rel: var(--sbp-rel-clarifies); }
+.relationship-group-chip[data-rel='supersedes'] { --rel: var(--sbp-rel-supersedes); }
+.relationship-group-chip[data-rel='cancels'] { --rel: var(--sbp-rel-cancels); }
 
 .relationship-group-count {
   display: inline-flex;
@@ -3264,27 +3348,14 @@ a.context-chip:hover {
   min-width: 1.1rem;
   padding: 0 0.2rem;
   border-radius: var(--sbp-radius-pill);
+  font-family: var(--sbp-font-mono);
   font-size: var(--sbp-fs-eyebrow);
-  /* Surface-on-text-green inverts cleanly per theme: white on #156f52 in light,
-     near-black on #4fae87 in dark. Mixing toward --sbp-text instead landed on a
-     mid green in dark that the dark surface colour read at 2.9:1. */
   color: var(--sbp-surface);
-  background: var(--sbp-green-text);
-}
-
-.relationship-group.incoming .relationship-group-chip {
-  /* Raw --sbp-gold is a fill colour: ~2.8:1 as text in light, 4.4:1 in dark. */
-  color: color-mix(in srgb, var(--sbp-gold) 70%, var(--sbp-text));
-  background: color-mix(in srgb, var(--sbp-gold) 12%, var(--sbp-surface));
-  border-color: color-mix(in srgb, var(--sbp-gold) 30%, transparent);
-}
-
-.relationship-group.incoming .relationship-group-count {
-  background: color-mix(in srgb, var(--sbp-gold) 75%, var(--sbp-text));
+  background: var(--rel);
 }
 
 .relationship-ref-pill {
-  font-size: var(--sbp-fs-meta);
+  font-size: var(--sbp-fs-eyebrow);
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s;
 }
@@ -3375,15 +3446,18 @@ a.context-chip:hover {
   box-shadow: var(--sbp-shadow-sm);
 }
 
+/* What SBP wrote is set as reading text (FN7): the serif at reading size, with the
+   measure capped near 68 characters — 60rem of 15px sans ran past 110. */
 .source-section .sbp-source-content {
   width: 100%;
   min-width: 0;
-  max-width: 60rem;
+  max-width: 46rem;
   margin-inline: auto;
-  padding: clamp(1rem, 2.5vw, 2rem);
-  font-size: var(--sbp-fs-body);
+  padding: clamp(0.875rem, 1.4vw, 1.25rem) clamp(1rem, 1.7vw, 1.5rem);
+  font-family: var(--sbp-font-serif);
+  font-size: var(--sbp-fs-reading);
   font-weight: 400;
-  line-height: 1.6;
+  line-height: 1.7;
   overflow-wrap: normal;
 }
 
@@ -4328,7 +4402,7 @@ a.context-chip:hover {
   }
 
   .detail-document-header h1 {
-    font-size: 1.05rem;
+    font-size: 1.25rem;
   }
 
   .detail-meta-actions {

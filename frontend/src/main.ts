@@ -8,6 +8,18 @@ import { definePreset } from '@primeuix/themes'
 import router from './router'
 import App from './App.vue'
 import 'primeicons/primeicons.css'
+// Self-hosted faces (docs/REDESIGN_PLAN.md FN1). Bundled, the woff2 files are content-hashed
+// into /spa/assets and cached for a year, and first paint no longer waits on a third-party
+// origin (PERFORMANCE_PLAN.md P12). Latin only for the static faces; the variable serif's
+// sheet declares every subset under unicode-range, so browsers fetch only the Latin file.
+import '@fontsource/ibm-plex-sans/latin-400.css'
+import '@fontsource/ibm-plex-sans/latin-500.css'
+import '@fontsource/ibm-plex-sans/latin-600.css'
+import '@fontsource/ibm-plex-sans/latin-700.css'
+import '@fontsource/ibm-plex-mono/latin-400.css'
+import '@fontsource/ibm-plex-mono/latin-500.css'
+import '@fontsource-variable/source-serif-4/opsz.css'
+import '@fontsource-variable/source-serif-4/opsz-italic.css'
 import './styles.css'
 import './premium.css'
 import './views/admin/adminTab.css'
@@ -31,6 +43,25 @@ const AMBER = {
 }
 
 /*
+ * Info severity, in the slate of the "Clarifies" verb (docs/REDESIGN_PLAN.md FN3) rather
+ * than Aura's stock blue, which was off-palette and read 4.2:1 as dark-theme message text.
+ * Two ramps because Aura reads them oppositely: Message/Toast set `blue.500` as *text* on
+ * a dark tint (so 500 must be light), Button/Badge set white text on `sky.500` in light
+ * (so 500 must be dark). Each clears AA where Aura uses it.
+ */
+const BLUE = {
+  50: '#eef3f8', 100: '#dce6f0', 200: '#bccfe0', 300: '#a9c2d8',
+  400: '#96b5d0', 500: '#82a6c6', 600: '#3e5a73', 700: '#344c62',
+  800: '#2b3f51', 900: '#233341', 950: '#15202a',
+}
+
+const SKY = {
+  50: '#eef3f8', 100: '#dde7f1', 200: '#c3d5e5', 300: '#a3bed6',
+  400: '#8aabc9', 500: '#3e5a73', 600: '#344c62', 700: '#2b3f51',
+  800: '#233341', 900: '#1c2934', 950: '#111b23',
+}
+
+/*
  * The neutral ramp every PrimeVue surface, border, field and muted text is drawn
  * from. Aura's stock one is slate in light and zinc in dark, so a Dialog, Card,
  * DataTable or input rendered #18181b inside a pane painted --sbp-surface
@@ -42,17 +73,17 @@ const AMBER = {
  */
 const SURFACE = {
   0: '#ffffff',
-  50: '#f7f8f6',
-  100: '#eef2ed',
-  200: '#dfe5df',
-  300: '#c6d0c9',
-  400: '#a8b7af',
-  500: '#66736d',
-  600: '#4d5e56',
-  700: '#2d3a35',
-  800: '#202b26',
-  900: '#18211d',
-  950: '#111714',
+  50: '#f3f5f2',
+  100: '#eef1ed',
+  200: '#dce2dd',
+  300: '#c3cdc7',
+  400: '#93a39b',
+  500: '#5d6a64',
+  600: '#46554e',
+  700: '#26322c',
+  800: '#1a241f',
+  900: '#141c18',
+  950: '#0e1411',
 }
 
 const SBPEyePreset = definePreset(Aura, {
@@ -67,7 +98,7 @@ const SBPEyePreset = definePreset(Aura, {
     },
     // The severity ramps. Aura's stock red/green/amber are a different family
     // from the --sbp-success/-warning/-danger tokens the hand-written rules use,
-    // so a PrimeVue danger button sat next to a .status-chip.status-danger in
+    // so a PrimeVue danger button sat next to a .status-chip.status-cancelled in
     // two different reds. Each ramp is anchored so that step 600 is the light
     // token and step 400 is the dark one — the steps Aura picks per scheme.
     red: {
@@ -82,10 +113,12 @@ const SBPEyePreset = definePreset(Aura, {
     },
     // Aura's warn severity never reads `amber`: Message and Toast draw on
     // `yellow`, Tag, Button and Badge on `orange`. Both point at the amber ramp,
-    // or a warn Message renders stock #eab308 beside a .status-chip.status-warn.
+    // or a warn Message renders stock #eab308 beside a .status-chip.status-amended.
     amber: AMBER,
     yellow: AMBER,
     orange: AMBER,
+    blue: BLUE,
+    sky: SKY,
   },
   semantic: {
     primary: {

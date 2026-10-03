@@ -1,29 +1,39 @@
 /*
- * One reading of a circular's status for every place that colours it. The results
- * list, the detail header and the relationship graph each kept their own copy, and
- * they disagreed: "amended" was a blue Tag in the list, an unstyled grey chip in
- * the header and gold in the graph.
+ * One reading of a circular's status for every place that shows it — the results list,
+ * the detail header, the relationship graph — so a status looks and reads the same
+ * everywhere (docs/REDESIGN_PLAN.md FN4). The three used to keep their own copies, and
+ * "amended" came out blue in one, grey in another and gold in the third.
  *
- * Amended sits with superseded as a caution — the text in front of the reader is
- * not the whole of what is in force — which is the gold the graph already used.
+ * Four states. Gold is reserved for "something changed", so amended is gold and
+ * superseded is grey: the text in front of an amended reader still partly applies, a
+ * superseded one is history.
  */
-export type CircularStatusTone = 'success' | 'warn' | 'danger' | 'neutral'
+export type Standing = 'in-force' | 'amended' | 'superseded' | 'cancelled' | 'unknown'
 
-export function circularStatusTone(status?: string | null): CircularStatusTone {
+export function circularStanding(status?: string | null): Standing {
   const value = (status || '').toLowerCase()
-  if (value.includes('active') || value.includes('indexed')) return 'success'
-  if (value.includes('superseded') || value.includes('replaced') || value.includes('amended')) return 'warn'
-  if (value.includes('withdrawn') || value.includes('cancel')) return 'danger'
-  return 'neutral'
+  if (value.includes('active') || value.includes('indexed')) return 'in-force'
+  if (value.includes('amended')) return 'amended'
+  if (value.includes('superseded') || value.includes('replaced')) return 'superseded'
+  if (value.includes('withdrawn') || value.includes('cancel')) return 'cancelled'
+  return 'unknown'
 }
 
-const TONE_COLOR: Record<CircularStatusTone, string> = {
-  success: 'var(--sbp-success)',
-  warn: 'var(--sbp-gold)',
-  danger: 'var(--sbp-danger)',
-  neutral: 'var(--sbp-muted)',
+const LABELS: Record<Exclude<Standing, 'unknown'>, string> = {
+  'in-force': 'In force',
+  amended: 'Amended',
+  superseded: 'Superseded',
+  cancelled: 'Cancelled',
 }
 
-export function circularStatusColor(status?: string | null): string {
-  return TONE_COLOR[circularStatusTone(status)]
+/** What a person reads: "In force", not the stored "active". */
+export function standingLabel(status?: string | null): string {
+  const standing = circularStanding(status)
+  return standing === 'unknown' ? (status || '') : LABELS[standing]
+}
+
+/** The state's text colour, for places that colour a word rather than draw a chip. */
+export function standingColor(status?: string | null): string {
+  const standing = circularStanding(status)
+  return standing === 'unknown' ? 'var(--sbp-muted)' : `var(--sbp-standing-${standing}-fg)`
 }

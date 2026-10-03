@@ -8,11 +8,11 @@ an answer streams.
 Fifteen items, measured rather than guessed, ordered by what a user actually feels per unit of
 work. They are deliberately independent: each can land, ship and be verified on its own.
 
-**Status:** everything except P10, P12 and the deferred P3b. Circular search **132 → 19 ms**, law
+**Status:** everything except P10 and the deferred P3b. Circular search **132 → 19 ms**, law
 search **98 → 28 ms**, the landing route ships 184 KB instead of 804 KB over two round trips
 instead of four, the laws list went from 273 queries to 7, a streamed answer drops **4 frames
 instead of 130**, and the server no longer serializes itself under concurrent load. What is left
-is P10 and P12, both small.
+is P10, which is small.
 
 ---
 
@@ -32,7 +32,7 @@ is P10 and P12, both small.
 | **P9** | Chat re-renders the thread on every token | `ChatView.vue:943` | **130 → 4 dropped frames** | M | ☑ landed |
 | **P10** | `/api/circulars/{id}` N+1 + blob reads | `main.py:1426` | 102 queries → 2 | S | ☐ |
 | **P11** | Markdown re-parsed on every render | `SummarySection.vue:41` | **804 → 737 KB, 14 → 13 requests** | S | ☑ landed |
-| **P12** | Google Fonts blocks first render | `index.html` | one cross-origin RTT | XS | ☐ |
+| **P12** | Google Fonts blocks first render | `index.html` | one cross-origin RTT | XS | ☑ landed (via `REDESIGN_PLAN.md` FN1) |
 | **P13** | `_scan_documents` previews whole attachments | `search.py:552` | **24.2 ms → 19.4 ms** | S | ☑ landed |
 | **P14** | Law search is 5× slower than circular search | `search.py:552` | **97.7 ms → 28.0 ms** | S | ☑ landed |
 
@@ -40,7 +40,7 @@ is P10 and P12, both small.
 (the search story), P5, then P13 + P14 (one defect in two places, so one fix), then the frontend
 set — P11, then P8 and P9, the two real refactors.
 
-Remaining: **P10** and **P12**, both small and independent. **P3b** is deferred rather than
+Remaining: **P10**, small and independent. P12 landed with the redesign's font change. **P3b** is deferred rather than
 pending — it needs a re-index of a 330 MB store and nothing is blocked on it.
 
 ---
@@ -938,7 +938,13 @@ critical path entirely and is fetched when a detail pane opens. The remaining sh
 
 ---
 
-## 13. P12 — Google Fonts blocks first render
+## 13. P12 — Google Fonts blocks first render ☑ landed
+
+**Landed** with `REDESIGN_PLAN.md` FN1, which replaced Inter with IBM Plex Sans, IBM Plex Mono and
+Source Serif 4 and bundled them through `@fontsource`. The SPA makes no request to any `fonts.g*`
+origin; the woff2 files are hashed into `/spa/assets` under P7's cache headers. The
+server-rendered login page still uses Google Fonts, since it sits outside the bundle.
+
 
 **Symptom.** `frontend/index.html` loads Inter from `fonts.googleapis.com` with a plain
 `<link rel="stylesheet">` in `<head>`. A stylesheet in the head is render-blocking, so first

@@ -24,7 +24,8 @@ import {
   type LawSummary,
 } from '@/lib/api'
 import { useResizablePane } from '@/lib/useResizablePane'
-import { circularStatusTone } from '@/lib/circularStatus'
+import { circularStanding, standingLabel } from '@/lib/circularStatus'
+import { displayTitle } from '@/lib/displayTitle'
 import { useAiGeneration } from '@/lib/useAiGeneration'
 import { ADMIN_ONLY_EMPTY_HINT, adminOnlyHint, adminOnlyLabel } from '@/lib/adminOnly'
 import { useCurrentUser } from '@/lib/useCurrentUser'
@@ -68,7 +69,7 @@ const consolidatedVisible = ref(false)
 const graphFocusLabel = ref<string | null>(null)
 watch(graphVisible, visible => { if (visible) graphFocusLabel.value = null })
 const graphHeader = computed(
-  () => `Related — ${graphFocusLabel.value || circular.value?.reference || circular.value?.title || ''}`,
+  () => `Related — ${graphFocusLabel.value || circular.value?.reference || displayTitle(circular.value?.title) || ''}`,
 )
 const detailTab = ref<'document' | 'details'>('document')
 const detailRail = useResizablePane('sbp:detailRailWidth', 336, 240, 480, { reverse: true })
@@ -137,7 +138,7 @@ function buildGroups(relations: CircularRelationship[], direction: 'outgoing' | 
     const target = relationTarget(relation, direction)
     group.items.push({
       id: target?.id ?? null,
-      label: target?.reference || target?.title || unresolvedReference(relation, direction),
+      label: target?.reference || displayTitle(target?.title) || unresolvedReference(relation, direction),
     })
   }
   return [...groups.values()]
@@ -375,15 +376,15 @@ watch(() => props.id, loadCircular)
             <span
               v-if="circular.status"
               class="status-chip"
-              :class="`status-${circularStatusTone(circular.status)}`"
+              :class="`status-${circularStanding(circular.status)}`"
             >
-              <span class="status-dot" />{{ circular.status }}
+              <span class="status-dot" />{{ standingLabel(circular.status) }}
             </span>
             <span v-for="item in circular.tags" :key="item" class="intelligence-pill tag-pill header-tag-pill">{{ item }}</span>
           </div>
           <Button icon="pi pi-times" text rounded class="detail-close" aria-label="Close circular" title="Close" @click="emit('close')" />
         </div>
-        <h1>{{ circular.title }}</h1>
+        <h1>{{ displayTitle(circular.title) }}</h1>
         <div class="detail-meta-actions">
           <div class="detail-inline-meta">
             <span v-if="circular.department"><i class="pi pi-building" /> {{ circular.department }}</span>
@@ -601,13 +602,13 @@ watch(() => props.id, loadCircular)
                 >
                   <!-- A part never appears without its container. -->
                   <span v-if="link.document.parent_title" class="regulation-crumb">
-                    {{ link.document.parent_title }}
+                    {{ displayTitle(link.document.parent_title) }}
                   </span>
                   <span class="regulation-title">
                     <span v-if="regulationPartLabel(link.document)" class="regulation-part">
                       {{ regulationPartLabel(link.document) }}
                     </span>
-                    {{ link.document.display_title }}
+                    {{ displayTitle(link.document.display_title) }}
                   </span>
                   <span class="regulation-type">{{ link.document.doc_type || 'document' }}</span>
                 </button>
@@ -657,7 +658,7 @@ watch(() => props.id, loadCircular)
       </div>
     </div>
 
-    <PdfPreviewDialog v-model:visible="pdfDialogVisible" :title="circular?.title || 'Circular'" :url="sourceUrl" />
+    <PdfPreviewDialog v-model:visible="pdfDialogVisible" :title="displayTitle(circular?.title) || 'Circular'" :url="sourceUrl" />
     <PdfPreviewDialog
       v-if="selectedAttachment"
       v-model:visible="attachmentDialogVisible"
@@ -680,7 +681,7 @@ watch(() => props.id, loadCircular)
     <Dialog
       v-if="circular"
       v-model:visible="consolidatedVisible"
-      :header="`Consolidated view — ${circular.reference || circular.title}`"
+      :header="`Consolidated view — ${circular.reference || displayTitle(circular.title)}`"
       modal
       :style="{ width: '90vw', maxWidth: '900px', height: '80vh' }"
       :content-style="{ height: 'calc(80vh - 60px)', padding: 0 }"

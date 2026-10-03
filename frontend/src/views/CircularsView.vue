@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { displayTitle } from '@/lib/displayTitle'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useConfirm } from 'primevue/useconfirm'
@@ -721,7 +722,7 @@ onBeforeUnmount(() => searchController?.abort())
               @click="openCircular(circular.id)"
             >
               <span class="result-select" @click.stop>
-                <Checkbox v-if="selectionMode" v-model="selectedIds" :value="circular.id" :input-id="`select-pinned-${circular.id}`" :aria-label="`Select ${circular.title}`" />
+                <Checkbox v-if="selectionMode" v-model="selectedIds" :value="circular.id" :input-id="`select-pinned-${circular.id}`" :aria-label="`Select ${displayTitle(circular.title)}`" />
                 <Button
                   icon="pi pi-bookmark-fill"
                   text
@@ -729,7 +730,7 @@ onBeforeUnmount(() => searchController?.abort())
                   size="small"
                   severity="secondary"
                   :disabled="workspaceSaving"
-                  :aria-label="`Unpin ${circular.title}`"
+                  :aria-label="`Unpin ${displayTitle(circular.title)}`"
                   @click="togglePinned(circular.id)"
                 />
               </span>
@@ -750,7 +751,7 @@ onBeforeUnmount(() => searchController?.abort())
             @click="openCircular(row.id)"
           >
             <span v-if="selectionMode" class="result-select" @click.stop>
-              <Checkbox v-model="selectedIds" :value="row.id" :input-id="`select-${row.id}`" :aria-label="`Select ${row.title}`" />
+              <Checkbox v-model="selectedIds" :value="row.id" :input-id="`select-${row.id}`" :aria-label="`Select ${displayTitle(row.title)}`" />
             </span>
             <CircularResultContent
               :circular="row"

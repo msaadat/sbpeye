@@ -19,7 +19,7 @@ export interface RelationGroupItem {
 export interface RelationGroup {
   key: string
   direction: 'outgoing' | 'incoming'
-  /** The raw edge type. Not rendered — parents sort on it. */
+  /** The raw edge type. Parents sort on it; the chip is coloured by it. */
   type?: string
   label: string
   items: RelationGroupItem[]
@@ -54,7 +54,7 @@ function visible(group: RelationGroup): RelationGroupItem[] {
       class="relationship-group"
       :class="{ incoming: group.direction === 'incoming' }"
     >
-      <span class="relationship-group-chip">
+      <span class="relationship-group-chip" :data-rel="group.type">
         {{ group.label }}<span class="relationship-group-count">{{ group.items.length }}</span>
       </span>
       <button

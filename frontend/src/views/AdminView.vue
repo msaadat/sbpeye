@@ -237,7 +237,7 @@ onMounted(loadCurrentUser)
 .admin-subtab.is-active {
   color: var(--sbp-green, #156f52);
   border-color: var(--sbp-green, #156f52);
-  background: var(--sbp-subtle, #eef2ed);
+  background: var(--sbp-subtle);
   font-weight: 600;
 }
 

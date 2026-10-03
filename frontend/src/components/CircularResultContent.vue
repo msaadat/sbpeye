@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import Tag from 'primevue/tag'
 import type { CircularSummary } from '@/lib/api'
-import { circularStatusTone } from '@/lib/circularStatus'
+import { circularStanding, standingLabel } from '@/lib/circularStatus'
+import { displayTitle } from '@/lib/displayTitle'
 
 withDefaults(defineProps<{
   circular: CircularSummary
@@ -24,15 +25,17 @@ function formatDate(value?: string | null): string {
 
 <template>
   <span class="result-content">
-    <strong>{{ circular.title }}</strong>
+    <strong>{{ displayTitle(circular.title) }}</strong>
     <span class="result-topline">
       <span class="result-reference">{{ circular.reference || 'No reference' }} · {{ formatDate(circular.date) }}</span>
+      <!-- No chip for "in force" in a list: it is the default, and a green chip on every
+           row of a 300px rail pushed the reference out. The detail header always shows it. -->
       <span
-        v-if="circular.status && circular.status !== 'active'"
+        v-if="circular.status && circularStanding(circular.status) !== 'in-force'"
         class="status-chip"
-        :class="`status-${circularStatusTone(circular.status)}`"
+        :class="`status-${circularStanding(circular.status)}`"
       >
-        <span class="status-dot" />{{ circular.status }}
+        <span class="status-dot" />{{ standingLabel(circular.status) }}
       </span>
     </span>
     <span v-if="showSnippet && circular.snippet" class="result-snippet" v-html="circular.snippet" />

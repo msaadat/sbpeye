@@ -605,10 +605,12 @@ input[type='file'] {
 }
 
 .version-badge {
-  font-size: 0.6875rem;
+  font-size: var(--sbp-fs-eyebrow);
   padding: 0.125rem 0.5rem;
   border-radius: 999px;
-  background: var(--p-primary-color, #2563eb);
+  /* The fill, not the primary token: dark-theme primary is the light 400 step, and
+     white on it was ~2.9:1. */
+  background: var(--sbp-green);
   color: #fff;
 }
 </style>

@@ -6,8 +6,10 @@
    ========================================================================== */
 
 /* ---- Typography ---------------------------------------------------------- */
+/* Headings are interface text unless they title something SBP wrote; those set
+   --sbp-font-serif explicitly (styles.css, "Serif on document surfaces"). */
 h1, h2, h3, h4, h5, h6 {
-  font-family: 'Inter', sans-serif;
+  font-family: inherit;
   letter-spacing: -0.012em;
 }
 
@@ -23,8 +25,10 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 /* ---- Brand mark ---------------------------------------------------------- */
+/* Solid green with a gold base bar (FN3). The old green-to-gold gradient put the white
+   "SBP" on its gold end at ~3:1. */
 .brand-mark {
-  box-shadow: 0 2px 8px rgba(var(--sbp-green-rgb), 0.28);
+  box-shadow: inset 0 -3px 0 var(--sbp-gold);
 }
 
 /* ---- Surfaces: replace glassmorphism with calm solid panels -------------- */
@@ -294,7 +298,9 @@ h1, h2, h3, h4, h5, h6 {
    borders, which are often used for layout. We only set a sane link colour and
    ensure dark-mode legibility. No borders/widths are imposed on the markup. */
 .sbp-source-content a {
-  color: var(--sbp-green-strong);
+  /* The text green, not --sbp-green-strong: the strong shade is a light-theme fill and
+     read at under 2:1 on the dark letter frame. */
+  color: var(--sbp-green-text);
   text-decoration: underline;
   text-underline-offset: 0.15em;
 }

@@ -194,35 +194,37 @@ _LOGIN_PAGE = """<!doctype html>
 <title>Sign in - SBPEye</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600;700&family=Source+Serif+4:opsz,wght@8..60,600&display=swap" rel="stylesheet">
 <script>
   // The theme the SPA stored, if one was chosen there; otherwise the OS decides, which
   // is what the SPA does too. Set before first paint so the page never flashes.
   try{const t=localStorage.getItem('sbpeye-theme');if(t)document.documentElement.dataset.theme=t}catch(_){}
 </script>
 <style>
-  /* The SPA's palette (frontend/src/styles.css --sbp-*), copied: this page sits outside
-     the bundle on purpose, so it cannot import it. */
+  /* The SPA's palette and faces (frontend/src/styles.css --sbp-*), copied: this page sits
+     outside the bundle on purpose, so it can import neither the tokens nor the self-hosted
+     fonts, and loads the two faces it needs from Google instead. */
   :root { color-scheme: light;
-    --bg:#f7f8f6; --card:#fff; --fg:#14211b; --muted:#66736d; --line:#dfe5df;
+    --bg:#f3f5f2; --card:#fff; --fg:#15201b; --muted:#5d6a64; --line:#dce2dd;
     --green:#156f52; --gold:#b88918; --focus:#156f52; --err:#b3261e; }
   :root[data-theme=dark] { color-scheme: dark;
-    --bg:#111714; --card:#18211d; --fg:#edf5f0; --muted:#a8b7af; --line:#2d3a35;
-    --focus:#4fae87; --err:#f08a80; }
+    --bg:#0e1411; --card:#141c18; --fg:#e6eee9; --muted:#93a39b; --line:#26322c;
+    --focus:#6cc59f; --err:#f2a39b; }
   @media (prefers-color-scheme: dark) { :root:not([data-theme=light]) { color-scheme: dark;
-    --bg:#111714; --card:#18211d; --fg:#edf5f0; --muted:#a8b7af; --line:#2d3a35;
-    --focus:#4fae87; --err:#f08a80; } }
+    --bg:#0e1411; --card:#141c18; --fg:#e6eee9; --muted:#93a39b; --line:#26322c;
+    --focus:#6cc59f; --err:#f2a39b; } }
   * { box-sizing:border-box }
   body { margin:0; min-height:100vh; display:grid; place-items:center;
-    background:linear-gradient(180deg, rgba(21,111,82,.06), transparent 18rem), var(--bg);
-    color:var(--fg); font:15px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
+    background:var(--bg);
+    color:var(--fg); font:15px/1.5 'IBM Plex Sans',ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
   form { background:var(--card); padding:2rem; border-radius:.85rem; border:1px solid var(--line);
     width:min(92vw,23rem); box-shadow:0 1px 2px rgba(20,33,27,.04), 0 10px 28px -16px rgba(20,33,27,.22) }
   .brand { display:flex; align-items:center; gap:.65rem; margin:0 0 .25rem }
   .mark { display:inline-grid; place-items:center; width:2rem; height:2rem; border-radius:.5rem;
-    color:#fff; background:linear-gradient(135deg,var(--green),var(--gold)); font-weight:800;
-    font-size:.8125rem; box-shadow:0 2px 8px rgba(21,111,82,.28) }
-  h1 { margin:0; font-size:1.25rem; letter-spacing:-.012em }
+    color:#fff; background:var(--green); font-weight:700;
+    font-size:.8125rem; box-shadow:inset 0 -3px 0 var(--gold) }
+  h1 { margin:0; font-family:'Source Serif 4',Georgia,serif; font-size:1.375rem; font-weight:600;
+    letter-spacing:-.01em }
   p.sub { margin:0 0 1.5rem; color:var(--muted); font-size:.875rem }
   label { display:block; margin-bottom:1rem; font-size:.8125rem; color:var(--muted) }
   input { width:100%; margin-top:.375rem; padding:.625rem .75rem; font:inherit; font-size:.9375rem;

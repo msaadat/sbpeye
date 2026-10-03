@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { displayTitle } from '@/lib/displayTitle'
 import { computed, defineAsyncComponent, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useToast } from 'primevue/usetoast'
@@ -687,7 +688,7 @@ function buildLawGroups(
     }
     group.items.push({
       id: edge.document?.id ?? null,
-      label: edge.document?.display_title || edge.target_reference || 'Unresolved',
+      label: displayTitle(edge.document?.display_title) || edge.target_reference || 'Unresolved',
       crumb: edge.document?.part_label,
     })
   }
@@ -740,7 +741,7 @@ const citedByGroups = computed<RelationGroup[]>(() => {
     group.items.push({
       id: link.circular.id,
       label: link.circular.reference || link.circular.title,
-      crumb: link.circular.title,
+      crumb: displayTitle(link.circular.title),
     })
   }
   const rank = (type?: string) =>
@@ -1149,7 +1150,7 @@ onMounted(() => {
             @click="select(group.self)"
           >
             <span class="node-body">
-              <span class="sbp-row-title">{{ group.self.display_title }}</span>
+              <span class="sbp-row-title">{{ displayTitle(group.self.display_title) }}</span>
             </span>
           </button>
 
@@ -1161,7 +1162,7 @@ onMounted(() => {
               @click="openGroup(group)"
             >
               <span class="node-body">
-                <span class="sbp-row-title">{{ group.containerTitle }}</span>
+                <span class="sbp-row-title">{{ displayTitle(group.containerTitle) }}</span>
                 <span class="sbp-row-sub">
                   {{ group.hits.length }} matching part{{ group.hits.length === 1 ? '' : 's' }}
                   <template v-if="group.self"> · and the document itself</template>
@@ -1181,7 +1182,7 @@ onMounted(() => {
                 <span class="node-body">
                   <span class="sbp-row-title">
                     <span v-if="partLabelOf(hit)" class="node-part">{{ partLabelOf(hit) }}</span>
-                    {{ hit.display_title }}
+                    {{ displayTitle(hit.display_title) }}
                   </span>
                 </span>
               </button>
@@ -1221,7 +1222,7 @@ onMounted(() => {
                 />
               </span>
               <span class="node-body">
-                <span class="sbp-row-title">{{ entry.label }}</span>
+                <span class="sbp-row-title">{{ displayTitle(entry.label) }}</span>
                 <span class="sbp-row-sub">
                   {{ [`${entry.items.length} documents`, seriesTypes(entry.items)].filter(Boolean).join(' · ') }}
                 </span>
@@ -1245,7 +1246,7 @@ onMounted(() => {
                     />
                   </span>
                   <span class="node-body">
-                    <span class="sbp-row-title">{{ doc.display_title }}</span>
+                    <span class="sbp-row-title">{{ displayTitle(doc.display_title) }}</span>
                     <span class="sbp-row-sub">{{ subLine(doc) }}</span>
                     <span
                       v-if="holdingsById.get(doc.id) && holdingsById.get(doc.id)!.held < holdingsById.get(doc.id)!.parts"
@@ -1272,7 +1273,7 @@ onMounted(() => {
                     <span class="node-body">
                       <span class="sbp-row-title">
                         <span v-if="partLabelOf(child)" class="node-part">{{ partLabelOf(child) }}</span>
-                        {{ child.display_title }}
+                        {{ displayTitle(child.display_title) }}
                       </span>
                       <span v-if="!child.current_version?.has_file" class="sbp-row-sub">not held</span>
                     </span>
@@ -1298,7 +1299,7 @@ onMounted(() => {
                 />
               </span>
               <span class="node-body">
-                <span class="sbp-row-title">{{ entry.doc.display_title }}</span>
+                <span class="sbp-row-title">{{ displayTitle(entry.doc.display_title) }}</span>
                 <span class="sbp-row-sub">{{ subLine(entry.doc) }}</span>
                 <!-- Only where the collection is incomplete: a full bar says nothing. -->
                 <span
@@ -1326,7 +1327,7 @@ onMounted(() => {
                 <span class="node-body">
                   <span class="sbp-row-title">
                     <span v-if="partLabelOf(child)" class="node-part">{{ partLabelOf(child) }}</span>
-                    {{ child.display_title }}
+                    {{ displayTitle(child.display_title) }}
                   </span>
                   <!-- The container's meter says how many are missing; this says which. -->
                   <span v-if="!child.current_version?.has_file" class="sbp-row-sub">not held</span>
@@ -1371,14 +1372,14 @@ onMounted(() => {
       <template v-else-if="detail">
         <header class="reader-head sbp-pane-head">
           <div class="reader-identity">
-            <p v-if="detail.parent" class="reader-crumb">{{ detail.parent.display_title }}</p>
+            <p v-if="detail.parent" class="reader-crumb">{{ displayTitle(detail.parent.display_title) }}</p>
             <h1 class="reader-title sbp-pane-title">
               <span v-if="partLabelOf(detail)" class="reader-part">{{ partLabelOf(detail) }}</span>
-              {{ detail.display_title }}
+              {{ displayTitle(detail.display_title) }}
             </h1>
             <p class="reader-status sbp-pane-substatus">
               <span class="sbp-badge">{{ typeLabel(detail.doc_type) }}</span>
-              <span v-if="currentVersion" class="reader-force">In force</span>
+              <span v-if="currentVersion" class="status-chip status-in-force"><span class="status-dot" />In force</span>
               <span v-if="statusLine">{{ statusLine }}</span>
               <span v-for="tag in detail.tags" :key="tag" class="intelligence-pill tag-pill">{{ tag }}</span>
             </p>
@@ -1471,7 +1472,7 @@ onMounted(() => {
           :key="fileUrl"
           class="reader-frame"
           :src="pdfFrameUrl(fileUrl)"
-          :title="detail.display_title"
+          :title="displayTitle(detail.display_title)"
         />
 
         <div v-else class="reader-empty">
@@ -1633,7 +1634,7 @@ onMounted(() => {
               <ul>
                 <li v-for="sibling in seriesSiblings.items" :key="sibling.id">
                   <RouterLink :to="`/laws/${encodeURIComponent(sibling.id)}`">
-                    {{ sibling.display_title }}
+                    {{ displayTitle(sibling.display_title) }}
                   </RouterLink>
                 </li>
               </ul>
@@ -1644,7 +1645,7 @@ onMounted(() => {
               <ul v-else>
                 <li v-for="link in detail.linked_circulars.slice(0, 8)" :key="link.circular.id">
                   <RouterLink :to="`/circulars/${link.circular.id}`">
-                    {{ link.circular.reference || link.circular.title }}
+                    {{ link.circular.reference || displayTitle(link.circular.title) }}
                   </RouterLink>
                 </li>
               </ul>
@@ -1682,7 +1683,7 @@ onMounted(() => {
                     circular{{ item.circular_count === 1 ? '' : 's' }}
                   </span>
                 </span>
-                <span class="cited-title">{{ item.document.display_title }}</span>
+                <span class="cited-title">{{ displayTitle(item.document.display_title) }}</span>
                 <span class="cited-meta">{{ citedCardMeta(item) }}</span>
               </button>
             </li>
@@ -1834,11 +1835,6 @@ onMounted(() => {
   font-weight: 500;
 }
 
-.reader-force {
-  color: var(--sbp-green-text);
-  font-weight: 600;
-}
-
 /* Source left, analysis right — the same split `CircularDetailPane` uses, so the two
    readers behave identically under a drag. */
 .reader-body {
@@ -1917,10 +1913,20 @@ onMounted(() => {
 }
 
 .reader-empty h2,
+.overview-intro h1,
+.reader-title {
+  font-family: var(--sbp-font-serif);
+  letter-spacing: -0.01em;
+}
+
 .overview-intro h1 {
   margin: 0;
-  font-size: var(--sbp-fs-title);
+  font-size: var(--sbp-fs-heading);
   font-weight: 600;
+}
+
+.reader-title {
+  font-size: clamp(1.25rem, 1.7vw, var(--sbp-fs-heading));
 }
 
 .reader-empty p,
@@ -2071,7 +2077,7 @@ onMounted(() => {
 
 .edition-badge {
   margin-left: 0.35rem;
-  font-size: 0.68rem;
+  font-size: var(--sbp-fs-eyebrow);
   padding: 0.05rem 0.4rem;
   border-radius: 999px;
   border: 1px solid var(--sbp-border);

@@ -365,3 +365,11 @@ point of display and leave the stored value alone.
    so it keeps arriving. Display-only: identity and search both reparse the reference
    structurally, so the tail is ignored; it shows up only in the label. *Mirrored for now* —
    see `docs/ANSWER_QUALITY_DEFECTS.md` (D15).
+2. **Titles in capitals** — 568 of 3,788 circular and law titles arrive shouting
+   ("IMPLEMENTATION OF INTERNATIONAL FINANCIAL REPORTING STANDARD 9 (IFRS 9)"). *Normalized at
+   display* (`docs/REDESIGN_PLAN.md` FN8): `frontend/src/lib/displayTitle.ts` title-cases a title
+   only when under 15% of its letters are lowercase, keeping acronyms (vowel-less words plus a
+   list), Roman numerals, dotted abbreviations and digit codes. The stored title is untouched,
+   so search, identity and export see SBP's text. Every user-facing title goes through
+   `displayTitle()`; the admin console shows the raw title, since operators reconcile against
+   sbp.org.pk. A title SBP itself mis-cased in mixed case ("(Ifrs 9)") is left alone.

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { displayTitle } from '@/lib/displayTitle'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Button from 'primevue/button'
 import Message from 'primevue/message'
@@ -224,10 +225,10 @@ onBeforeUnmount(stopPolling)
                 class="chain-chip"
                 :class="{ current: member.id === props.circularId }"
                 role="listitem"
-                :title="member.title || undefined"
+                :title="displayTitle(member.title) || undefined"
                 @click="emit('navigate', member.id)"
               >
-                <span class="chain-chip-ref">{{ member.reference || member.title }}</span>
+                <span class="chain-chip-ref">{{ member.reference || displayTitle(member.title) }}</span>
                 <span v-if="member.date" class="chain-chip-date">{{ formatDate(member.date) }}</span>
               </button>
             </template>

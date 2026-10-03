@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { displayTitle } from '@/lib/displayTitle'
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useConfirm } from 'primevue/useconfirm'
@@ -1435,13 +1436,13 @@ onBeforeUnmount(() => {
             :key="circular.id"
             class="context-chip"
             :to="`/circulars/${encodeURIComponent(circular.id)}`"
-            :title="circular.title"
+            :title="displayTitle(circular.title)"
           >
-            <span>{{ circular.reference || circular.title }}</span>
+            <span>{{ circular.reference || displayTitle(circular.title) }}</span>
             <button
               v-if="!activeSessionIsWorkspace"
               type="button"
-              :aria-label="`Remove ${circular.title}`"
+              :aria-label="`Remove ${displayTitle(circular.title)}`"
               @click.prevent.stop="removeContext(circular.id)"
             >
               <i class="pi pi-times" />
@@ -1644,7 +1645,7 @@ onBeforeUnmount(() => {
                               class="step-hit-citation"
                               v-html="normalizeCitationTokens(hit.citation)"
                             />
-                            <span v-else class="step-hit-title">{{ hit.title }}</span>
+                            <span v-else class="step-hit-title">{{ displayTitle(hit.title) }}</span>
                             <span class="step-hit-meta">
                               <span v-if="hit.reference">{{ hit.reference }}</span>
                               <span v-if="hit.date">{{ hit.date }}</span>
